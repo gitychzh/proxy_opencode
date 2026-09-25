@@ -15,6 +15,14 @@
   stream 合成单 chunk 并标注 `synthetic_stream`，不支持 tools/思考透传
   （显式 400），CLI 失败返回 502。新增 `scripts/hermes_opencode_local.md`。
   默认 `openai` HTTP 模式不变；不含任何风控绕过/额度放大/客户端伪造。
+- `UPSTREAM_MODE=opencode-serve` 本机官方 `opencode serve` HTTP 上游模式
+  （仅 loopback、Basic auth、密码为空只允许 127.0.0.1）：chat 走
+  session→prompt→wait→message，reasoning 合入 `reasoning_content`，tool
+  parts 只读映射为 `tool_calls`（`tools_source=opencode-agent`），stream 为
+  合成单 chunk，客户端 tools/reasoning 字段显式 400，连接失败 502、超时
+  504。`/v1/models` 使用 `OPENCODE_SERVE_MODELS` 静态列表兜底。新增
+  `scripts/hermes_opencode_serve.md` 与基于本地 FastAPI fake serve 的测试。
+  免费额度/限制由官方服务端控制，不做任何 bypass。
 
 ## [0.1.0] - 2026-09-25
 

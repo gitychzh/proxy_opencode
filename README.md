@@ -30,6 +30,12 @@ pip install -e ".[test]"
 | `OPENCODE_XDG_DATA_HOME` | 空 | 可选；设置后传给子进程的 `XDG_DATA_HOME` |
 | `OPENCODE_ALLOWED_MODEL_PREFIXES` | `opencode/` | 逗号分隔的模型前缀白名单，拒绝免费池外模型 |
 | `MODELS_CACHE_TTL_S` | `300` | opencode-cli 模式下 `opencode models` 结果缓存秒数 |
+| `OPENCODE_SERVE_URL` | `http://127.0.0.1:4096` | 本机 `opencode serve` 地址（仅 `opencode-serve` 模式）；**只允许 loopback**（127.0.0.1/localhost/::1），非 loopback 启动直接报错 |
+| `OPENCODE_SERVER_USERNAME` | `opencode` | `opencode serve` Basic auth 用户名 |
+| `OPENCODE_SERVER_PASSWORD` | 空 | `opencode serve` Basic auth 密码。**为空只允许 127.0.0.1**，且务必阅读下方强警告 |
+| `OPENCODE_SERVE_MODELS` | `opencode/big-pickle` | `opencode-serve` 模式 `/v1/models` 静态列表兜底（逗号分隔） |
+| `OPENCODE_SERVE_TIMEOUT_S` | `120` | opencode-serve 普通请求超时（秒） |
+| `OPENCODE_SERVE_WAIT_TIMEOUT_S` | `300` | opencode-serve `session/{id}/wait` 超时（秒） |
 
 ### opencode-cli 上游模式（本机 / 官方 CLI / 受限）
 
@@ -43,6 +49,25 @@ pip install -e ".[test]"
 `metadata.adapter=opencode-cli` 标注。**不实现**风控绕过、额度放大、
 客户端伪造、对外分发凭证或版本检查绕过；额度与限制由官方客户端控制。
 详见 [`scripts/hermes_opencode_local.md`](scripts/hermes_opencode_local.md)。
+
+### opencode-serve 上游模式（本机 / 官方 HTTP API / 受限）
+
+仅当 `UPSTREAM_MODE=opencode-serve` 时启用：请求发往**本机回环上的官方
+`opencode serve`**（`/api` 路由，Basic auth 用户名默认 `opencode`、密码来自
+`OPENCODE_SERVER_PASSWORD`）。chat 流程：创建 session → prompt → wait →
+读取最新 assistant 消息；assistant 的 `content[]` 中 `text` 合成 OpenAI
+`content`，`reasoning` 合入 `message.reasoning_content`，`tool` 只读映射为
+`tool_calls` 并在 metadata 标注 `tools_source=opencode-agent`；stream 为合成
+单 chunk（`metadata.synthetic_stream=true`）。客户端传
+`tools`/`tool_choice`/`response_format`/`reasoning_effort` 非空直接 400。
+`/v1/models` 返回 `OPENCODE_SERVE_MODELS` 静态列表并标注
+`metadata.adapter=opencode-serve`。
+
+**强警告**：`OPENCODE_SERVER_PASSWORD` 为空时官方端无鉴权（仅有 unsecured
+warning），本网关此时只允许连 `127.0.0.1`；任何情况下都不允许指向非
+loopback 地址。连接不上返回 502、超时返回 504。**不实现**风控绕过、额度
+放大或指纹伪造；免费额度与限制完全由官方服务端控制。详见
+[`scripts/hermes_opencode_serve.md`](scripts/hermes_opencode_serve.md)。
 
 ## 运行
 

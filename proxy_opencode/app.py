@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import opencode_cli
+from . import opencode_serve
 from .config import Settings, load_settings
 from .opencode_cli import CliError, ModelsCache
 from .ratelimit import RateLimiter
@@ -83,6 +84,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     if settings.is_opencode_cli:
         app.state.cli_models_cache = opencode_cli.ModelsCache(settings)
+    app.state.serve_client: httpx.AsyncClient | None = None
+    if settings.is_opencode_serve:
+        app.state.serve_client = opencode_serve.make_client(settings)
 
     async def require_gateway_key(request: Request) -> str:
         auth = request.headers.get("authorization", "")
@@ -137,6 +141,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models(_: str = Depends(require_gateway_key)) -> Any:
+        if settings.is_opencode_serve:
+            return {
+                "object": "list",
+                "data": [
+                    {
+                        "id": m,
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "opencode-serve",
+                    }
+                    for m in settings.opencode_serve_models
+                ],
+                "metadata": {
+                    "adapter": "opencode-serve",
+                    "source": "OPENCODE_SERVE_MODELS",
+                },
+            }
         if settings.is_opencode_cli:
             cache: ModelsCache = app.state.cli_models_cache
             try:
@@ -187,6 +208,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         if settings.is_opencode_cli:
             return await _cli_chat(body, request_id, started)
+
+        if settings.is_opencode_serve:
+            return await _serve_chat(body, request_id, started)
 
         if settings.reasoning_passthrough:
             for k in _REASONING_FIELDS:
@@ -343,6 +367,147 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     }
                 ],
                 "metadata": {"adapter": "opencode-cli"},
+            },
+        )
+
+    async def _serve_chat(
+        body: dict[str, Any], request_id: str, started: float
+    ) -> Any:
+        """opencode-serve upstream: local, official `opencode serve` API."""
+        model = body.get("model") or "opencode/big-pickle"
+        stream = bool(body.get("stream"))
+
+        def _log(status: int) -> None:
+            logger.info(
+                "request",
+                extra={
+                    "request_id": request_id,
+                    "adapter": "opencode-serve",
+                    "model": model,
+                    "stream": stream,
+                    "status": status,
+                    "latency_ms": round(
+                        (time.perf_counter() - started) * 1000, 1
+                    ),
+                },
+            )
+
+        unsupported = [
+            k
+            for k in ("tools", "tool_choice", "response_format", "reasoning_effort")
+            if body.get(k)
+        ]
+        if unsupported:
+            _log(400)
+            return _openai_error(
+                400,
+                "opencode-serve adapter does not support client tool/reasoning "
+                f"controls; unsupported fields: {', '.join(unsupported)}.",
+                err_type="invalid_request_error",
+            )
+
+        if "/" not in model or not model.split("/", 1)[1]:
+            _log(400)
+            return _openai_error(
+                400,
+                f"model {model!r} must be 'provider/id' "
+                "(e.g. opencode/big-pickle).",
+                err_type="invalid_request_error",
+                code="invalid_model",
+            )
+
+        client = app.state.serve_client
+        try:
+            result = await opencode_serve.run_chat(settings, body, client)
+        except httpx.TimeoutException as exc:
+            _log(504)
+            return _openai_error(
+                504,
+                f"opencode serve request timed out: {exc}",
+                err_type="timeout_error",
+            )
+        except (httpx.ConnectError, httpx.NetworkError) as exc:
+            _log(502)
+            return _openai_error(
+                502, f"opencode serve unreachable: {exc}"
+            )
+        except CliError as exc:
+            _log(400)
+            return _openai_error(400, str(exc), err_type="invalid_request_error")
+        except opencode_serve.ServeError as exc:
+            _log(502)
+            return _openai_error(502, f"opencode serve upstream failed: {exc}")
+        _log(200)
+
+        message: dict[str, Any] = {
+            "role": "assistant",
+            "content": result.text,
+        }
+        metadata: dict[str, Any] = {
+            "adapter": "opencode-serve",
+            "session_id": result.session_id,
+        }
+        if result.reasoning:
+            message["reasoning_content"] = result.reasoning
+            metadata["has_reasoning"] = True
+        if result.tool_calls:
+            message["tool_calls"] = result.tool_calls
+            metadata["tools"] = result.tool_results
+            metadata["tools_source"] = "opencode-agent"
+
+        created = int(time.time())
+        if stream:
+            delta: dict[str, Any] = {
+                "role": "assistant",
+                "content": result.text,
+            }
+            if result.reasoning:
+                delta["reasoning_content"] = result.reasoning
+            chunk = {
+                "id": f"chatcmpl-serve-{uuid.uuid4().hex[:8]}",
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": delta,
+                        "finish_reason": "stop",
+                    }
+                ],
+                "metadata": {**metadata, "synthetic_stream": True},
+            }
+
+            async def synth() -> AsyncIterator[bytes]:
+                yield f"data: {json.dumps(chunk)}\n\n".encode()
+                yield b"data: [DONE]\n\n"
+
+            return StreamingResponse(
+                synth(),
+                status_code=200,
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "X-Opencode-Serve-Synthetic-Stream": "true",
+                },
+            )
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": f"chatcmpl-serve-{uuid.uuid4().hex[:8]}",
+                "object": "chat.completion",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": message,
+                        "finish_reason": "stop",
+                    }
+                ],
+                "metadata": metadata,
             },
         )
 
