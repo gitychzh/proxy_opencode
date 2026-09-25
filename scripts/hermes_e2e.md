@@ -67,3 +67,47 @@ hermes → 本地网关（鉴权/限流/日志）→ 上游（合法 key 正常�
 ## 5. 停止
 
 `Ctrl+C` 停止 uvicorn。本测试不修改任何远程服务的状态。
+
+## 6. 无真实上游 key 时：先用 fake upstream 验证 hermes→gateway 链路
+
+还没有可用上游 key 时，可以用 `tests/fake_upstream.py` 充当上游，先把
+hermes 到网关的链路、鉴权与流式行为验证通：
+
+```bash
+cd D:\vs_ps\p1\proxy_opencode
+
+# 终端 1：fake upstream（完全本地，无需任何真实 key）
+python tests/fake_upstream.py --port 9901
+
+# 终端 2：网关指向上面的 fake upstream（全部用 dummy key）
+export UPSTREAM_BASE_URL="http://127.0.0.1:9901"
+export UPSTREAM_API_KEY="upstream-dummy-key"
+export GATEWAY_API_KEYS="local-dev-key"
+uvicorn proxy_opencode.app:app --host 127.0.0.1 --port 8787
+
+# 终端 3（hermes 侧）：只设置两个环境变量
+export OPENAI_BASE_URL="http://127.0.0.1:8787/v1"
+export OPENAI_API_KEY="local-dev-key"     # 网关 key
+```
+
+hermes 中选择 OpenAI 兼容模型名 `fake-openai-model`（fake upstream 的
+`/v1/models` 返回的模型 id），发起一次普通对话。
+
+成功判定：
+
+- hermes 正常收到回复，内容为 `fake upstream reply`（流式时为分段增量）。
+- 网关日志出现对应请求记录（request_id / model / status / latency / usage）。
+- fake upstream 响应的 `metadata.echo` 中 `authorization_sha256_12` 对应
+  `UPSTREAM_API_KEY`（dummy）而非 hermes 持有的网关 key；hermes 全程
+  只需要也仅能使用 `OPENAI_API_KEY=local-dev-key`。
+
+失败判定：
+
+- hermes 报 401：网关 key 没配对（检查 `OPENAI_API_KEY` 与
+  `GATEWAY_API_KEYS`）。
+- 报 429：触发限流，降低频率或调大 `REQUESTS_PER_MINUTE`。
+- 报 502：fake upstream 没启动或 `UPSTREAM_BASE_URL` 指向错误。
+- 其它上游风格错误会以原始状态码透传给 hermes。
+
+验证通过后，把 `UPSTREAM_BASE_URL`/`UPSTREAM_API_KEY` 换成真实上游的
+合法凭据，hermes 侧配置不变，即可进入真实 e2e。

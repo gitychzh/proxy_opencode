@@ -60,3 +60,21 @@ uvicorn proxy_opencode.app:app --host 0.0.0.0 --port 8787
 ```bash
 pytest tests/ -v
 ```
+
+## 本地系统化冒烟
+
+无需真实上游 key，即可在本机回环上验证整条链路（fake upstream → 网关）：
+
+```bash
+# 一键脚本（Git Bash 可跑）：起 fake upstream + 网关，curl 验证
+# healthz / models / 非流式 / SSE 流式 / tools+reasoning 透传 / 401 / 429，
+# 结束后自动清理进程。全部使用 dummy key。
+bash scripts/smoke_local.sh
+
+# 等价的 pytest 集成测试（真实 uvicorn + 随机端口）：
+pytest tests/test_gateway_integration.py -v
+```
+
+fake upstream 实现见 `tests/fake_upstream.py`，也可单独作为模块被其他
+测试复用（`create_app()`），或独立运行：
+`python tests/fake_upstream.py --port 9901`。
