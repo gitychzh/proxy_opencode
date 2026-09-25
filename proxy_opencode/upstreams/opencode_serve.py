@@ -186,19 +186,31 @@ class ServeAdapter:
         )
         sid = session["data"]["id"]
         try:
-            await self._api(
-                "POST",
-                f"/api/session/{sid}/prompt",
-                json={"prompt": {"text": prompt_text}, "delivery": "steer"},
-            )
-            data = await self._wait_idle(sid)
-            result = self._extract(data, model_id)
-            if tools:
-                parsed = tools_contract.parse_tool_calls(result.text)
-                if parsed is not None:
-                    result.tool_calls = parsed
-                    # Any leftover prose stays as content; usually empty.
-                    result.text = ""
+            attempts = 2 if tools else 1
+            result = None
+            for attempt in range(attempts):
+                text = prompt_text
+                if attempt > 0:
+                    text = (
+                        "CONTRACT VIOLATION. Your previous reply was prose, not "
+                        "the required JSON. Reply NOW with exactly one JSON "
+                        'object {"tool_calls": [...]} and nothing else. No '
+                        "prose, no reasoning in the reply, no markdown."
+                    )
+                await self._api(
+                    "POST",
+                    f"/api/session/{sid}/prompt",
+                    json={"prompt": {"text": text}, "delivery": "steer"},
+                )
+                data = await self._wait_idle(sid)
+                result = self._extract(data, model_id)
+                if tools:
+                    parsed = tools_contract.parse_tool_calls(result.text)
+                    if parsed is not None:
+                        result.tool_calls = parsed
+                        result.text = ""
+                        break
+            assert result is not None
         finally:
             if self._settings.opencode_serve_ephemeral_sessions:
                 try:
