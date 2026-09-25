@@ -24,6 +24,14 @@
   `scripts/hermes_opencode_serve.md` 与基于本地 FastAPI fake serve 的测试。
   免费额度/限制由官方服务端控制，不做任何 bypass。
 
+### Fixed
+
+- opencode-serve 模式：`POST /api/session/{id}/wait` 返回 202/409/503（处理中）
+  不再直接 502，改为在 `OPENCODE_SERVE_WAIT_TIMEOUT_S` 内以 0.5s 起、指数退避
+  封顶 2s 轮询直到 2xx 再读消息；超过 deadline 返回 504（`code=wait_timeout`），
+  401/404/400 等其他错误仍立即 502。新增 fake serve「wait 两次 503 后 200」等
+  单测覆盖。
+
 ## [0.1.0] - 2026-09-25
 
 ### Added

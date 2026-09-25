@@ -431,6 +431,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return _openai_error(
                 502, f"opencode serve unreachable: {exc}"
             )
+        except opencode_serve.WaitTimeoutError as exc:
+            _log(504)
+            return _openai_error(
+                504, str(exc), err_type="timeout_error", code="wait_timeout"
+            )
         except CliError as exc:
             _log(400)
             return _openai_error(400, str(exc), err_type="invalid_request_error")

@@ -332,6 +332,117 @@ def test_load_settings_passwordless_requires_127001(monkeypatch):
     assert s.opencode_serve_models == ["opencode/big-pickle"]
 
 
+def _retry_serve(statuses: list[int]) -> FastAPI:
+    """Fake serve whose /wait returns `statuses[0]`, `statuses[1]`, ... then 200."""
+    app = FastAPI()
+    app.state.wait_calls: dict[str, int] = {}
+
+    @app.post("/api/session")
+    async def create_session(request: Request) -> dict[str, Any]:
+        body = await request.json()
+        return {"data": {"id": "sess-retry"}}
+
+    @app.post("/api/session/{sid}/prompt")
+    async def prompt(sid: str, request: Request) -> dict[str, Any]:
+        return {"data": {"admitted": True}}
+
+    @app.post("/api/session/{sid}/wait")
+    async def wait(sid: str):
+        from fastapi.responses import JSONResponse as _JR
+
+        n = app.state.wait_calls.get(sid, 0)
+        app.state.wait_calls[sid] = n + 1
+        status = statuses[n] if n < len(statuses) else 200
+        return _JR(status_code=status, content={"data": {"status": "busy"}})
+
+    @app.get("/api/session/{sid}/message")
+    async def message(sid: str) -> dict[str, Any]:
+        return {
+            "data": [
+                {
+                    "id": "msg-r1",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "retry reply"}],
+                },
+            ]
+        }
+
+    return app
+
+
+def _serve_gateway(serve_app: FastAPI, **overrides) -> tuple:
+    serve = _RunningServer(serve_app, "fake-serve-retry")
+    serve.start()
+    base = {
+        "upstream_mode": "opencode-serve",
+        "opencode_serve_url": serve.base_url,
+        "opencode_serve_timeout_s": 15,
+        "opencode_serve_wait_timeout_s": 15,
+    }
+    base.update(overrides)
+    settings = Settings(**base)
+    gw = _RunningServer(create_app(settings), "gw-serve-retry")
+    gw.start()
+    return serve, gw
+
+
+def test_wait_retries_503_then_succeeds():
+    serve, gw = _serve_gateway(_retry_serve([503, 503]))
+    try:
+        resp = httpx.post(
+            f"{gw.base_url}{CHAT_URL}",
+            json={
+                "model": "opencode/big-pickle",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            timeout=30,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["choices"][0]["message"]["content"] == "retry reply"
+        assert serve.app.state.wait_calls["sess-retry"] == 3
+    finally:
+        gw.stop()
+        serve.stop()
+
+
+def test_wait_409_then_succeeds():
+    serve, gw = _serve_gateway(_retry_serve([409]))
+    try:
+        resp = httpx.post(
+            f"{gw.base_url}{CHAT_URL}",
+            json={
+                "model": "opencode/big-pickle",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            timeout=30,
+        )
+        assert resp.status_code == 200
+        assert serve.app.state.wait_calls["sess-retry"] == 2
+    finally:
+        gw.stop()
+        serve.stop()
+
+
+def test_wait_stuck_503_returns_504():
+    serve, gw = _serve_gateway(
+        _retry_serve([503] * 100), opencode_serve_wait_timeout_s=1
+    )
+    try:
+        resp = httpx.post(
+            f"{gw.base_url}{CHAT_URL}",
+            json={
+                "model": "opencode/big-pickle",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            timeout=30,
+        )
+        assert resp.status_code == 504
+        assert resp.json()["error"]["code"] == "wait_timeout"
+    finally:
+        gw.stop()
+        serve.stop()
+
+
 def test_cli_and_openai_defaults_untouched(monkeypatch):
     for var in ("UPSTREAM_MODE", "OPENCODE_SERVE_URL"):
         monkeypatch.delenv(var, raising=False)
