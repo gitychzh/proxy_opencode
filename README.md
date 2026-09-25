@@ -49,6 +49,10 @@ uvicorn proxy_opencode.app:app --host 0.0.0.0 --port 8787
 每次请求记录：`request_id`、`model`、`stream`、`has_tools`、`status`、
 `latency_ms`、存在的 `usage`。绝不记录消息内容或任何 API key。
 
+## 工程化约束
+
+长期维护约束见 `docs/engineering-constraints.md`：Python 固定 3.12.13、Node 用最新 LTS/Stable、全程 Git/PR/CI、语义化版本、强制测试与合规边界。
+
 ## 测试
 
 ```bash
