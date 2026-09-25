@@ -1,0 +1,43 @@
+name: Bug Report
+description: 报告网关行为异常
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 发生了什么
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 最小复现步骤；请使用 dummy key，勿粘贴真实凭证
+      placeholder: |
+        1. 启动方式 / 环境变量
+        2. 发送的请求（curl 或代码片段）
+        3. 实际响应
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Python 版本（应为 3.12.13）、操作系统、安装方式（pip -e 等）
+      placeholder: Python 3.12.13 / Windows Git Bash / pip install -e .[test]
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 安全确认
+      options:
+        - label: 我已确认未在 issue 中粘贴任何真实 API key 或用户消息体内容
+          required: true

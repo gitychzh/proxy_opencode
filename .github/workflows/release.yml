@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.13"
+          cache: pip
+
+      - name: Install package with test deps
+        run: pip install -e '.[test]'
+
+      - name: Run tests
+        run: pytest tests/ -q
+
+      # 仅做标准发布：从 tag 创建 GitHub Release，自动生成发布说明。
+      # CHANGELOG.md 中的发布说明由发布流程手工维护，不做自动修改。
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes

@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # pip 依赖周更。
+  # 注意：项目通过 pyproject.toml 的 requires-python = "==3.12.13"
+  # 固定 Python 3.12（见 docs/engineering-constraints.md）。
+  # Dependabot 无权修改 requires-python；若新依赖版本要求更高 Python，
+  # 请在 PR 中明确讨论后再处理，不允许直接放宽版本约束。
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

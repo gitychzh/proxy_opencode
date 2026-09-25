@@ -55,6 +55,15 @@ uvicorn proxy_opencode.app:app --host 0.0.0.0 --port 8787
 
 **Node.js**：当前项目暂未引入任何 Node 工具链，CI 也不构建前端。根目录的 `.nvmrc`（`lts/*`）仅为将来引入前端/脚本工具链时锁定最新 LTS/Stable 预留；届时需同步提交 lockfile。
 
+## 仓库治理
+
+- 贡献流程与 PR 模板：[`CONTRIBUTING.md`](CONTRIBUTING.md)、[`.github/pull_request_template.md`](.github/pull_request_template.md)
+- 提 issue：[Bug Report](.github/ISSUE_TEMPLATE/bug_report.yml) / [Feature Request](.github/ISSUE_TEMPLATE/feature_request.yml)（GitHub 新建 issue 时自动加载）
+- 安全策略与漏洞报告：[`SECURITY.md`](SECURITY.md)
+- 变更记录：[`CHANGELOG.md`](CHANGELOG.md)
+- 代码归属：`.github/CODEOWNERS`；依赖周更：`.github/dependabot.yml`
+- 发布：推送 `v*` tag 触发 [`release.yml`](.github/workflows/release.yml)，跑测试后创建 GitHub Release
+
 ## 测试
 
 ```bash
