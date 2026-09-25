@@ -1,23 +1,25 @@
-"""In-memory per-key fixed-window rate limiter."""
+"""Per-key fixed-window rate limiter."""
 
 from __future__ import annotations
 
+import collections
 import time
-from collections import defaultdict, deque
 
 
 class RateLimiter:
-    def __init__(self, requests_per_minute: int = 60) -> None:
-        self.limit = requests_per_minute
-        self._hits: dict[str, deque[float]] = defaultdict(deque)
+    def __init__(self, requests_per_minute: int) -> None:
+        self.rpm = max(1, requests_per_minute)
+        self._hits: dict[str, collections.deque] = collections.defaultdict(
+            collections.deque
+        )
 
     def allow(self, key: str) -> bool:
-        now = time.monotonic()
+        now = time.time()
         window_start = now - 60.0
-        q = self._hits[key]
-        while q and q[0] < window_start:
-            q.popleft()
-        if len(q) >= self.limit:
+        hits = self._hits[key]
+        while hits and hits[0] < window_start:
+            hits.popleft()
+        if len(hits) >= self.rpm:
             return False
-        q.append(now)
+        hits.append(now)
         return True
