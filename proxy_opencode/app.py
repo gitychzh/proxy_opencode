@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -12,7 +13,9 @@ import httpx
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from . import opencode_cli
 from .config import Settings, load_settings
+from .opencode_cli import CliError, ModelsCache
 from .ratelimit import RateLimiter
 
 logger = logging.getLogger("proxy_opencode")
@@ -69,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="proxy_opencode", version="0.1.0")
     app.state.settings = settings
     app.state.ratelimiter = RateLimiter(settings.requests_per_minute)
+    app.state.cli_models_cache = opencode_cli.ModelsCache(settings)
     app.state.http_client = httpx.AsyncClient(
         base_url=settings.upstream_base_url,
         timeout=httpx.Timeout(300.0, connect=30.0),
@@ -77,6 +81,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Content-Type": "application/json",
         },
     )
+    if settings.is_opencode_cli:
+        app.state.cli_models_cache = opencode_cli.ModelsCache(settings)
 
     async def require_gateway_key(request: Request) -> str:
         auth = request.headers.get("authorization", "")
@@ -131,6 +137,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models(_: str = Depends(require_gateway_key)) -> Any:
+        if settings.is_opencode_cli:
+            cache: ModelsCache = app.state.cli_models_cache
+            try:
+                models = await asyncio.to_thread(cache.get)
+            except CliError as exc:
+                return _openai_error(502, f"opencode CLI upstream failed: {exc}")
+            except Exception as exc:
+                return _openai_error(502, f"opencode CLI upstream failed: {exc}")
+            return {
+                "object": "list",
+                "data": [
+                    {
+                        "id": m,
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "opencode-cli",
+                    }
+                    for m in models
+                ],
+                "metadata": {"adapter": "opencode-cli"},
+            }
         client: httpx.AsyncClient = app.state.http_client
         try:
             resp = await client.get("/v1/models")
@@ -157,6 +184,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return _openai_error(
                 400, "'messages' is required.", err_type="invalid_request_error"
             )
+
+        if settings.is_opencode_cli:
+            return await _cli_chat(body, request_id, started)
+
         if settings.reasoning_passthrough:
             for k in _REASONING_FIELDS:
                 if k in body:
@@ -198,6 +229,122 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             pass
         _log(resp.status_code, usage)
         return _relay_json(resp)
+
+    async def _cli_chat(
+        body: dict[str, Any], request_id: str, started: float
+    ) -> Any:
+        """opencode-cli upstream: local, official CLI, restricted."""
+        model = body.get("model") or ""
+        stream = bool(body.get("stream"))
+
+        def _log(status: int, exit_code: int | None = None) -> None:
+            logger.info(
+                "request",
+                extra={
+                    "request_id": request_id,
+                    "adapter": "opencode-cli",
+                    "model": model,
+                    "stream": stream,
+                    "status": status,
+                    "exit_code": exit_code,
+                    "latency_ms": round(
+                        (time.perf_counter() - started) * 1000, 1
+                    ),
+                },
+            )
+
+        unsupported = [
+            k
+            for k in ("tools", "tool_calls", "response_format", "reasoning_effort")
+            if body.get(k)
+        ]
+        if unsupported:
+            _log(400)
+            return _openai_error(
+                400,
+                "opencode-cli adapter does not support tool/reasoning "
+                f"passthrough; unsupported fields: {', '.join(unsupported)}.",
+                err_type="invalid_request_error",
+            )
+        if not model or not opencode_cli.model_allowed(settings, model):
+            _log(400)
+            return _openai_error(
+                400,
+                f"model {model!r} is not allowed by "
+                "OPENCODE_ALLOWED_MODEL_PREFIXES.",
+                err_type="invalid_request_error",
+                code="model_not_allowed",
+            )
+        try:
+            prompt = opencode_cli.build_prompt(body["messages"])
+        except CliError as exc:
+            _log(400)
+            return _openai_error(400, str(exc), err_type="invalid_request_error")
+
+        try:
+            result = await asyncio.to_thread(
+                opencode_cli.run_completion, settings, model, prompt
+            )
+        except CliError as exc:
+            _log(502)
+            return _openai_error(502, f"opencode CLI upstream failed: {exc}")
+        _log(200, result.exit_code)
+
+        created = int(time.time())
+        if stream:
+            chunk = {
+                "id": f"chatcmpl-cli-{uuid.uuid4().hex[:8]}",
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": result.stdout},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "metadata": {
+                    "adapter": "opencode-cli",
+                    "synthetic_stream": True,
+                },
+            }
+
+            async def synth() -> AsyncIterator[bytes]:
+                yield f"data: {json.dumps(chunk)}\n\n".encode()
+                yield b"data: [DONE]\n\n"
+
+            return StreamingResponse(
+                synth(),
+                status_code=200,
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    "X-Opencode-CLI-Synthetic-Stream": "true",
+                },
+            )
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": f"chatcmpl-cli-{uuid.uuid4().hex[:8]}",
+                "object": "chat.completion",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": result.stdout,
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "metadata": {"adapter": "opencode-cli"},
+            },
+        )
 
     async def _stream_chat(
         client: httpx.AsyncClient,

@@ -9,6 +9,12 @@
 
 - 工程化基线：GitHub Actions CI（Python 3.12.13 + pytest）、`CONTRIBUTING.md`、
   `.editorconfig`、`.nvmrc`，以及 ruff/black/mypy 的最小配置。
+- `UPSTREAM_MODE=opencode-cli` 本机官方 CLI 上游模式（受限、仅本机调试）：
+  `/v1/models` 走 `opencode models`（allow prefix 过滤 + TTL 缓存），
+  chat 走 `opencode run`（list-form subprocess + 超时 + 禁 shell），
+  stream 合成单 chunk 并标注 `synthetic_stream`，不支持 tools/思考透传
+  （显式 400），CLI 失败返回 502。新增 `scripts/hermes_opencode_local.md`。
+  默认 `openai` HTTP 模式不变；不含任何风控绕过/额度放大/客户端伪造。
 
 ## [0.1.0] - 2026-09-25
 

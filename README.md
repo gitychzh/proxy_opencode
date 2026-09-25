@@ -23,6 +23,26 @@ pip install -e ".[test]"
 | `PORT` | `8787` | 监听端口 |
 | `REASONING_PASSTHROUGH` | `true` | 是否透传 `reasoning_effort` / `thinking` / `include_reasoning` / `reasoning` |
 | `REQUESTS_PER_MINUTE` | `60` | 每个网关 key 每分钟请求上限（内存实现） |
+| `UPSTREAM_MODE` | `openai` | 上游模式：`openai`（HTTP 转发，默认）或 `opencode-cli`（本机官方 CLI，受限） |
+| `OPENCODE_BIN` | `opencode` | opencode CLI 可执行文件（仅 `opencode-cli` 模式） |
+| `OPENCODE_MODELS_CMD` | `opencode models` | models 命令（可配置） |
+| `OPENCODE_RUN_TIMEOUT_S` | `120` | `opencode run` 子进程超时（秒） |
+| `OPENCODE_XDG_DATA_HOME` | 空 | 可选；设置后传给子进程的 `XDG_DATA_HOME` |
+| `OPENCODE_ALLOWED_MODEL_PREFIXES` | `opencode/` | 逗号分隔的模型前缀白名单，拒绝免费池外模型 |
+| `MODELS_CACHE_TTL_S` | `300` | opencode-cli 模式下 `opencode models` 结果缓存秒数 |
+
+### opencode-cli 上游模式（本机 / 官方 CLI / 受限）
+
+仅当 `UPSTREAM_MODE=opencode-cli` 时启用，供本机 hermes 调试使用：
+请求转交给**本机官方 `opencode` CLI**（参数列表 subprocess、带超时、禁
+`shell=True`），models 从 `opencode models` 读取并按
+`OPENCODE_ALLOWED_MODEL_PREFIXES` 过滤；chat 把文本消息拼成单个 prompt 调
+`opencode run -m <model> <prompt>`；stream 返回合成单 chunk（
+`metadata.synthetic_stream=true`）；`tools`/`tool_calls`/`response_format`/
+`reasoning_effort` 非空直接 400。CLI 失败返回 502。响应以
+`metadata.adapter=opencode-cli` 标注。**不实现**风控绕过、额度放大、
+客户端伪造、对外分发凭证或版本检查绕过；额度与限制由官方客户端控制。
+详见 [`scripts/hermes_opencode_local.md`](scripts/hermes_opencode_local.md)。
 
 ## 运行
 
