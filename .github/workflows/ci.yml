@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.13"
+          cache: pip
+
+      - name: Install package with test deps
+        run: pip install -e '.[test]'
+
+      - name: Ruff (only if configured and installed)
+        run: |
+          if [ -f pyproject.toml ] && grep -q '^\[tool\.ruff\]' pyproject.toml && command -v ruff >/dev/null; then
+            ruff check proxy_opencode tests
+          else
+            echo "ruff not installed or not configured, skipping"
+          fi
+
+      - name: Run tests
+        run: pytest tests/ -q

@@ -51,7 +51,9 @@ uvicorn proxy_opencode.app:app --host 0.0.0.0 --port 8787
 
 ## 工程化约束
 
-长期维护约束见 `docs/engineering-constraints.md`：Python 固定 3.12.13、Node 用最新 LTS/Stable、全程 Git/PR/CI、语义化版本、强制测试与合规边界。
+长期维护约束见 `docs/engineering-constraints.md`：Python 固定 3.12.13、全程 Git/PR/CI、语义化版本、强制测试与合规边界。
+
+**Node.js**：当前项目暂未引入任何 Node 工具链，CI 也不构建前端。根目录的 `.nvmrc`（`lts/*`）仅为将来引入前端/脚本工具链时锁定最新 LTS/Stable 预留；届时需同步提交 lockfile。
 
 ## 测试
 
