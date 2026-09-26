@@ -39,7 +39,9 @@ hermes / 任意 OpenAI SDK
 
 ### serve 桥接的关键事实（实测确认，opencode 1.18.x）
 
-- serve API v2：`POST /api/session`（可带 model）→ `POST /api/session/{id}/prompt`
+- serve API v2：`POST /api/session`（带 model + 内建工具 permission deny 规则；
+  **不能用 v1 prompt 的 `tools` 禁用映射**——实测会让 Zen 免费层恒定
+  FreeTierError 403；permission deny 只拦执行、保留 schema，安全）→ `POST /api/session/{id}/prompt`
   (`{"prompt": {"text": ...}, "delivery": "steer"}`) → 轮询
   `GET /api/session/{id}/message` 直到出现 finish 非空的 assistant 消息 →
   `DELETE /session/{id}` 清理。**`POST /api/session/{id}/wait` 不可靠**

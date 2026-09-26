@@ -164,3 +164,4 @@ async def test_no_finished_assistant_is_error():
             )
     await adapter.aclose()
 
+

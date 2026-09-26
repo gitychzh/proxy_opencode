@@ -3,7 +3,7 @@
 Drives the CURRENT opencode server API (v2 `/api` surface), verified live
 against opencode 1.18.x:
 
-    POST /api/session                      -> create session (model, variant)
+    POST /api/session                      -> create session (model, permission)
     POST /api/session/{id}/prompt          -> {"prompt": {"text": ...}}
     GET  /api/session/{id}/message (poll)  -> finished when assistant.finish set
     GET  /api/session/{id}/message         -> {"data": [Message, ...]}
@@ -40,6 +40,17 @@ class ServeError(Exception):
 
 class WaitTimeoutError(Exception):
     """`/wait` stayed busy past OPENCODE_SERVE_WAIT_TIMEOUT_S."""
+
+
+# Built-in agent tools must stay in the request schema (removing them makes
+# Zen's free-tier check reject the call), but their EXECUTION is denied via a
+# session permission ruleset, so the agent cannot hang on an interactive
+# approval prompt. Client-facing tools go through the tools_contract bridge.
+_BUILTIN_TOOLS_DENY = [
+    "question", "bash", "read", "glob", "grep", "edit", "write",
+    "task", "webfetch", "todowrite", "websearch", "skill",
+    "apply_patch", "invalid", "list", "patch", "ls",
+]
 
 
 @dataclass
@@ -155,7 +166,11 @@ class ServeAdapter:
             msgs = await self._api("GET", f"/api/session/{sid}/message")
             data = list((msgs or {}).get("data", []))
             for m in data:
-                if isinstance(m, dict) and m.get("type") == "assistant" and m.get("finish"):
+                if (
+                    isinstance(m, dict)
+                    and m.get("type") == "assistant"
+                    and (m.get("finish") or m.get("error"))
+                ):
                     return data
             if asyncio.get_running_loop().time() > deadline:
                 raise WaitTimeoutError(
@@ -182,7 +197,15 @@ class ServeAdapter:
         )
 
         session = await self._api(
-            "POST", "/api/session", json={"model": {"providerID": provider, "id": model_id}}
+            "POST",
+            "/api/session",
+            json={
+                "model": {"providerID": provider, "id": model_id},
+                "permission": [
+                    {"permission": n, "action": "deny", "pattern": "*"}
+                    for n in _BUILTIN_TOOLS_DENY
+                ],
+            },
         )
         sid = session["data"]["id"]
         try:
@@ -227,7 +250,7 @@ class ServeAdapter:
                 for m in messages
                 if isinstance(m, dict)
                 and m.get("type") == "assistant"
-                and m.get("finish")
+                and (m.get("finish") or m.get("error"))
             ),
             None,
         )
