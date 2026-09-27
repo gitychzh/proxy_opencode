@@ -60,6 +60,34 @@ providers:
     api_mode: chat_completions
 ```
 
+## 双桶轮询：把多份额度合成一个入口
+
+Zen 免费额度**按出口 IP 计**——同一台机器上跑两个网关只是同一份额度。
+`balancer/` 让多个**不同出口 IP** 的网关实例合成单一入口：
+
+```
+hermes ──> LB :7892 (least-connection 轮询) ──┬──> 网关 A（出口 IP 1）:8787
+                                            └──> 网关 B（出口 IP 2）:8787
+```
+
+- **per-upstream `Authorization` 改写**：各桶密钥不同。裸 nginx
+  `proxy_pass` 做不到 per-upstream 改 header，这是选 Python 实现而非 nginx
+  的硬理由。
+- **死桶自动 failover**：实测单桶宕机期间客户端请求全部成功，流量自动压到
+  另一桶；恢复后自动回池。
+- **SSE 透传**；仅在未向客户端下发任何字节时才换桶重试，避免流拼接错乱。
+- **`/healthz`** 暴露每桶 `healthy` / `inflight` / `requests` / `failures` / 延迟。
+
+```bash
+# 配置：复制模板并填入各桶的真实 key（run.cmd 已被 .gitignore 排除）
+cp balancer/run.cmd.example balancer/run.cmd
+python balancer/lb.py
+```
+
+**实测收益**：并发吞吐 +20%（20 短请求墙钟 94s vs 117s），单桶宕机无感。
+**但单请求生成速度不变**（-4%）——免费层限流作用于单个请求。
+完整拓扑、实测数据与已知坑见 `docs/dual-bucket-topology.md`。
+
 ## 语义与边界
 
 - **端点**：`GET /healthz`（无需鉴权）、`GET /v1/models`、
@@ -117,16 +145,29 @@ LOG_FORMAT=json python -m proxy_opencode   # JSON 行格式（机器解析/长�
 
 ```bash
 pytest tests/ -q                    # 单元 + 路由测试（respx 伪上游，CI 可跑）
+pytest balancer/tests/ -q           # LB 单测（10 项，含 failover / key 改写）
 python scripts/e2e_hermes.py        # 端到端：本机 hermes 真实请求
 ```
 
 端到端与 drive 细节见 `scripts/e2e_hermes.md`。
-CI：`.github/workflows/ci.yml`（Python 3.12.13 + pytest + ruff）。
+CI：`.github/workflows/ci.yml`（Python 3.12.13 + pytest + ruff；`test` 与
+`balancer` 两个 job）。
+
+## 文档索引
+
+| 文档 | 内容 |
+| --- | --- |
+| `AGENTS.md` | 维护约定、架构、免费层校验三要素（**改代码前必读**） |
+| `docs/dual-bucket-topology.md` | 已验证的双桶拓扑、实测容量数据、**已知坑**（改部署前必读） |
+| `docs/roadmap.md` | 正式网关 + 正式对外网站路线图与待拍板决策点 |
+| `docs/engineering-constraints.md` | 工程化基线与红线 |
+| `CHANGELOG.md` / `CONTRIBUTING.md` / `SECURITY.md` | 变更记录 / 协作 / 安全策略 |
 
 ## 仓库治理
 
 - `start_gateway.bat`：Windows 一键启动（双击）——`HOST=0.0.0.0`、`PORT=8791`、
   `GATEWAY_API_KEYS=dev-local-key`，局域网设备即可调用。
+- `balancer/run.cmd.example`：LB 配置模板（填好真实 key 的 `run.cmd` 不入库）。
 - `AGENTS.md`：维护约定与架构说明（**改动前先读**，内含免费层校验机制的
   实测结论，勿重复踩坑）
 - `CHANGELOG.md`、`CONTRIBUTING.md`、`SECURITY.md`

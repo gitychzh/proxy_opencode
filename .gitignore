@@ -1,7 +1,16 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
 .venv*/
 
 *.egg-info/
 .venv/
+
+# 运行期产物
+logs/
+*.log
+
+# balancer 本地配置（含真实 key，绝不提交）
+balancer/run.cmd
+balancer/run.local.cmd

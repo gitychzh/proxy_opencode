@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.4.0] - 2026-09-28
+
+### Added
+
+- **`balancer/`：双桶轮询负载均衡**（新子项目，`balancer/lb.py`，385 行纯 ASGI）：
+  OpenCode Zen 免费额度按**出口 IP** 计，单机多开网关无意义（同一份额度）。
+  本组件让多个不同出口 IP 的网关实例合成单一入口：
+  - least-connection 轮询，死桶自动跳过（`healthy` 由定时探测维护）；
+  - **per-upstream `Authorization` 改写**——各桶密钥不同，故不能用裸
+    nginx `proxy_pass`（它做不到 per-upstream 改写 header），这是选 Python
+    实现而非 nginx 的硬理由；
+  - 客户端 key **不泄漏**到任何后端（`ZEN_LB_API_KEY` 未设置时 fail-closed）；
+  - SSE 透传（关缓冲），**仅在未向客户端下发任何字节时**才换桶重试，避免
+    重复内容/流拼接错乱；
+  - `/healthz` 暴露每桶 `healthy`/`inflight`/`requests`/`failures`/延迟。
+  - 配置模板 `balancer/run.cmd.example`（真实 key 版 `run.cmd` 已 gitignore）。
+- **`balancer/tests/test_balancer.py`**：10 项单测（全部通过），覆盖
+  per-upstream key 改写、客户端 key 不泄漏、死桶 failover、全挂返回规范
+  OpenAI 错误体、已开始下发则不换桶等关键契约。
+- **CI 新增 `balancer` job**（`.github/workflows/ci.yml`）跑 LB 单测。
+- **`docs/dual-bucket-topology.md`**：已验证拓扑、实测容量数据、10 条已知坑
+  （工具命名冲突、PowerShell 5.1 限制、日志路径硬编码盘符等）。
+- **`docs/roadmap.md`**：正式网关 + 正式对外网站的分阶段路线图与待拍板决策点。
+
+### Fixed
+
+- `balancer/lb.py` 的 `ZEN_LB_LOG` 默认值曾硬编码 `D:\...` 盘符，在无该盘
+  的机器上 `os.makedirs` 直接 `FileNotFoundError` 崩溃。改为默认脚本同级
+  `logs/lb.log`（相对路径，跨机器可移植）。
+
+### Notes（实测结论，供后续勿走弯路）
+
+- 双桶**不**提升单请求生成速度（单请求 chars/s 实测 -4%）：免费层限流作用
+  于**单个请求**，一个长流式请求全程只用一个桶。
+- 双桶提升的是**并发吞吐与抗排队**：20 个短请求墙钟 -20%（94s vs 117s）。
+- 跨 Tailscale 往返（~400ms）远小于上游生成耗时（~5s），不构成瓶颈。
+
 ## [0.3.3] - 2026-09-28
 
 ### Added

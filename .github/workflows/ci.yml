@@ -30,3 +30,19 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -q
+
+  balancer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.13"
+          cache: pip
+
+      - name: Install balancer deps
+        run: pip install 'httpx>=0.27' 'uvicorn[standard]>=0.29' 'pytest>=8' 'pytest-asyncio>=0.24'
+
+      - name: Run balancer tests
+        run: pytest balancer/tests/ -q
