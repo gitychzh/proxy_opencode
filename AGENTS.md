@@ -46,8 +46,30 @@ hermes / 任意 OpenAI SDK
        - fields.py               # 请求字段白名单
 ```
 
+多个网关实例（不同出口 IP = 不同免费配额桶）之间的轮询由 **`balancer/lb.py`**
+承担：纯 ASGI least-connection 负载均衡，为每个上游改写各自的 `Authorization`，
+SSE 透传，死桶自动跳过。配置模板见 `balancer/run.cmd.example`，完整拓扑、实测
+数据与已知坑见 **`docs/dual-bucket-topology.md`（改拓扑前必读）**。
+
 新增上游模式 = 在 `upstreams/` 加一个实现 `UpstreamAdapter` 协议的模块 +
 `build_adapter` 里注册一行。
+
+### 双桶相关的硬约束（2026-09-28 实测）
+
+1. **配额按出口 IP 计**：同一台机器上跑两个网关毫无意义——出口 IP 相同，
+   额度就是同一份。要翻倍必须让请求从两个不同出口 IP 出去。
+2. **客户端工具名不得与 opencode 内置工具同名**（`bash`/`read`/`edit`/`glob`/
+   `grep`/`write`/`list`/`task`/`todowrite`/`webfetch`/`websearch`/`skill`）。
+   `zen_direct.py` 的 `_merge_tools` 在同名时以客户端工具覆盖内置工具，内置
+   列表被挤掉 → 免费层**静默 403**：本地无任何报错，表现只是"模型不调工具"。
+   → 用 `fs_read`/`fs_exec` 之类不冲突的名字。此坑极难从症状反推，务必记住。
+3. **双桶不提升单请求生成速度**（实测 chars/s -4%）：免费层限流作用于**单个
+   请求**，一个长流式请求从头到尾只用一个桶。提升的是并发吞吐与抗排队
+   （20 短请求墙钟 -20%）。不要拿单请求速度当验收指标。
+4. **LB 的客户端 key 不得泄漏到任何桶**（有单测覆盖）；`ZEN_LB_API_KEY` 未设置
+   时 LB fail-closed 拒绝一切请求。
+5. **配置不得内置真实凭据**：`ZEN_LB_UPSTREAMS` 默认值必须为空（→ 503），
+   真实 key 只进环境变量 / 启动脚本，`balancer/run.cmd` 已 gitignore。
 
 ### zen-direct 的关键事实（实测确认，opencode 1.18.32 / 2026-09-27）
 
@@ -91,7 +113,10 @@ hermes / 任意 OpenAI SDK
 uv venv --python 3.12.13 .venv
 uv pip install -e '.[test]' --python .venv/Scripts/python.exe
 pytest tests/ -q
+pytest balancer/tests/ -q          # LB 单测（需 httpx/uvicorn/pytest-asyncio）
 ```
+
+提交前两条 pytest 都要绿、ruff 也要干净。
 
 端到端（需要本机已装 hermes）：见 `scripts/e2e_hermes.md`。
 
