@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.3.2] - 2026-09-28
+
+### Fixed
+
+- **`__version__` 与 pyproject 脱节**：包内硬编码的 0.2.0 改为从
+  `importlib.metadata` 单一来源读取（未安装时回退 `0.0.0+unknown`）；
+  `/healthz` 现在返回 `version` 字段。
+- 包 docstring 仍描述 0.2.0 旧架构（"never proxies Zen directly"），已更正。
+
+### Added
+
+- **结构化日志落地**：`chat completion` 的 `extra` 字段（request_id / model /
+  stream / has_tools / status / latency_ms / usage / client）此前未被默认
+  格式渲染，现已实际输出；新增 `LOG_FORMAT=json` 切换 JSON 行格式
+  （`logsetup.py`，字段白名单机制——白名单外的 extra 一律不渲染，杜绝
+  误泄敏感数据）。
+- **安全审计日志**：401 鉴权失败与 429 限流现在记录 WARNING（client、reason、
+  是否提供了凭据；**绝不记录凭据值**）。
+- **兜底异常处理**：chat 处理器未预期的异常统一返回 OpenAI 格式 500 并记录
+  完整堆栈（仍不含消息内容）。
+- **启动日志**：版本 / 模式 / 绑定地址 / key 数量 / 适配器名。
+
 ## [0.3.1] - 2026-09-27
 
 ### Added

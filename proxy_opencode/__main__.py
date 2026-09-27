@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import logging
-
 import uvicorn
 
 from .config import load_settings
+from .logsetup import setup_logging
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
+    setup_logging()
     settings = load_settings()
     uvicorn.run(
         "proxy_opencode.app:app",

@@ -8,6 +8,7 @@ import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
+from .. import __version__
 from ..config import Settings
 from ..errors import openai_error
 from ..security import build_auth_dependency
@@ -21,6 +22,7 @@ def make_router(settings: Settings) -> APIRouter:
     async def healthz(request: Request) -> dict[str, Any]:
         return {
             "status": "ok",
+            "version": __version__,
             "upstream_mode": settings.upstream_mode,
             "dev_open": settings.dev_open,
         }

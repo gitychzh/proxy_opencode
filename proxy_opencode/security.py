@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import Request
 
 from .errors import GatewayHttpError, openai_error
+
+logger = logging.getLogger("proxy_opencode.security")
 
 
 def build_auth_dependency(settings):
@@ -16,6 +20,15 @@ def build_auth_dependency(settings):
         if settings.dev_open:
             return token or "dev-open"
         if not token or token not in settings.gateway_api_keys:
+            # Audit log: presence of a credential, never its value.
+            logger.warning(
+                "gateway auth rejected",
+                extra={
+                    "client": request.client.host if request.client else "-",
+                    "reason": "invalid_key",
+                    "provided": bool(token),
+                },
+            )
             raise GatewayHttpError(
                 openai_error(
                     401,
@@ -25,6 +38,14 @@ def build_auth_dependency(settings):
                 )
             )
         if not request.app.state.ratelimiter.allow(token):
+            logger.warning(
+                "gateway rate limited",
+                extra={
+                    "client": request.client.host if request.client else "-",
+                    "reason": "rate_limited",
+                    "provided": True,
+                },
+            )
             raise GatewayHttpError(
                 openai_error(
                     429,

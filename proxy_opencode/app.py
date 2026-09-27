@@ -43,6 +43,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.ratelimiter = RateLimiter(settings.requests_per_minute)
     app.state.adapter = build_adapter(settings)
 
+    logger.info(
+        "gateway starting",
+        extra={
+            "version": __version__,
+            "mode": settings.upstream_mode,
+            "bind": f"{settings.host}:{settings.port}",
+            "keys": len(settings.gateway_api_keys),
+            "adapter": getattr(app.state.adapter, "name", "?"),
+        },
+    )
+
     @app.exception_handler(GatewayHttpError)
     async def _handle_gateway_error(
         request: Request, exc: GatewayHttpError

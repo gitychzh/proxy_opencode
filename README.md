@@ -91,6 +91,7 @@ providers:
 | `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` | `opencode` / 空 | serve 模式的 Basic auth |
 | `OPENCODE_SERVE_MODELS` | `opencode/big-pickle` | serve 模式 `/v1/models` 列表 |
 | `GATEWAY_API_KEYS` | 空（dev-open） | 网关 Bearer key（逗号分隔） |
+| `LOG_FORMAT` | `text` | 日志格式：`text`（人类可读）/ `json`（JSON 行，便于采集归档） |
 | `REQUESTS_PER_MINUTE` | `60` | 每个网关 key 的限流 |
 | `HOST` | `127.0.0.1` | 绑定地址；设 `0.0.0.0` 供局域网调用（**必须**同时设置 `GATEWAY_API_KEYS`） |
 | `PORT` | `8787` | 网关端口 |
@@ -99,7 +100,16 @@ providers:
 ## 日志
 
 每次 chat 记录：`request_id`、`model`、`stream`、`has_tools`、`status`、
-`latency_ms`、`usage`。**绝不记录消息内容与任何 key。**
+`latency_ms`、`usage`、`client`（来源 IP）。401 鉴权失败与 429 限流记录
+WARNING 审计日志（只记是否提供了凭据，**绝不记录凭据值**）；chat 的未预期
+异常记录完整堆栈并统一返回 OpenAI 格式 500；启动时记录版本 / 模式 / 绑定
+地址 / key 数量。**绝不记录消息内容与任何 key。**
+
+```bash
+LOG_FORMAT=json python -m proxy_opencode   # JSON 行格式（机器解析/长期归档）
+```
+
+日志字段采用白名单机制（`logsetup.py`），白名单外的 extra 一律不渲染。
 
 ## 测试与质量
 

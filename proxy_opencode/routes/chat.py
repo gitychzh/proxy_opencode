@@ -27,9 +27,10 @@ logger = logging.getLogger("proxy_opencode.chat")
 
 
 def _log(request: Request, request_id: str, model: str, **fields: Any) -> None:
+    client = request.client.host if request.client else "-"
     logger.info(
         "chat completion",
-        extra={"request_id": request_id, "model": model, **fields},
+        extra={"request_id": request_id, "model": model, "client": client, **fields},
     )
 
 
@@ -83,6 +84,19 @@ def make_router(settings: Settings) -> APIRouter:
         except ValueError as exc:
             log(400)
             return openai_error(400, str(exc), err_type="invalid_request_error")
+        except Exception:
+            # Catch-all: keep the response contract and leave a full traceback
+            # in the log (message content is never logged).
+            log(500)
+            logger.exception(
+                "unhandled chat error",
+                extra={
+                    "request_id": request_id,
+                    "model": model,
+                    "client": request.client.host if request.client else "-",
+                },
+            )
+            return openai_error(500, "Internal gateway error.")
 
         if isinstance(result, StreamRelay):
             return StreamingResponse(

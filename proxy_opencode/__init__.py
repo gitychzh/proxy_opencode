@@ -1,15 +1,25 @@
-"""proxy_opencode: OpenAI-compatible gateway in front of local `opencode serve`.
+"""proxy_opencode: OpenAI-compatible gateway in front of OpenCode Zen.
 
-Architecture overview (see docs/architecture.md):
+Architecture overview:
 
     client (hermes, any OpenAI SDK)
         -> POST /v1/chat/completions  (this gateway, FastAPI)
         -> UpstreamAdapter            (protocol, one impl per upstream mode)
-        -> opencode-serve adapter     (drives official local `opencode serve`)
-        -> official opencode CLI      (talks to Zen, incl. free-tier rules)
+           - zen-direct (default): direct OpenAI-compatible calls to
+             OpenCode Zen with the reconstructed opencode client protocol
+             (free-tier gate: system-prompt marker + builtin tools + stream)
+           - opencode-serve: drives local official `opencode serve`
+           - openai: plain passthrough to any OpenAI-compatible endpoint
 
-The gateway never spoofs the opencode client fingerprint and never proxies
-Zen directly: free-tier enforcement belongs to the official server.
+Observability: every chat completion logs request_id/model/stream/has_tools/
+status/latency_ms/usage/client — but never message content or any key.
+LOG_FORMAT=json switches logs to JSON lines (see logsetup.py).
 """
 
-__version__ = "0.2.0"
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _package_version
+
+try:
+    __version__ = _package_version("proxy_opencode")
+except PackageNotFoundError:  # not installed (e.g. running from a checkout)
+    __version__ = "0.0.0+unknown"
