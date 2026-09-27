@@ -17,17 +17,19 @@ hermes / OpenAI SDK ──OpenAI API──> proxy_opencode ──重构协议直
   `User-Agent: opencode/<ver> ai-sdk/... runtime/bun/<ver>`、
   `x-opencode-client/project/session/request`，会话/消息 ID 用 opencode
   同款标识符算法实时生成）。
-- **免费层校验**：服务端要求匿名请求携带 opencode 真实系统提示词（实测：
-  只有协议头没有标记 → 403 `FreeTierError`；补上标记 → 通过校验）。网关
-  自动在 system 区注入随包的 `zen_prompt_default.txt`（opencode 官方默认
-  系统提示词全文）+ 一段客户端桥接说明，对上层透明。
-- **出口路由**：校验同时依赖出口 IP 区域。`httpx trust_env=True` 会自动
-  使用系统代理（Windows 注册表代理 / 环境变量，如 Clash 7897）；也可用
-  `ZEN_PROXY` 显式指定。**CN 直连出口会被 403 拒绝。**
+- **免费层校验（三要素，消融实测）**：服务端对匿名请求做请求体指纹校验，
+  三者缺一不可，任一缺失 → 403 `FreeTierError`：
+  ① opencode 真实默认系统提示词（随包资产 `zen_prompt_default.txt`）；
+  ② opencode 内置工具 schema 列表（11 个，随包资产 `zen_builtin_tools.json`，
+  与客户端 tools 合并上送，同名碰撞客户端优先）；③ `stream: true`
+  （免费层只服务流式，网关恒流式调 Zen，非流式客户端由网关聚合 SSE）。
+- **出口路由**：CN 本地直连即可（与 opencode 官方客户端同一环境同一结论）。
+  `httpx trust_env=True` 会自动使用系统代理（Windows 注册表代理 / 环境变量）；
+  也可用 `ZEN_PROXY` 显式指定。
 - **真流式**：SSE 逐字节透传——token 级流式、`reasoning_content`、原生
   `tool_calls`（不需要 serve 模式的 JSON 契约桥接与合成流）。
-- **配额**：免费额度按出口 IP 计；共享 VPN 出口可能 429
-  （`FreeUsageLimitError`），网关按原状态码如实中继，稍后重试即可。
+- **配额**：免费额度按出口 IP 计、按 UTC 日重置；共享 VPN 出口可能 429
+  （`FreeUsageLimitError`），网关按原状态码如实中继，换 IP 或次日重试即可。
 - 配置付费 `OPENCODE_ZEN_API_KEY` 后自动免注入标记（按量计费路径）。
 
 ## 快速开始
@@ -35,8 +37,7 @@ hermes / OpenAI SDK ──OpenAI API──> proxy_opencode ──重构协议直
 ```bash
 # 1. 起网关（默认 UPSTREAM_MODE=zen-direct）
 set GATEWAY_API_KEYS=dev-local-key             # 不设则为 dev-open（仅本机调试用）
-python -m proxy_opencode                       # 默认 127.0.0.1:8787
-# 系统代理（如 Clash）需处于开启状态（出口区域决定免费层是否放行）
+python -m proxy_opencode                       # 默认 127.0.0.1:8787（本地直连即可）
 
 # 2. 验证
 curl -H "Authorization: Bearer dev-local-key" http://127.0.0.1:8787/healthz
@@ -80,7 +81,7 @@ providers:
 | --- | --- | --- |
 | `UPSTREAM_MODE` | `zen-direct` | `zen-direct`（直连 Zen）/ `opencode-serve`（本机官方 serve）/ `openai`（通用透传） |
 | `OPENCODE_ZEN_BASE_URL` | `https://opencode.ai/zen/v1` | Zen API 基址（仅 opencode.ai / loopback） |
-| `OPENCODE_ZEN_API_KEY` | 空 | Zen API 密钥；空 = 匿名免费层（`Bearer public` + 标记注入） |
+| `OPENCODE_ZEN_API_KEY` | 空 | Zen API 密钥；空 = 匿名免费层（`Bearer public` + 标记注入 + 内置工具合并 + 强制流式） |
 | `OPENCODE_ZEN_MODELS` | `opencode/big-pickle` | `/v1/models` 兜底模型列表（逗号分隔；正常情况直接拉 Zen 目录） |
 | `OPENCODE_ZEN_TIMEOUT_S` | `300` | 上游单请求超时 |
 | `ZEN_PROXY` | 空 | 显式出口代理（如 `http://127.0.0.1:7897`）；空 = 跟随系统/环境代理 |

@@ -13,18 +13,22 @@
   - 会话/消息标识符精确复刻 opencode `schema/src/identifier.ts` 算法
     （26 字符 = 12 位 hex 时间部分 + 14 位随机，时间部分与 opencode.db
     中真机数据逐对吻合）。
-  - 免费层校验的**真实机制**（推翻 0.2.0 的 TLS 指纹结论）：服务端校验
-    请求是否携带 opencode 真实系统提示词（body 标记）+ 出口 IP 区域。
-    适配器自动在 system 区注入 v1.18.32 `prompt/default.txt` 全文
-    （随包资产 `zen_prompt_default.txt`）+ 客户端桥接说明。
+  - **免费层校验三要素**（消融实测，推翻 0.2.0 的 TLS 指纹结论）：
+    ① 系统提示词标记（随包 `zen_prompt_default.txt`）
+    ② opencode 内置工具 schema 列表（随包 `zen_builtin_tools.json`，
+    11 个 schema 抓包提取；客户端工具合并其后、同名以客户端为准）
+    ③ `stream: true`（免费层只服务流式，网关恒流式、非流式客户端聚合）。
   - **真流式**：SSE 逐字节透传（token 级流式、`reasoning_content`、
-    原生 `tool_calls`，不再是合成单 chunk）。
+    原生 `tool_calls`，不再是合成单 chunk）；非流式由 `_aggregate_sse`
+    聚合（增量合并 tool_calls、捕获 usage、容忍非标准 cost 尾 chunk）。
   - 配置：`OPENCODE_ZEN_BASE_URL`、`OPENCODE_ZEN_API_KEY`（付费密钥时
     自动免注入标记）、`OPENCODE_ZEN_MODELS`、`OPENCODE_ZEN_TIMEOUT_S`、
     `ZEN_PROXY`、`OPENCODE_ZEN_CLIENT_VERSION`、`OPENCODE_ZEN_BUN_VERSION`。
   - `/v1/models` 直接拉取 Zen 真实模型目录。
-- 新测试套件 `test_zen_direct.py`（13 用例：ID 算法与 opencode.db 真机
-  配对回归、协议头、标记注入、流式/非流式、错误中继）。
+- 新测试套件 `test_zen_direct.py`（16 用例：ID 算法与 opencode.db 真机
+  配对回归、协议头、标记注入、工具合并、SSE 聚合、错误中继）。
+- hermes 端到端验收通过：普通问答、写文件工具循环（2 tool calls 落盘）、
+  多轮 ls+read 工具循环（3 tool calls）；模型正确调用客户端自定义工具。
 
 ### Changed
 
@@ -33,14 +37,10 @@
 
 ### Notes（背景结论，2026-09-27 实测）
 
-- 免费层校验三元组：**请求体标记（opencode 系统提示词）+ 出口 IP 区域 +
-  客户端指纹**。仅复刻协议头会被 403 `FreeTierError`；带上真实系统提示词
-  后，经本地代理隧道出口即可通过校验（CN 直连出口仍被拒）。
-- `httpx trust_env=True` 在 Windows 会经 `urllib` 读取**注册表系统代理**
-  （如 Clash 7897），这是直连方案可用的关键；`trust_env=False` 强制 CN
-  直连出口，必然 403。
-- 免费额度按出口 IP 计（`FreeUsageLimitError` 429），共享 VPN 出口易触顶，
-  网关按原状态码如实中继。
+- 免费层校验三要素：系统提示词标记 + 内置工具 schema + stream=true
+  （消融验证：任一缺失 → 403 `FreeTierError`；内置+客户端工具合并 → 200）。
+- 免费额度按出口 IP 计（429 `FreeUsageLimitError`），按 UTC 日重置。
+- hermes e2e 验收见 `scripts/e2e_hermes.md`。
 
 ## [0.2.0] - 2026-09-26
 
