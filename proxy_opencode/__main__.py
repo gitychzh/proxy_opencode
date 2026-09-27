@@ -17,7 +17,7 @@ def main() -> None:
     settings = load_settings()
     uvicorn.run(
         "proxy_opencode.app:app",
-        host="127.0.0.1",
+        host=settings.host,
         port=settings.port,
         log_level="info",
     )

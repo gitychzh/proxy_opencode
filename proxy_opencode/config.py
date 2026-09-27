@@ -37,6 +37,9 @@ class Settings:
     upstream_api_key: str = ""
 
     gateway_api_keys: list[str] = field(default_factory=list)
+    # Bind address. Loopback by default; set HOST=0.0.0.0 to serve the LAN
+    # (requires GATEWAY_API_KEYS — enforced in load_settings).
+    host: str = "127.0.0.1"
     port: int = 8787
     requests_per_minute: int = 60
     reasoning_passthrough: bool = True
@@ -122,13 +125,22 @@ def load_settings() -> Settings:
     )
     if not serve_models:
         serve_models = list(DEFAULT_SERVE_MODELS)
+    host = os.environ.get("HOST", "127.0.0.1").strip().lower()
+    gateway_api_keys = _csv(os.environ.get("GATEWAY_API_KEYS", ""))
+    if host not in LOOPBACK_HOSTS and not gateway_api_keys:
+        raise ValueError(
+            f"Binding a non-loopback host ({host!r}) without GATEWAY_API_KEYS "
+            "would expose an unauthenticated OpenAI-compatible proxy to the "
+            "network; set GATEWAY_API_KEYS first"
+        )
     return Settings(
         upstream_mode=mode,
         upstream_base_url=os.environ.get(
             "UPSTREAM_BASE_URL", "https://api.openai.com"
         ).rstrip("/"),
         upstream_api_key=os.environ.get("UPSTREAM_API_KEY", ""),
-        gateway_api_keys=_csv(os.environ.get("GATEWAY_API_KEYS", "")),
+        gateway_api_keys=gateway_api_keys,
+        host=host,
         port=int(os.environ.get("PORT", "8787")),
         requests_per_minute=int(os.environ.get("REQUESTS_PER_MINUTE", "60")),
         reasoning_passthrough=_env_bool("REASONING_PASSTHROUGH", True),

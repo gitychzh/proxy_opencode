@@ -9,7 +9,9 @@ from proxy_opencode import config
 
 def test_defaults_zen_direct_mode(monkeypatch):
     for key in list(__import__("os").environ):
-        if key.startswith(("UPSTREAM_", "OPENCODE_", "GATEWAY_", "REASONING_", "ZEN_")):
+        if key.startswith(
+            ("UPSTREAM_", "OPENCODE_", "GATEWAY_", "REASONING_", "ZEN_", "HOST")
+        ):
             monkeypatch.delenv(key, raising=False)
     s = config.load_settings()
     assert s.upstream_mode == "zen-direct"
@@ -17,6 +19,7 @@ def test_defaults_zen_direct_mode(monkeypatch):
     assert s.zen_base_url == "https://opencode.ai/zen/v1"
     assert s.zen_api_key == ""
     assert s.dev_open  # no gateway keys
+    assert s.host == "127.0.0.1"
 
 
 def test_invalid_mode_rejected(monkeypatch):
@@ -41,3 +44,22 @@ def test_passwordless_requires_127001(monkeypatch):
     monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "pw")
     s = config.load_settings()
     assert s.opencode_serve_models == list(config.DEFAULT_SERVE_MODELS)
+
+
+def test_nonloopback_bind_requires_api_keys(monkeypatch):
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    monkeypatch.delenv("GATEWAY_API_KEYS", raising=False)
+    with pytest.raises(ValueError, match="GATEWAY_API_KEYS"):
+        config.load_settings()
+    monkeypatch.setenv("GATEWAY_API_KEYS", "k1,k2")
+    s = config.load_settings()
+    assert s.host == "0.0.0.0"
+    assert not s.dev_open
+
+
+def test_loopback_bind_allows_dev_open(monkeypatch):
+    monkeypatch.setenv("HOST", "127.0.0.1")
+    monkeypatch.delenv("GATEWAY_API_KEYS", raising=False)
+    s = config.load_settings()
+    assert s.host == "127.0.0.1"
+    assert s.dev_open

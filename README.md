@@ -92,6 +92,7 @@ providers:
 | `OPENCODE_SERVE_MODELS` | `opencode/big-pickle` | serve 模式 `/v1/models` 列表 |
 | `GATEWAY_API_KEYS` | 空（dev-open） | 网关 Bearer key（逗号分隔） |
 | `REQUESTS_PER_MINUTE` | `60` | 每个网关 key 的限流 |
+| `HOST` | `127.0.0.1` | 绑定地址；设 `0.0.0.0` 供局域网调用（**必须**同时设置 `GATEWAY_API_KEYS`） |
 | `PORT` | `8787` | 网关端口 |
 | `UPSTREAM_BASE_URL` / `UPSTREAM_API_KEY` | `https://api.openai.com` / 空 | 仅 `openai` 透传模式 |
 
@@ -112,6 +113,8 @@ CI：`.github/workflows/ci.yml`（Python 3.12.13 + pytest + ruff）。
 
 ## 仓库治理
 
+- `start_gateway.bat`：Windows 一键启动（双击）——`HOST=0.0.0.0`、`PORT=8791`、
+  `GATEWAY_API_KEYS=dev-local-key`，局域网设备即可调用。
 - `AGENTS.md`：维护约定与架构说明（**改动前先读**，内含免费层校验机制的
   实测结论，勿重复踩坑）
 - `CHANGELOG.md`、`CONTRIBUTING.md`、`SECURITY.md`

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.1] - 2026-09-27
+
+### Added
+
+- `HOST` 环境变量（默认 `127.0.0.1`）：设为 `0.0.0.0` 可让局域网设备调用网关。
+  安全约束：非回环绑定必须配置 `GATEWAY_API_KEYS`，否则启动即报错（防止把
+  无鉴权的 OpenAI 兼容代理暴露到局域网）。
+- 一键启动脚本 `start_gateway.bat`：双击即以 `HOST=0.0.0.0`、`PORT=8791`、
+  `GATEWAY_API_KEYS=dev-local-key` 启动网关。
+
 ## [0.3.0] - 2026-09-27
 
 ### Added
