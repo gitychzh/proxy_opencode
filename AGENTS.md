@@ -99,7 +99,12 @@ pytest tests/ -q
 
 - Python 固定 3.12.13（pyproject requires-python 锁定）。
 - Node 工具链未引入；若将来引入，提交 lockfile。
-- 上游参考实现源码：本机 `D:\wb_ps\opencode-src`（GitHub anomalyco/opencode
-  浅克隆，含 v1.18.32 tag；仅用于阅读，不要提交进本仓库）。
+- 上游参考实现源码：GitHub anomalyco/opencode（tag v1.18.32）。本机参考克隆
+  `D:\wb_ps\opencode-src` 已于 2026-09-27 随 opencode app 一并清理；需要重看
+  源码或重抓包时重新浅克隆即可。
+- 本机 opencode app 已卸载（npm 全局包 + 用户数据，回收站保留）。默认
+  `zen-direct` 模式是纯 HTTP 直连 opencode.ai，**不依赖本机 opencode**；
+  仅 `opencode-serve` 回退模式需要本机安装 opencode CLI，当前机器上该回退
+  模式不可用。
 - 抓包材料：`cap/`（`.gitignore` 排除）——mitm 流量日志、回显服务器、
   A/B 定位脚本；换新 opencode 版本时需重抓并同步 `zen_prompt_default.txt`。
