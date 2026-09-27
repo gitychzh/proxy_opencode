@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.3.0] - 2026-09-27
+
+### Added
+
+- **`zen-direct` 上游模式（新默认）**：直连 OpenCode Zen 的 OpenAI 兼容端点
+  （`https://opencode.ai/zen/v1/chat/completions`），完整重构 opencode
+  1.18.32 客户端协议：
+  - 协议头按真机抓包逐字节复刻（`Authorization: Bearer public`、
+    `User-Agent: opencode/<ver> ai-sdk/provider-utils/4.0.23 runtime/bun/<ver>`、
+    `x-opencode-client/project/session/request`）。
+  - 会话/消息标识符精确复刻 opencode `schema/src/identifier.ts` 算法
+    （26 字符 = 12 位 hex 时间部分 + 14 位随机，时间部分与 opencode.db
+    中真机数据逐对吻合）。
+  - 免费层校验的**真实机制**（推翻 0.2.0 的 TLS 指纹结论）：服务端校验
+    请求是否携带 opencode 真实系统提示词（body 标记）+ 出口 IP 区域。
+    适配器自动在 system 区注入 v1.18.32 `prompt/default.txt` 全文
+    （随包资产 `zen_prompt_default.txt`）+ 客户端桥接说明。
+  - **真流式**：SSE 逐字节透传（token 级流式、`reasoning_content`、
+    原生 `tool_calls`，不再是合成单 chunk）。
+  - 配置：`OPENCODE_ZEN_BASE_URL`、`OPENCODE_ZEN_API_KEY`（付费密钥时
+    自动免注入标记）、`OPENCODE_ZEN_MODELS`、`OPENCODE_ZEN_TIMEOUT_S`、
+    `ZEN_PROXY`、`OPENCODE_ZEN_CLIENT_VERSION`、`OPENCODE_ZEN_BUN_VERSION`。
+  - `/v1/models` 直接拉取 Zen 真实模型目录。
+- 新测试套件 `test_zen_direct.py`（13 用例：ID 算法与 opencode.db 真机
+  配对回归、协议头、标记注入、流式/非流式、错误中继）。
+
+### Changed
+
+- 默认 `UPSTREAM_MODE` 从 `opencode-serve` 改为 `zen-direct`。
+- `opencode-serve` 模式保留作为无代理环境下的回退。
+
+### Notes（背景结论，2026-09-27 实测）
+
+- 免费层校验三元组：**请求体标记（opencode 系统提示词）+ 出口 IP 区域 +
+  客户端指纹**。仅复刻协议头会被 403 `FreeTierError`；带上真实系统提示词
+  后，经本地代理隧道出口即可通过校验（CN 直连出口仍被拒）。
+- `httpx trust_env=True` 在 Windows 会经 `urllib` 读取**注册表系统代理**
+  （如 Clash 7897），这是直连方案可用的关键；`trust_env=False` 强制 CN
+  直连出口，必然 403。
+- 免费额度按出口 IP 计（`FreeUsageLimitError` 429），共享 VPN 出口易触顶，
+  网关按原状态码如实中继。
+
 ## [0.2.0] - 2026-09-26
 
 ### Changed（架构重构，行为刻意收敛）
@@ -29,10 +71,11 @@
 - `AGENTS.md`、`docs/engineering-constraints.md`、`scripts/e2e_hermes.md`、
   `scripts/e2e_hermes.py`（hermes 36 条真实请求驱动脚本）。
 
-### Notes（背景结论）
+### Notes（背景结论，已被 0.3.0 修正）
 
-Zen 免费层有客户端指纹校验（非 opencode 客户端一律 `FreeTierError`），
-本网关因此只桥接本机官方 serve，不直连、不伪装。
+当时认为 Zen 免费层是"客户端指纹校验"（结论有误：真实机制是请求体标记 +
+出口区域 + 客户端指纹的组合，见 0.3.0），本网关因此只桥接本机官方 serve。
+0.3.0 已实现合规边界内的直连方案。
 
 ## [0.1.0] - 2026-09-24
 

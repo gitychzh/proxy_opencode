@@ -10,20 +10,29 @@ import os
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
-UPSTREAM_MODES = ("openai", "opencode-serve")
+UPSTREAM_MODES = ("openai", "opencode-serve", "zen-direct")
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
 # zen model ids are "provider/model", e.g. "opencode/big-pickle".
 DEFAULT_SERVE_MODELS = ("opencode/big-pickle",)
+DEFAULT_ZEN_MODELS = ("opencode/big-pickle",)
+
+# Client fingerprint constants observed in a genuine opencode 1.18.32 capture
+# (mitm, 2026-09). Kept as defaults so the zen-direct adapter speaks the same
+# protocol; overridable for forward-compatibility when opencode releases
+# newer client/runtime versions.
+DEFAULT_ZEN_CLIENT_VERSION = "1.18.32"
+DEFAULT_ZEN_BUN_VERSION = "1.3.14"
 
 
 @dataclass
 class Settings:
     # upstream_mode selects the adapter: "openai" (plain HTTP passthrough to
-    # any OpenAI-compatible endpoint) or "opencode-serve" (local official
-    # `opencode serve`; the only mode that can reach Zen free models).
-    upstream_mode: str = "opencode-serve"
+    # any OpenAI-compatible endpoint), "opencode-serve" (local official
+    # `opencode serve`), or "zen-direct" (direct OpenAI-compatible calls to
+    # OpenCode Zen with the reconstructed opencode client protocol).
+    upstream_mode: str = "zen-direct"
     upstream_base_url: str = "https://api.openai.com"
     upstream_api_key: str = ""
 
@@ -45,6 +54,17 @@ class Settings:
     # Cleanup: delete opencode sessions after use (stateless bridging).
     opencode_serve_ephemeral_sessions: bool = True
 
+    # zen-direct mode (direct OpenAI-compatible calls to OpenCode Zen).
+    zen_base_url: str = "https://opencode.ai/zen/v1"
+    # Empty -> anonymous free tier ("Bearer public" + system-prompt marker).
+    zen_api_key: str = ""
+    zen_models: list[str] = field(default_factory=lambda: list(DEFAULT_ZEN_MODELS))
+    zen_timeout_s: int = 300
+    # Optional egress proxy for the zen client, e.g. "http://127.0.0.1:7897".
+    zen_proxy: str = ""
+    zen_client_version: str = DEFAULT_ZEN_CLIENT_VERSION
+    zen_bun_version: str = DEFAULT_ZEN_BUN_VERSION
+
     @property
     def dev_open(self) -> bool:
         """No GATEWAY_API_KEYS configured -> open dev mode (loopback only use)."""
@@ -53,6 +73,10 @@ class Settings:
     @property
     def is_opencode_serve(self) -> bool:
         return self.upstream_mode == "opencode-serve"
+
+    @property
+    def is_zen_direct(self) -> bool:
+        return self.upstream_mode == "zen-direct"
 
 
 def _csv(value: str) -> list[str]:
@@ -82,7 +106,7 @@ def _validate_serve_url(url: str, password: str) -> None:
 
 
 def load_settings() -> Settings:
-    mode = os.environ.get("UPSTREAM_MODE", "opencode-serve").strip().lower()
+    mode = os.environ.get("UPSTREAM_MODE", "zen-direct").strip().lower()
     if mode not in UPSTREAM_MODES:
         raise ValueError(
             f"UPSTREAM_MODE must be one of {UPSTREAM_MODES}, got {mode!r}"
@@ -122,5 +146,21 @@ def load_settings() -> Settings:
         ),
         opencode_serve_ephemeral_sessions=_env_bool(
             "OPENCODE_SERVE_EPHEMERAL_SESSIONS", True
+        ),
+        zen_base_url=os.environ.get(
+            "OPENCODE_ZEN_BASE_URL", "https://opencode.ai/zen/v1"
+        ).rstrip("/"),
+        zen_api_key=os.environ.get("OPENCODE_ZEN_API_KEY", ""),
+        zen_models=_csv(
+            os.environ.get("OPENCODE_ZEN_MODELS", ",".join(DEFAULT_ZEN_MODELS))
+        )
+        or list(DEFAULT_ZEN_MODELS),
+        zen_timeout_s=int(os.environ.get("OPENCODE_ZEN_TIMEOUT_S", "300")),
+        zen_proxy=os.environ.get("ZEN_PROXY", "").strip(),
+        zen_client_version=os.environ.get(
+            "OPENCODE_ZEN_CLIENT_VERSION", DEFAULT_ZEN_CLIENT_VERSION
+        ),
+        zen_bun_version=os.environ.get(
+            "OPENCODE_ZEN_BUN_VERSION", DEFAULT_ZEN_BUN_VERSION
         ),
     )

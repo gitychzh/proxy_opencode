@@ -1,40 +1,44 @@
 # proxy_opencode
 
 OpenAI 兼容的本机网关：把 [hermes](https://github.com/NousResearch/hermes-agent)
-等任意 OpenAI SDK 客户端，桥接到**本机官方 `opencode serve`**，从而使用
-OpenCode Zen 的免费模型（如 `opencode/big-pickle`，支持 tool call + reasoning）。
+等任意 OpenAI SDK 客户端，直连 **OpenCode Zen**，使用其免费模型
+（如 `opencode/big-pickle`，支持 token 级流式 + 原生 tool call + reasoning）。
 
 ```
-hermes / OpenAI SDK ──OpenAI API──> proxy_opencode ──loopback HTTP──> opencode serve ──> Zen
+hermes / OpenAI SDK ──OpenAI API──> proxy_opencode ──重构协议直连──> OpenCode Zen
 ```
 
-## 为什么不经本网关直连 Zen？
+## zen-direct 直连模式（默认）
 
-实测（2026-09）：免费层在服务端做客户端指纹校验，非 opencode 客户端
-（curl/httpx/python，即使复刻 UA 与 x-opencode-* 头）一律返回
-`FreeTierError: OpenCode's free tier can only be used from within OpenCode`。
-因此本项目**不**直连、不伪造指纹——而是驱动本机官方 `opencode serve`。
-它本来就是一个真正的 opencode 客户端，免费额度、限流完全由官方服务端执行。
+`UPSTREAM_MODE=zen-direct` 会按 opencode 1.18.32 客户端的**真实协议**直连
+`https://opencode.ai/zen/v1/chat/completions`：
+
+- **协议头**：按真机抓包逐字节复刻（`Bearer public` 匿名认证、
+  `User-Agent: opencode/<ver> ai-sdk/... runtime/bun/<ver>`、
+  `x-opencode-client/project/session/request`，会话/消息 ID 用 opencode
+  同款标识符算法实时生成）。
+- **免费层校验**：服务端要求匿名请求携带 opencode 真实系统提示词（实测：
+  只有协议头没有标记 → 403 `FreeTierError`；补上标记 → 通过校验）。网关
+  自动在 system 区注入随包的 `zen_prompt_default.txt`（opencode 官方默认
+  系统提示词全文）+ 一段客户端桥接说明，对上层透明。
+- **出口路由**：校验同时依赖出口 IP 区域。`httpx trust_env=True` 会自动
+  使用系统代理（Windows 注册表代理 / 环境变量，如 Clash 7897）；也可用
+  `ZEN_PROXY` 显式指定。**CN 直连出口会被 403 拒绝。**
+- **真流式**：SSE 逐字节透传——token 级流式、`reasoning_content`、原生
+  `tool_calls`（不需要 serve 模式的 JSON 契约桥接与合成流）。
+- **配额**：免费额度按出口 IP 计；共享 VPN 出口可能 429
+  （`FreeUsageLimitError`），网关按原状态码如实中继，稍后重试即可。
+- 配置付费 `OPENCODE_ZEN_API_KEY` 后自动免注入标记（按量计费路径）。
 
 ## 快速开始
 
 ```bash
-# 1. 起官方 serve（回环，强密码）
-set OPENCODE_SERVER_PASSWORD=选一个强密码        # bash: export ...
-opencode serve --hostname 127.0.0.1 --port 4096
-
-# 2. 起网关（默认 UPSTREAM_MODE=opencode-serve）
-set UPSTREAM_MODE=opencode-serve
-set OPENCODE_SERVE_URL=http://127.0.0.1:4096
-set OPENCODE_SERVER_PASSWORD=与上一致
+# 1. 起网关（默认 UPSTREAM_MODE=zen-direct）
 set GATEWAY_API_KEYS=dev-local-key             # 不设则为 dev-open（仅本机调试用）
 python -m proxy_opencode                       # 默认 127.0.0.1:8787
-# 或: uvicorn proxy_opencode.app:app --host 127.0.0.1 --port 8787
-```
+# 系统代理（如 Clash）需处于开启状态（出口区域决定免费层是否放行）
 
-验证：
-
-```bash
+# 2. 验证
 curl -H "Authorization: Bearer dev-local-key" http://127.0.0.1:8787/healthz
 curl -H "Authorization: Bearer dev-local-key" http://127.0.0.1:8787/v1/models
 curl -H "Authorization: Bearer dev-local-key" -H "Content-Type: application/json" -d @- http://127.0.0.1:8787/v1/chat/completions <<'EOF'
@@ -58,37 +62,37 @@ providers:
 ## 语义与边界
 
 - **端点**：`GET /healthz`（无需鉴权）、`GET /v1/models`、
-  `POST /v1/chat/completions`（非流式 + 合成流式）。
+  `POST /v1/chat/completions`（zen-direct 真 SSE 流式；非流式聚合）。
 - **字段白名单**：仅透传 OpenAI 标准字段（`messages`/`tools`/`temperature`/…，
   见 `upstreams/fields.py`）；`REASONING_PASSTHROUGH=true` 时含 reasoning 字段。
-- **工具调用**：serve 的 prompt API 只收文本；外部 tools 通过 JSON 契约桥接，
-  `tool_calls` 双向如实映射（`metadata.tools_source=json-contract-bridge`）。
-  模型代理内部使用 opencode 自带工具时，在 `metadata.internal_tools` 标注。
-- **思考强度**：`reasoning_effort` 接受并映射为指令提示（low→简短思考，
-  high/max→深度思考），属建议性提示，模型遵守程度以实际为准。
-- **流式**：serve 无 token 级流式，`stream=true` 返回合成单 chunk 并带
-  `metadata.synthetic_stream=true` 与响应头 `X-Opencode-Serve-Synthetic-Stream`。
-- **错误**：连接不上 serve → 502；超时 → 504；鉴权 → 401；限流 → 429。
-- **无状态**：每个 chat 请求映射为一个**临时 opencode session**，完成后删除
-  （可用 `OPENCODE_SERVE_EPHEMERAL_SESSIONS=false` 关闭）。
+- **工具调用**：直连模式下 `tools` 原生透传，模型返回原生 `tool_calls`
+  （`finish_reason=tool_calls`），hermes 等 agent 客户端零改造。
+- **思考**：big-pickle 的 reasoning 以 `reasoning_content` 透传（流式为
+  `delta.reasoning_content`）。
+- **流式**：`stream=true` 为真 SSE；`stream=false` 由网关聚合完整 JSON。
+- **错误**：上游错误按原状态码与 JSON 中继（403 FreeTierError / 429 限流 /
+  5xx）；连接失败 → 502；网关鉴权 → 401；网关限流 → 429。
+- **无状态**：每个请求一个新 `ses_`/`msg_` 标识符，无服务端会话状态。
 
 ## 配置（环境变量）
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `UPSTREAM_MODE` | `opencode-serve` | `opencode-serve`（本机官方 serve）或 `openai`（通用透传） |
-| `OPENCODE_SERVE_URL` | `http://127.0.0.1:4096` | **仅允许 loopback**；无密码时只允许 127.0.0.1 |
-| `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` | `opencode` / 空 | serve 的 Basic auth |
-| `OPENCODE_SERVE_MODELS` | `opencode/big-pickle` | `/v1/models` 暴露的模型列表（逗号分隔） |
-| `OPENCODE_SERVE_TIMEOUT_S` | `120` | serve 单次 HTTP 请求超时 |
-| `OPENCODE_SERVE_WAIT_TIMEOUT_S` | `600` | 单回合等待完成超时 |
+| `UPSTREAM_MODE` | `zen-direct` | `zen-direct`（直连 Zen）/ `opencode-serve`（本机官方 serve）/ `openai`（通用透传） |
+| `OPENCODE_ZEN_BASE_URL` | `https://opencode.ai/zen/v1` | Zen API 基址（仅 opencode.ai / loopback） |
+| `OPENCODE_ZEN_API_KEY` | 空 | Zen API 密钥；空 = 匿名免费层（`Bearer public` + 标记注入） |
+| `OPENCODE_ZEN_MODELS` | `opencode/big-pickle` | `/v1/models` 兜底模型列表（逗号分隔；正常情况直接拉 Zen 目录） |
+| `OPENCODE_ZEN_TIMEOUT_S` | `300` | 上游单请求超时 |
+| `ZEN_PROXY` | 空 | 显式出口代理（如 `http://127.0.0.1:7897`）；空 = 跟随系统/环境代理 |
+| `OPENCODE_ZEN_CLIENT_VERSION` | `1.18.32` | UA 中的 opencode 版本 |
+| `OPENCODE_ZEN_BUN_VERSION` | `1.3.14` | UA 中的 bun 版本 |
+| `OPENCODE_SERVE_URL` | `http://127.0.0.1:4096` | 仅 serve 模式；**只允许 loopback** |
+| `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` | `opencode` / 空 | serve 模式的 Basic auth |
+| `OPENCODE_SERVE_MODELS` | `opencode/big-pickle` | serve 模式 `/v1/models` 列表 |
 | `GATEWAY_API_KEYS` | 空（dev-open） | 网关 Bearer key（逗号分隔） |
 | `REQUESTS_PER_MINUTE` | `60` | 每个网关 key 的限流 |
 | `PORT` | `8787` | 网关端口 |
 | `UPSTREAM_BASE_URL` / `UPSTREAM_API_KEY` | `https://api.openai.com` / 空 | 仅 `openai` 透传模式 |
-
-`openai` 透传模式：把白名单字段原样转发到任意 OpenAI 兼容端点，SSE 流
-原样透传，上游错误按原状态码与 JSON 返回。
 
 ## 日志
 
@@ -98,8 +102,8 @@ providers:
 ## 测试与质量
 
 ```bash
-pytest tests/ -q                    # 单元 + 路由测试（respx 伪 serve，CI 可跑）
-python scripts/e2e_hermes.py        # 端到端：本机 hermes 36 条真实请求
+pytest tests/ -q                    # 单元 + 路由测试（respx 伪上游，CI 可跑）
+python scripts/e2e_hermes.py        # 端到端：本机 hermes 真实请求
 ```
 
 端到端与 drive 细节见 `scripts/e2e_hermes.md`。
@@ -107,6 +111,7 @@ CI：`.github/workflows/ci.yml`（Python 3.12.13 + pytest + ruff）。
 
 ## 仓库治理
 
-- `AGENTS.md`：维护约定与架构说明（**改动前先读**）
+- `AGENTS.md`：维护约定与架构说明（**改动前先读**，内含免费层校验机制的
+  实测结论，勿重复踩坑）
 - `CHANGELOG.md`、`CONTRIBUTING.md`、`SECURITY.md`
 - `docs/engineering-constraints.md`：工程化基线

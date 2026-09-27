@@ -14,15 +14,14 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from ..config import Settings
 from ..errors import openai_error
 from ..security import build_auth_dependency
-from ..upstreams import build_adapter
+from ..upstreams.fields import filter_payload
+from ..upstreams.openai_http import StreamRelay
 from ..upstreams.opencode_serve import (
     ServeAdapter,
     ServeCompletion,
     ServeError,
     WaitTimeoutError,
 )
-from ..upstreams.fields import filter_payload
-from ..upstreams.openai_http import OpenAIHttpAdapter, StreamRelay
 
 logger = logging.getLogger("proxy_opencode.chat")
 

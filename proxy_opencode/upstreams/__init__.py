@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from ..config import Settings
-from . import openai_http, opencode_serve
+from . import openai_http, opencode_serve, zen_direct
 
 
 class UpstreamAdapter(Protocol):
@@ -39,4 +39,6 @@ class UpstreamAdapter(Protocol):
 def build_adapter(settings: Settings) -> UpstreamAdapter:
     if settings.is_opencode_serve:
         return opencode_serve.ServeAdapter(settings)
+    if settings.is_zen_direct:
+        return zen_direct.ZenDirectAdapter(settings)
     return openai_http.OpenAIHttpAdapter(settings)

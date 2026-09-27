@@ -12,7 +12,6 @@ All behavior lives in dedicated modules:
 from __future__ import annotations
 
 import logging
-
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request

@@ -1,45 +1,40 @@
-# 端到端验证：hermes -> proxy_opencode -> opencode serve -> Zen big-pickle
+# 端到端验证：hermes -> proxy_opencode (zen-direct) -> Zen big-pickle
 
 ## 前置
 
-1. 本机已安装并能运行官方 `opencode`（npm 版，`opencode --version` 可查）。
-2. 本机已安装 hermes（`hermes --version`）。
+1. 本机已安装 hermes（`hermes --version`）。
+2. 系统代理（如 Clash）处于开启状态——免费层校验依赖出口区域，
+   CN 直连出口会被 403 `FreeTierError` 拒绝（详见 AGENTS.md）。
 3. 在 hermes `config.yaml` 的 `providers:` 下注册网关（见 README）
-   —— provider 名示例为 `proxyo`。
+   —— provider 名示例为 `proxyo`，指向 `http://127.0.0.1:8791/v1`。
 
 ## 步骤
 
 ```bash
-# 终端1：官方 serve（回环 + 密码）
-set OPENCODE_SERVER_PASSWORD=你的密码
-opencode serve --hostname 127.0.0.1 --port 4096
-
-# 终端2：网关
-set UPSTREAM_MODE=opencode-serve
-set OPENCODE_SERVE_URL=http://127.0.0.1:4096
-set OPENCODE_SERVER_PASSWORD=与终端1一致
+# 终端1：网关（zen-direct 为默认模式）
 set GATEWAY_API_KEYS=dev-local-key
-python -m proxy_opencode
+python -m proxy_opencode                       # 127.0.0.1:8787
 
-# 终端3：单发冒烟
+# 终端2：单发冒烟
 hermes chat --provider proxyo -m opencode/big-pickle --oneshot --cli -q "Reply with exactly: pong"
 
-# 批量（36 条：问答 + 推理强度 + 工具调用（--yolo 自动放行工具））
+# 批量（问答 + 推理强度 + 工具调用，--yolo 自动放行工具）
 python scripts/e2e_hermes.py
 # 报告写到 cap/e2e_report.json（路径见脚本顶部常量）
 ```
 
-## 验收口径（2026-09 实测基线）
+## 验收口径
 
-- 36/36 请求 rc=0；工具类提示词会真实落盘文件（`--yolo`）；
+- 冒烟 rc=0 且回复含 `pong`；工具类提示词真实落盘文件（`--yolo`）；
   `--reasoning high` 在 CLI 中显示 Reasoning 面板。
-- 平均时延 ~8-15s/条（免费层有限流，串行为宜）。
+- 平均时延 ~5-30s/条（免费层按出口 IP 限流，串行为宜；
+  429 `FreeUsageLimitError` 属共享出口配额触顶，等待重试即可）。
 
 ## 常见坑
 
-- 直连 `https://opencode.ai/zen/v1/...` 用 curl/python 会被 FreeTierError
-  拒之门外（客户端指纹校验）——必须经由 `opencode serve`。见 AGENTS.md。
-- `/api/session/{id}/wait` 会在空闲时返回 503，网关内部用轮询
-  `GET /api/session/{id}/message`。
+- 免费层校验 = 请求体标记（opencode 系统提示词）+ 出口 IP 区域 +
+  客户端指纹。网关已自动处理标记注入；若见 403 `FreeTierError`，
+  先检查出口路由（`ZEN_PROXY` / 系统代理）是否绕过了 CN 直连。
+- `stream=false` 由网关聚合；`stream=true` 为真 SSE（token 级）。
 - hermes 的 `Messages: N (…, 0 tool calls)` 摘要统计的是最后一轮，
   不代表中间没有工具调用；以工作目录文件变化/会话日志为准。

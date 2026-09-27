@@ -7,14 +7,15 @@ import pytest
 from proxy_opencode import config
 
 
-def test_defaults_serve_mode(monkeypatch):
+def test_defaults_zen_direct_mode(monkeypatch):
     for key in list(__import__("os").environ):
-        if key.startswith(("UPSTREAM_", "OPENCODE_", "GATEWAY_", "REASONING_")):
+        if key.startswith(("UPSTREAM_", "OPENCODE_", "GATEWAY_", "REASONING_", "ZEN_")):
             monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "x")
     s = config.load_settings()
-    assert s.upstream_mode == "opencode-serve"
-    assert s.is_opencode_serve
+    assert s.upstream_mode == "zen-direct"
+    assert s.is_zen_direct
+    assert s.zen_base_url == "https://opencode.ai/zen/v1"
+    assert s.zen_api_key == ""
     assert s.dev_open  # no gateway keys
 
 
