@@ -78,7 +78,7 @@ async def test_headers_use_api_key_when_configured() -> None:
 
 
 @pytest.mark.asyncio
-async def test_body_injects_marker_and_strips_provider_prefix() -> None:
+async def test_body_injects_marker_and_merges_builtin_tools() -> None:
     adapter = ZenDirectAdapter(make_settings())
     body = adapter._build_body(
         {
@@ -93,8 +93,75 @@ async def test_body_injects_marker_and_strips_provider_prefix() -> None:
     msgs = body["messages"]
     assert msgs[0]["role"] == "system"
     assert msgs[0]["content"].startswith("You are opencode, an interactive CLI tool")
-    assert "OpenAI-compatible" in msgs[0]["content"]  # bridge note present
+    assert "NEVER call the opencode built-in tools" in msgs[0]["content"]
     assert msgs[1] == {"role": "user", "content": "hi"}
+    # free tier gate: builtin tool schemas must be present
+    names = {t["function"]["name"] for t in body["tools"]}
+    assert {"bash", "read", "edit", "glob", "grep"} <= names
+    assert body["tool_choice"] == "auto"
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_body_merges_client_tools_after_builtins() -> None:
+    adapter = ZenDirectAdapter(make_settings())
+    custom = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            },
+        }
+    ]
+    body = adapter._build_body(
+        {
+            "model": "big-pickle",
+            "messages": [{"role": "user", "content": "weather?"}],
+            "tools": custom,
+        },
+        "big-pickle",
+    )
+    names = [t["function"]["name"] for t in body["tools"]]
+    # builtin schemas first, client tools appended after
+    assert names[0] == "bash"
+    assert names[-1] == "get_weather"
+    assert "get_weather" in names
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_body_client_tool_wins_name_collision() -> None:
+    adapter = ZenDirectAdapter(make_settings())
+    custom = [
+        {
+            "type": "function",
+            "function": {
+                "name": "bash",  # collides with a builtin
+                "description": "client-side bash",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    body = adapter._build_body(
+        {"model": "big-pickle", "messages": [{"role": "user", "content": "x"}], "tools": custom},
+        "big-pickle",
+    )
+    bash_defs = [t for t in body["tools"] if t["function"]["name"] == "bash"]
+    assert len(bash_defs) == 1
+    assert bash_defs[0]["function"]["description"] == "client-side bash"
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_body_stream_options_mirrors_genuine_client() -> None:
+    adapter = ZenDirectAdapter(make_settings())
+    body = adapter._build_body(
+        {"model": "big-pickle", "stream": True, "messages": [{"role": "user", "content": "x"}]},
+        "big-pickle",
+    )
+    assert body["stream_options"] == {"include_usage": True}
     await adapter.aclose()
 
 
@@ -143,25 +210,42 @@ async def test_body_strips_extra_message_fields() -> None:
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_chat_non_stream_passthrough_and_error_relay() -> None:
+async def test_chat_non_stream_aggregates_sse_and_error_relay() -> None:
     route = respx.post("https://opencode.ai/zen/v1/chat/completions")
     adapter = ZenDirectAdapter(make_settings())
 
+    # Free tier only serves stream=true; non-stream requests are aggregated.
+    sse = (
+        'data: {"id":"z1","created":123,"model":"big-pickle","choices":[{"index":0,'
+        '"delta":{"role":"assistant","reasoning_content":"thinking"}}]}\n\n'
+        'data: {"id":"z1","created":123,"model":"big-pickle","choices":[{"index":0,'
+        '"delta":{"content":"po"}},{"index":0,"delta":{"content":"ng"}}]}\n\n'
+        'data: {"id":"z1","created":123,"model":"big-pickle","choices":[{"index":0,'
+        '"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,'
+        '"completion_tokens":2,"total_tokens":12}}\n\n'
+        'data: [DONE]\n\n'
+        'data: {"choices":[],"cost":"0"}\n\n'
+    )
     route.respond(
-        json={
-            "id": "x",
-            "choices": [
-                {"index": 0, "message": {"role": "assistant", "content": "pong"}}
-            ],
-        }
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+        content=sse.encode(),
     )
     result = await adapter.chat(
         {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
     )
-    assert result["choices"][0]["message"]["content"] == "pong"
+    msg = result["choices"][0]["message"]
+    assert msg["content"] == "pong"
+    assert msg["reasoning_content"] == "thinking"
+    assert result["choices"][0]["finish_reason"] == "stop"
+    assert result["usage"]["total_tokens"] == 12
+    assert result["id"] == "z1"
+    assert result["metadata"]["aggregated_stream"] is True
     sent = route.calls.last.request
     body = json.loads(sent.content)
     assert body["model"] == "big-pickle"
+    assert body["stream"] is True  # forced upstream
+    assert body["stream_options"] == {"include_usage": True}
     assert sent.headers["Authorization"] == "Bearer public"
     assert sent.headers["x-opencode-client"] == "cli"
 
