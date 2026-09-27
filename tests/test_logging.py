@@ -126,3 +126,77 @@ async def test_chat_unhandled_adapter_error_returns_500(caplog):
     assert resp.json()["error"]["type"] == "api_error"
     assert any("unhandled chat error" in r.getMessage() for r in caplog.records)
     assert any(r.exc_info for r in caplog.records), "traceback must be logged"
+
+
+class FakeStreamRelay:
+    """Minimal stand-in for StreamRelay: replays chunks, optional failure."""
+
+    def __init__(self, chunks=(b"a", b"b"), exc=None):
+        self._chunks = list(chunks)
+        self._exc = exc
+        self.usage_holder: dict = {}
+
+    async def chunks(self):
+        for c in self._chunks:
+            if self._exc is not None and c == self._chunks[-1]:
+                raise self._exc
+            yield c
+
+
+async def _collect_relay(relay):
+    from proxy_opencode.routes.chat import _relay
+
+    out = []
+    async for chunk in _relay(
+        relay, lambda status, usage=None: None,
+        request_id="req1", model="m", client="127.0.0.1",
+    ):
+        out.append(chunk)
+    return out
+
+
+@pytest.mark.asyncio
+async def test_stream_relay_logs_completed(caplog):
+    with caplog.at_level(logging.INFO, logger="proxy_opencode.chat"):
+        out = await _collect_relay(FakeStreamRelay())
+    assert out == [b"a", b"b"]
+    ended = [r for r in caplog.records if r.getMessage() == "stream ended"]
+    assert len(ended) == 1
+    assert ended[0].chunks == 2
+    assert ended[0].reason == "completed"
+    assert ended[0].ttfb_ms is not None
+    assert ended[0].duration_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_stream_relay_logs_upstream_midstream_failure(caplog):
+    import httpx
+
+    with caplog.at_level(logging.INFO, logger="proxy_opencode.chat"):
+        with pytest.raises(httpx.ReadError):
+            await _collect_relay(FakeStreamRelay(exc=httpx.ReadError("mid-stream")))
+    reasons = [r.reason for r in caplog.records if hasattr(r, "reason")]
+    assert "relay_error:ReadError" in reasons
+    ended = [r for r in caplog.records if r.getMessage() == "stream ended"]
+    assert ended and ended[0].reason == "relay_error:ReadError"
+    assert any(
+        r.getMessage() == "stream relay failed" and r.exc_info
+        for r in caplog.records
+    ), "mid-stream failure must carry a traceback"
+
+
+@pytest.mark.asyncio
+async def test_stream_relay_logs_client_disconnect(caplog):
+    from proxy_opencode.routes.chat import _relay
+
+    gen = _relay(
+        FakeStreamRelay(), lambda status, usage=None: None,
+        request_id="req1", model="m", client="127.0.0.1",
+    )
+    with caplog.at_level(logging.INFO, logger="proxy_opencode.chat"):
+        await gen.__anext__()  # consume one chunk
+        await gen.aclose()  # simulate client disconnect
+    ended = [r for r in caplog.records if r.getMessage() == "stream ended"]
+    assert len(ended) == 1
+    assert ended[0].reason == "client_disconnected"
+    assert ended[0].chunks == 1

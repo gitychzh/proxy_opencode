@@ -30,6 +30,10 @@ FIELDS = (
     "keys",
     "adapter",
     "version",
+    "chunks",
+    "ttfb_ms",
+    "duration_ms",
+    "error_detail",
 )
 
 _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"

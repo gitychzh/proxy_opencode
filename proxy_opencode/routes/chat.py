@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -26,8 +27,9 @@ from ..upstreams.opencode_serve import (
 logger = logging.getLogger("proxy_opencode.chat")
 
 
-def _log(request: Request, request_id: str, model: str, **fields: Any) -> None:
-    client = request.client.host if request.client else "-"
+def _log(
+    request: Request, request_id: str, model: str, client: str, **fields: Any
+) -> None:
     logger.info(
         "chat completion",
         extra={"request_id": request_id, "model": model, "client": client, **fields},
@@ -42,6 +44,7 @@ def make_router(settings: Settings) -> APIRouter:
     async def handler(request: Request, _: str = Depends(auth)) -> Any:
         started = time.perf_counter()
         request_id = uuid.uuid4().hex[:12]
+        client = request.client.host if request.client else "-"
         try:
             body = await request.json()
         except Exception:
@@ -58,6 +61,7 @@ def make_router(settings: Settings) -> APIRouter:
                 request,
                 request_id,
                 model,
+                client,
                 stream=stream,
                 has_tools=bool(payload.get("tools")),
                 status=status,
@@ -100,7 +104,13 @@ def make_router(settings: Settings) -> APIRouter:
 
         if isinstance(result, StreamRelay):
             return StreamingResponse(
-                _relay(result, log),
+                _relay(
+                    result,
+                    log,
+                    request_id=request_id,
+                    model=model,
+                    client=client,
+                ),
                 status_code=200,
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -193,9 +203,60 @@ def _synthetic_stream(model: str, response: dict[str, Any]) -> StreamingResponse
     )
 
 
-async def _relay(relay: StreamRelay, log: Any) -> AsyncIterator[bytes]:
-    async for chunk in relay.chunks():
-        yield chunk
-    log(200, relay.usage_holder.get("usage"))
+async def _relay(
+    relay: StreamRelay,
+    log: Any,
+    *,
+    request_id: str,
+    model: str,
+    client: str,
+) -> AsyncIterator[bytes]:
+    """Relay upstream SSE bytes to the client with stream lifecycle logging.
+
+    Every stream terminates with a "stream ended" record — including the
+    abnormal ends (client disconnect, upstream mid-stream failure) that
+    would otherwise vanish silently from the logs.
+    """
+    started = time.perf_counter()
+    chunks = 0
+    ttfb_ms: float | None = None
+    reason = "completed"
+    try:
+        async for chunk in relay.chunks():
+            if ttfb_ms is None:
+                ttfb_ms = round((time.perf_counter() - started) * 1000, 1)
+            chunks += 1
+            yield chunk
+        log(200, relay.usage_holder.get("usage"))
+    except (asyncio.CancelledError, GeneratorExit):
+        reason = "client_disconnected"
+        raise
+    except Exception as exc:
+        reason = f"relay_error:{type(exc).__name__}"
+        logger.exception(
+            "stream relay failed",
+            extra={
+                "request_id": request_id,
+                "model": model,
+                "client": client,
+                "chunks": chunks,
+                "reason": reason,
+                "error_detail": str(exc)[:200],
+            },
+        )
+        raise
+    finally:
+        logger.info(
+            "stream ended",
+            extra={
+                "request_id": request_id,
+                "model": model,
+                "client": client,
+                "chunks": chunks,
+                "ttfb_ms": ttfb_ms,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                "reason": reason,
+            },
+        )
 
 

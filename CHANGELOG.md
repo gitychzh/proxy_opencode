@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.3] - 2026-09-28
+
+### Added
+
+- **SSE 流生命周期日志**：每条流式请求终止时记录 `stream ended`
+  （request_id / model / client / chunks / ttfb_ms / duration_ms / reason）。
+  此前流在客户端断开或上游中途断流时会**从日志里无声消失**（既无完成行也
+  无错误行），无法区分"慢"与"死了"。reason 取值：`completed` /
+  `client_disconnected` / `relay_error:<异常名>`（后者附完整堆栈）。
+
 ## [0.3.2] - 2026-09-28
 
 ### Fixed

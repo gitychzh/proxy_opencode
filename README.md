@@ -110,6 +110,8 @@ LOG_FORMAT=json python -m proxy_opencode   # JSON 行格式（机器解析/长�
 ```
 
 日志字段采用白名单机制（`logsetup.py`），白名单外的 extra 一律不渲染。
+流式请求终止时记录 `stream ended`（chunks / ttfb_ms / duration_ms / reason：
+`completed` / `client_disconnected` / `relay_error:<异常名>`），慢与死可区分。
 
 ## 测试与质量
 
