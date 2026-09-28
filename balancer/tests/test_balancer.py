@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -27,9 +28,14 @@ import pytest  # noqa: E402
 import lb  # noqa: E402  # isort:skip
 
 SEEN: list[tuple[str, str, str]] = []
+RID_SEEN: list[str] = []
 ROUTES: dict[str, object] = {}
 DEAD: set[str] = set()
 SLOW: dict[str, float] = {}
+# 桶对请求回 429：QUOTA_429 模拟 Zen 免费层额度耗尽（FreeUsageLimitError），
+# OWN_429 模拟桶网关自己的限流（code=rate_limit_exceeded）。只有前者该熔断。
+QUOTA_429: set[str] = set()
+OWN_429: set[str] = set()
 
 
 def fake_upstream(name: str):
@@ -66,9 +72,26 @@ def fake_upstream(name: str):
                 if not message.get("more_body"):
                     break
         SEEN.append((name, key, path))
+        rid = headers.get("x-request-id", "")
+        if rid:
+            RID_SEEN.append(rid)
         if name in DEAD:
             payload = b'{"error":{"message":"upstream dead"}}'
             await send({"type": "http.response.start", "status": 502,
+                        "headers": [(b"content-length", str(len(payload)).encode())]})
+            await send({"type": "http.response.body", "body": payload})
+            return
+        if name in QUOTA_429:
+            payload = (b'{"error":{"message":"free usage limit reached",'
+                       b'"type":"FreeUsageLimitError"}}')
+            await send({"type": "http.response.start", "status": 429,
+                        "headers": [(b"content-length", str(len(payload)).encode())]})
+            await send({"type": "http.response.body", "body": payload})
+            return
+        if name in OWN_429:
+            payload = (b'{"error":{"message":"gateway rate limited",'
+                       b'"code":"rate_limit_exceeded"}}')
+            await send({"type": "http.response.start", "status": 429,
                         "headers": [(b"content-length", str(len(payload)).encode())]})
             await send({"type": "http.response.body", "body": payload})
             return
@@ -101,9 +124,12 @@ class RoutedTransport(httpx.AsyncBaseTransport):
 @pytest.fixture(autouse=True)
 def _reset():
     SEEN.clear()
+    RID_SEEN.clear()
     ROUTES.clear()
     DEAD.clear()
     SLOW.clear()
+    QUOTA_429.clear()
+    OWN_429.clear()
     ROUTES["a"] = fake_upstream("a")
     ROUTES["b"] = fake_upstream("b")
     real = lb.make_client
@@ -228,3 +254,86 @@ async def test_concurrent_requests_spread_across_buckets():
     names = [n for n, _, _ in SEEN]
     assert names.count("a") + names.count("b") == 8
     assert names.count("a") > 0 and names.count("b") > 0
+
+
+@pytest.mark.asyncio
+async def test_quota_429_cordons_bucket_and_retries_next():
+    QUOTA_429.add("a")
+    pool = two_upstream_pool()
+    resp = await call(lb.create_app(pool))
+    assert resp.status_code == 200
+    assert SEEN[0][0] == "a" and SEEN[1][0] == "b"
+    assert pool.upstreams[0].quota_exhausted_until > 0
+    assert pool.upstreams[0].quota_hits == 1
+    assert pool.upstreams[1].quota_exhausted_until == 0
+    # 被熔断的桶不再被调度；只剩一个可用桶时全部流量去 b
+    before = len(SEEN)
+    await call(_app(pool))
+    assert all(name == "b" for name, _, _ in SEEN[before:])
+
+
+def _app(pool):
+    return lb.create_app(pool)
+
+
+@pytest.mark.asyncio
+async def test_quota_cordon_expires_at_utc_reset():
+    up = lb.Upstream("a", "http://a", "key-A")
+    up.quota_exhausted_until = 1.0  # 早已过期
+    pool = lb.Pool([up])
+    assert pool.candidates()[0].name == "a"
+    assert up.quota_exhausted_until == 0.0
+
+
+@pytest.mark.asyncio
+async def test_all_buckets_cordoned_still_tries_and_relays_429():
+    QUOTA_429.update({"a", "b"})
+    pool = two_upstream_pool()
+    resp = await call(lb.create_app(pool))
+    assert resp.status_code == 429
+    assert "FreeUsageLimitError" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_own_rate_limit_429_does_not_cordon():
+    OWN_429.add("a")
+    pool = two_upstream_pool()
+    resp = await call(lb.create_app(pool))
+    assert resp.status_code == 200
+    assert SEEN[0][0] == "a" and SEEN[1][0] == "b"
+    assert pool.upstreams[0].quota_exhausted_until == 0
+
+
+@pytest.mark.asyncio
+async def test_request_id_forwarded_and_echoed():
+    pool = two_upstream_pool()
+    resp = await call(lb.create_app(pool))
+    assert resp.status_code == 200
+    assert resp.headers.get("x-request-id")
+    assert RID_SEEN and all(RID_SEEN)
+
+
+@pytest.mark.asyncio
+async def test_admin_page_requires_key():
+    pool = two_upstream_pool()
+    transport = httpx.ASGITransport(app=lb.create_app(pool))
+    async with httpx.AsyncClient(transport=transport, base_url="http://lb") as c:
+        denied = await c.get("/admin")
+        ok_json = await c.get("/admin/json?key=lb-secret")
+        ok_html = await c.get("/admin?key=lb-secret")
+    assert denied.status_code == 401
+    assert ok_json.status_code == 200 and ok_json.json()["lb"] is True
+    assert ok_html.status_code == 200
+    assert "zen_lb buckets" in ok_html.text
+
+
+@pytest.mark.asyncio
+async def test_daily_request_counter_per_utc_day():
+    pool = two_upstream_pool()
+    app = lb.create_app(pool)
+    for _ in range(3):
+        await call(app)
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    for up in pool.upstreams:
+        assert up.daily_date == today
+        assert up.daily_requests >= 1

@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.5.0] - 2026-09-28
+
+### Added
+
+- **balancer：配额感知调度（quota-aware cordon）**：上游桶对请求回 429
+  `FreeUsageLimitError`（免费层按出口 IP 日配额耗尽）时，该桶被熔断到下一个
+  UTC 零点（北京 08:00）自动解除，期间不再向其派发请求；桶自己的
+  `code=rate_limit_exceeded` 429 不触发熔断（靠响应体区分，有单测）。
+  全部桶都熔断时把上游真实 429 透传给客户端，而不是伪 502。
+- **balancer：request_id 贯通**：每请求生成/继承 `x-request-id`，下发到桶、
+  回显给客户端、进入 LB 日志，LB→桶→Zen 全链路可追踪。
+- **balancer：`/admin` 管理面板**（`/admin` HTML 自动刷新 5s、`/admin/json`
+  机器可读；Bearer 或 `?key=` 鉴权）：每桶健康、配额状态与剩余重置分钟、
+  UTC 日请求计数、inflight、失败数、延迟、最后错误一屏可见。
+- **balancer：`/healthz` 扩展**：每桶增加 `quota_exhausted` /
+  `quota_reset_in_min` / `quota_hits` / `daily_requests` / `daily_date`。
+- **`scripts/deploy_node.sh`**：Linux 服务器 / Termux 一键部署（装依赖、
+  拉仓库、venv、写 `.env` 与 `run_node.sh`）；`scripts/proxy_opencode.service`
+  systemd 单元模板。四桶拓扑（win10-118 / win10-108 / ubuntu-26 / 手机
+  Termux-115）统一部署入口。
+- **测试**：balancer 10→17 项（配额熔断与到期解封、全桶 429 透传、自身限流
+  不熔断、request_id 转发与回显、/admin 鉴权、UTC 日计数），全套 66 绿。
+
+### Fixed
+
+- 端口漂移修正：`docs/dual-bucket-topology.md` 与 `balancer/run.cmd.example`
+  的网关端口 8787 全部更正为实际监听的 8791。
+
 ## [0.4.0] - 2026-09-28
 
 ### Added

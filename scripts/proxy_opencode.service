@@ -1,0 +1,30 @@
+# proxy_opencode 网关节点的 systemd 单元模板（ubuntu 桶节点用）
+#
+# 安装（假设用户名 ubuntu，仓库在 ~/proxy_opencode）：
+#   sudo cp scripts/proxy_opencode.service /etc/systemd/system/
+#   # 按机器实际用户/路径改 User= 与 WorkingDirectory= / ExecStart= / EnvironmentFile=
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now proxy_opencode
+#   systemctl status proxy_opencode --no-pager
+#
+# 凭据放在 ~/proxy_opencode/.env（deploy_node.sh 生成，权限 600，不进 git）。
+
+[Unit]
+Description=proxy_opencode model gateway (zen-direct bucket)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/proxy_opencode
+EnvironmentFile=/home/ubuntu/proxy_opencode/.env
+ExecStart=/home/ubuntu/proxy_opencode/.venv/bin/python -m proxy_opencode
+Restart=always
+RestartSec=5
+# 日志红线：网关不记消息内容/key；journald 只会有生命周期与状态行
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

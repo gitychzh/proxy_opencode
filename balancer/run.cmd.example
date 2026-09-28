@@ -26,7 +26,7 @@ REM 配额按出口 IP 计，所以每个桶必须位于不同出口 IP 的机�
 REM 两个网关只是同一份额度，不构成两个桶。
 REM least-connection 轮询：谁空闲去谁；不可用的桶自动跳过。
 REM 未设置 ZEN_LB_UPSTREAMS 时 LB 以 503 fail-closed（代码里不内置任何真实 key）。
-set "ZEN_LB_UPSTREAMS=bucket-a|http://127.0.0.1:8787|CHANGE-ME-gateway-key;bucket-b|http://OTHER-BUCKET-IP:8787|CHANGE-ME-other-gateway-key"
+set "ZEN_LB_UPSTREAMS=bucket-a|http://127.0.0.1:8791|CHANGE-ME-gateway-key;bucket-b|http://OTHER-BUCKET-IP:8791|CHANGE-ME-other-gateway-key"
 
 REM ── 日志 ──────────────────────────────────────────────────────────────
 REM 不设则默认写到脚本同级的 logs/lb.log（相对路径，不绑定任何盘符）

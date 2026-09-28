@@ -22,7 +22,8 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from typing import Any
 from urllib.parse import urlsplit
@@ -81,6 +82,15 @@ class Upstream:
     total_failures: int = 0
     last_error: str = ""
     last_latency_ms: float = 0.0
+    # Quota-aware circuit breaking: the free tier allows ~600 requests per
+    # egress IP per UTC day and answers 429 once it is burned. When that
+    # happens the bucket is cordoned until the next UTC midnight (= 08:00
+    # Beijing), because retrying into it only burns latency.
+    quota_exhausted_until: float = 0.0
+    quota_hits: int = 0
+    daily_date: str = ""
+    daily_requests: int = 0
+    _quota_reason: str = field(default="", repr=False)
 
     @property
     def host_port(self) -> str:
@@ -110,23 +120,72 @@ def load_upstreams(spec: str | None = None) -> list[Upstream]:
     return out
 
 
+def next_utc_reset(now: float | None = None) -> float:
+    """Epoch timestamp of the next UTC midnight (free-tier quota reset)."""
+    ts = now if now is not None else time.time()
+    day_start = (int(ts) // 86400) * 86400
+    return float(day_start + 86400)
+
+
+def _is_own_rate_limit(body: bytes) -> bool:
+    """Distinguish the bucket gateway's own 429 from the upstream quota 429.
+
+    The gateway's security layer emits code=rate_limit_exceeded; the Zen free
+    tier emits FreeUsageLimitError (relayed verbatim). Only the latter means
+    the egress-IP quota for this bucket is gone.
+    """
+    low = body.lower()
+    return b"rate_limit_exceeded" in low or b"gateway rate limited" in low
+
+
 class Pool:
     def __init__(self, upstreams: list[Upstream]) -> None:
         self.upstreams = upstreams
         self._rr = itertools.count()
         self._lock = asyncio.Lock()
 
+    def _clear_expired_quota(self) -> None:
+        now = time.time()
+        for u in self.upstreams:
+            if u.quota_exhausted_until and now >= u.quota_exhausted_until:
+                logger.info("upstream %s quota window elapsed, re-arming", u.name)
+                u.quota_exhausted_until = 0.0
+                u._quota_reason = ""
+
     def candidates(self) -> list[Upstream]:
-        healthy = [u for u in self.upstreams if u.healthy]
-        pool = healthy or list(self.upstreams)
-        offset = next(self._rr) % len(pool)
-        rotated = pool[offset:] + pool[:offset]
+        self._clear_expired_quota()
+        usable = [u for u in self.upstreams if u.healthy and not u.quota_exhausted_until]
+        if not usable:
+            # Degraded fallbacks keep old failover semantics: prefer buckets
+            # that merely flunked health probes; if every bucket is cordoned
+            # for quota, let the request through so the client sees the real
+            # upstream 429 instead of an invented error.
+            usable = [u for u in self.upstreams if not u.quota_exhausted_until] \
+                or list(self.upstreams)
+        offset = next(self._rr) % len(usable)
+        rotated = usable[offset:] + usable[:offset]
         return sorted(rotated, key=lambda u: u.inflight)
 
     async def acquire(self, up: Upstream) -> None:
         async with self._lock:
             up.inflight += 1
             up.total_requests += 1
+            today = time.strftime("%Y-%m-%d", time.gmtime())
+            if up.daily_date != today:
+                up.daily_date = today
+                up.daily_requests = 0
+            up.daily_requests += 1
+
+    async def mark_quota_exhausted(self, up: Upstream, reason: str = "") -> None:
+        async with self._lock:
+            until = next_utc_reset()
+            up.quota_exhausted_until = until
+            up.quota_hits += 1
+            up._quota_reason = reason[:200]
+            logger.warning(
+                "upstream %s QUOTA EXHAUSTED until %s (%s)",
+                up.name, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(until)),
+                reason[:120])
 
     async def release(self, up: Upstream, ok: bool, latency_ms: float, error: str = "") -> None:
         async with self._lock:
@@ -156,19 +215,27 @@ class Pool:
             return was != up.healthy
 
     def snapshot(self) -> list[dict[str, Any]]:
-        return [
-            {
+        now = time.time()
+        out = []
+        for u in self.upstreams:
+            quota_left_min = max(0, int((u.quota_exhausted_until - now) / 60)) \
+                if u.quota_exhausted_until else 0
+            out.append({
                 "name": u.name,
                 "target": u.host_port,
                 "healthy": u.healthy,
+                "quota_exhausted": bool(u.quota_exhausted_until),
+                "quota_reset_in_min": quota_left_min,
+                "quota_hits": u.quota_hits,
+                "daily_requests": u.daily_requests,
+                "daily_date": u.daily_date,
                 "inflight": u.inflight,
                 "requests": u.total_requests,
                 "failures": u.total_failures,
                 "last_latency_ms": u.last_latency_ms,
                 "last_error": u.last_error,
-            }
-            for u in self.upstreams
-        ]
+            })
+        return out
 
 
 def make_client() -> httpx.AsyncClient:
@@ -186,7 +253,8 @@ def client_bearer(headers: dict[str, str]) -> str:
 
 
 def forwardable(raw_headers: list[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
-    skip = HOP_BY_HOP | {"host", "content-length", "authorization", "accept-encoding"}
+    skip = HOP_BY_HOP | {"host", "content-length", "authorization", "accept-encoding",
+                         "x-request-id"}
     return [(n, v) for n, v in raw_headers if n.decode("latin-1").lower() not in skip]
 
 
@@ -236,6 +304,34 @@ async def health_loop(pool: Pool, client: httpx.AsyncClient) -> None:
         await asyncio.sleep(HEALTH_INTERVAL_S)
 
 
+def admin_page(snap: list[dict[str, Any]]) -> str:
+    rows = []
+    for u in snap:
+        quota = ("exhausted · reset in %dmin" % u["quota_reset_in_min"]) \
+            if u["quota_exhausted"] else "ok"
+        badge = "#a32d2d" if u["quota_exhausted"] or not u["healthy"] else "#3b6d11"
+        rows.append(
+            f"<tr><td>{u['name']}</td><td>{u['target']}</td>"
+            f"<td style='color:{badge}'>{'up' if u['healthy'] else 'down'}</td>"
+            f"<td style='color:{badge}'>{quota}</td>"
+            f"<td>{u['daily_date'] or '-'} / {u['daily_requests']}</td>"
+            f"<td>{u['inflight']}</td><td>{u['requests']}</td>"
+            f"<td>{u['failures']}</td><td>{u['last_latency_ms']:.0f}</td>"
+            f"<td class='err'>{u['last_error'][:80]}</td></tr>")
+    return (
+        "<!doctype html><meta charset='utf-8'>"
+        "<title>zen_lb admin</title><meta http-equiv='refresh' content='5'>"
+        "<style>body{font:13px/1.5 system-ui,sans-serif;margin:24px;color:#222}"
+        "table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:4px 10px;"
+        "text-align:left}th{background:#f4f4f4}.err{color:#888;max-width:280px;"
+        "overflow:hidden;text-overflow:ellipsis;white-space:nowrap}</style>"
+        "<h2>zen_lb buckets</h2><table><tr><th>bucket</th><th>target</th>"
+        "<th>health</th><th>quota</th><th>UTC day / reqs</th><th>inflight</th>"
+        "<th>total</th><th>failures</th><th>ms</th><th>last error</th></tr>"
+        + "".join(rows) + "</table>"
+        f"<p>refreshed {time.strftime('%Y-%m-%d %H:%M:%S')} (auto every 5s)</p>")
+
+
 def create_app(pool: Pool) -> Any:
     client = make_client()
 
@@ -267,7 +363,8 @@ def create_app(pool: Pool) -> Any:
 
         if path in ("/healthz", "/__lb_health"):
             snap = pool.snapshot()
-            any_ok = any(u["healthy"] for u in snap)
+            any_ok = any(u["healthy"] and not u["quota_exhausted"] for u in snap) \
+                or any(u["healthy"] for u in snap)
             payload = json.dumps({"healthy": any_ok, "upstreams": snap},
                                  ensure_ascii=False).encode()
             await send({"type": "http.response.start",
@@ -284,7 +381,13 @@ def create_app(pool: Pool) -> Any:
                           "type": "configuration_error"}}).encode()})
             return
 
-        if client_bearer(headers) != LB_KEY:
+        authorized = client_bearer(headers) == LB_KEY
+        if not authorized and path.startswith("/admin"):
+            # Browser-friendly admin auth: /admin?key=...
+            from urllib.parse import parse_qs
+            qs = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+            authorized = any(v == LB_KEY for v in qs.get("key", []))
+        if not authorized:
             logger.warning("lb auth rejected %s %s client=%s", method, path,
                            (scope.get("client") or ("-",))[0])
             await send({"type": "http.response.start", "status": 401,
@@ -294,10 +397,28 @@ def create_app(pool: Pool) -> Any:
                           "code": "invalid_key"}}).encode()})
             return
 
+        if path == "/admin":
+            snap = pool.snapshot()
+            body = admin_page(snap).encode()
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"text/html; charset=utf-8")]})
+            await send({"type": "http.response.body", "body": body})
+            return
+        if path == "/admin/json":
+            snap = pool.snapshot()
+            payload = json.dumps({"lb": True, "now": time.time(),
+                                  "upstreams": snap}, ensure_ascii=False).encode()
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body", "body": payload})
+            return
+
+        rid = headers.get("x-request-id") or uuid.uuid4().hex[:16]
         body = await read_body(receive)
-        base_headers = forwardable(scope["headers"])
+        base_headers = forwardable(scope["headers"]) + [(b"x-request-id", rid.encode())]
         tried = 0
         last_error = "no upstream attempted"
+        quota_429_body = b""  # 全部桶都额度耗尽时，把真实 429 透传给客户端
 
         for up in pool.candidates():
             if tried >= len(pool.upstreams):
@@ -318,6 +439,22 @@ def create_app(pool: Pool) -> Any:
                     client.build_request(method, up.target(path), content=body,
                                          headers=headers_fwd),
                     stream=True)
+                if resp.status_code == 429:
+                    err = await resp.aread()
+                    await resp.aclose()
+                    last_error = f"{up.name} status=429 body={err[:200]!r}"
+                    await pool.release(up, False, (time.perf_counter() - t0) * 1000,
+                                       last_error)
+                    if _is_own_rate_limit(err):
+                        logger.warning("rid=%s upstream %s own rate limit, retry next",
+                                       rid, up.name)
+                    else:
+                        quota_429_body = err
+                        await pool.mark_quota_exhausted(
+                            up, err[:200].decode("utf-8", errors="replace"))
+                        logger.warning("rid=%s upstream %s cordoned for quota, retry next",
+                                       rid, up.name)
+                    continue
                 if resp.status_code in RETRYABLE_STATUS:
                     err = await resp.aread()
                     await resp.aclose()
@@ -325,10 +462,12 @@ def create_app(pool: Pool) -> Any:
                     await pool.release(up, False, (time.perf_counter() - t0) * 1000, last_error)
                     logger.warning("lb retryable %s from %s", resp.status_code, up.name)
                     continue
-                logger.info("lb %s %s -> %s status=%d attempt=%d", method, path,
-                            up.name, resp.status_code, tried)
+                logger.info("rid=%s lb %s %s -> %s status=%d attempt=%d", rid, method,
+                            path, up.name, resp.status_code, tried)
+                out_headers = response_headers(resp.headers.raw) + [
+                    (b"x-request-id", rid.encode())]
                 await send({"type": "http.response.start", "status": resp.status_code,
-                            "headers": response_headers(resp.headers.raw)})
+                            "headers": out_headers})
                 streamed = True
                 async for chunk in resp.aiter_raw():
                     if chunk:
@@ -353,16 +492,26 @@ def create_app(pool: Pool) -> Any:
                     raise
                 continue
 
-        logger.error("lb all upstreams failed %s %s attempts=%d last=%s",
-                     method, path, tried, last_error)
+        logger.error("rid=%s lb all upstreams failed %s %s attempts=%d last=%s",
+                     rid, method, path, tried, last_error)
+        if quota_429_body:
+            # Every bucket is out of free quota: relay the upstream's real 429
+            # (with reset semantics) instead of masking it as a 502.
+            with contextlib.suppress(Exception):
+                await send({"type": "http.response.start", "status": 429,
+                            "headers": [(b"content-type", b"application/json"),
+                                        (b"x-request-id", rid.encode())]})
+                await send({"type": "http.response.body", "body": quota_429_body})
+            return
         with contextlib.suppress(Exception):
             await send({"type": "http.response.start", "status": 502,
-                        "headers": [(b"content-type", b"application/json")]})
+                        "headers": [(b"content-type", b"application/json"),
+                                    (b"x-request-id", rid.encode())]})
             await send({"type": "http.response.body", "body": json.dumps({
                 "error": {"message": f"All gateway upstreams are unavailable: {last_error}",
                           "type": "api_connection_error",
                           "code": "upstream_unreachable"}}).encode()})
-        logger.info("lb %s %s FAILED %.0fms (%s)", method, path,
+        logger.info("rid=%s lb %s %s FAILED %.0fms (%s)", rid, method, path,
                     (time.perf_counter() - started) * 1000, last_error)
 
     return app

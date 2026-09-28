@@ -20,13 +20,13 @@ hermes (本机) ──────────>│ LB  127.0.0.1:7892  (balancer
                         └───┬─────────────────────────┬───────┘
                             │                         │
                  桶 A：出口 117.95.209.16      出口 218.93.250.242
-                 本机 127.0.0.1:8787          owin10 <tailnet>:8787
+                 本机 127.0.0.1:8791          owin10 <tailnet>:8791
 
 hermes (owin10) ─────────>│ LB  127.0.0.1:7892  (balancer)   │
                         └───┬─────────────────────────┬───────┘
                             │                         │
                  桶 A：owin10 本机（出口 218.93.250.242）
-                 桶 B：<本机 tailnet>:8787（出口 117.95.209.16）
+                 桶 B：<本机 tailnet>:8791（出口 117.95.209.16）
 ```
 
 **关键性质**：两台机器互为对方的第二个桶，所以**两边的 hermes 都是双桶**；
@@ -36,12 +36,12 @@ hermes (owin10) ─────────>│ LB  127.0.0.1:7892  (balancer)  
 
 | 角色 | 主机 | tailnet | 网关端口 | 出口 IP |
 |---|---|---|---|---|
-| 本机（主） | `desktop-sgedrr5` | 100.121.137.118 | 8787 | 117.95.209.16 |
-| 副机 | `opc-win10` | 100.109.109.108 | 8787 | 218.93.250.242 |
+| 本机（主） | `desktop-sgedrr5` | 100.121.137.118 | 8791 | 117.95.209.16 |
+| 副机 | `opc-win10` | 100.109.109.108 | 8791 | 218.93.250.242 |
 
 每台机器上跑的进程：
 
-- `proxy_opencode`（本仓库）监听 `0.0.0.0:<8787>`，Windows 计划任务名
+- `proxy_opencode`（本仓库）监听 `0.0.0.0:<8791>`，Windows 计划任务名
   `ProxyOpencode`，登出触发 + 失败重启 99 次/1 分钟。
 - `balancer/lb.py` 监听 `0.0.0.0:7892`，计划任务名 `ZenLb`，配置见
   `balancer/run.cmd.example`。
@@ -51,7 +51,7 @@ hermes (owin10) ─────────>│ LB  127.0.0.1:7892  (balancer)  
 
 ### 双桶**不**提升单请求速度
 
-| 指标 | 双桶 (7892) | 单桶 (8787) | 结论 |
+| 指标 | 双桶 (7892) | 单桶 (8791) | 结论 |
 |---|---|---|---|
 | 单请求 chars/s | 288 | 300 | **-4%，无提升** |
 | 4 并发聚合 chars/s | 1026 | 1043 | -2% |
@@ -193,3 +193,31 @@ key 写在 `~/.hermes/.env` 的 `HERMES_CUSTOM_ZENLB_API_KEY`。
 | `upstreams/zen_prompt_default.txt` | 免费层标记资产，须与 opencode 版本同步 |
 | `docs/engineering-constraints.md` | 工程红线 |
 | `AGENTS.md` | 维护约定与免费层三要素（**改本项目前必读**） |
+
+## 5. 四桶一云拓扑与配额感知调度（0.5.0 起）
+
+### 目标拓扑（2026-09-28 起）
+
+```
+公网客户端 → Cloudflare(llm.223722.xyz, Tunnel)
+  → 阿里云 ECS(吉隆坡 47.250.130.52) Edge LB(systemd 24×7, 装 tailscale 入网)
+    → 桶① win10-118   :8791   （Windows 计划任务 ProxyOpencode）
+    → 桶② win10-108   :8791   （同上）
+    → 桶③ ubuntu-26   :8791   （systemd，scripts/proxy_opencode.service）
+    → 桶④ 手机-115   :8791   （Termux，scripts/deploy_node.sh 经 ADB 部署）
+```
+
+每桶独立出口 IP ≈600 请求/日，四桶合计 ≈2400/日。部署统一走
+`scripts/deploy_node.sh`（Linux/Termux）或计划任务（Windows），凭据只进各机
+`.env` / 计划任务脚本，不进 git。
+
+### 配额感知调度（0.5.0）
+
+- 桶对请求回 429 且响应体**不是** `rate_limit_exceeded`（即 Zen 的
+  `FreeUsageLimitError`）→ 该桶熔断到下一个 UTC 零点（北京 08:00），
+  期间 LB 不再向其派发请求，客户端请求自动落到还有配额的桶。
+- 桶自己的限流 429（`code=rate_limit_exceeded`）不熔断，只换桶重试。
+- 全部桶都熔断时，客户端拿到上游真实 429（而非伪 502）。
+- 统一观测：LB `/admin?key=<ZEN_LB_API_KEY>`（HTML，5s 自刷新）或
+  `/admin/json`；`/healthz` 也带每桶 `quota_exhausted`/`daily_requests`。
+- 全链路追踪：每请求 `x-request-id`（客户端可自带），LB 日志、桶回显一致。
