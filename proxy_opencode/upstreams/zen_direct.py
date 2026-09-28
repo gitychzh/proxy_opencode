@@ -9,6 +9,9 @@ official opencode 1.18.x client sends to `https://opencode.ai/zen/v1`:
   * Protocol headers (verified byte-for-byte against a mitm capture of the
     genuine client):
         Authorization: Bearer public
+        x-session-id: <stable UUID>   (Zen gate since 2026-09; without it
+                                        anonymous requests get AuthError
+                                        "Missing API key")
         Content-Type: application/json
         User-Agent: opencode/<ver> ai-sdk/provider-utils/4.0.23 runtime/bun/<ver>
         x-opencode-client: cli
@@ -256,6 +259,10 @@ class ZenDirectAdapter:
         )
         headers = {
             "Authorization": f"Bearer {self._settings.zen_api_key or 'public'}",
+            # Session gate (Zen, 2026-09): anonymous free-tier requests are
+            # rejected with AuthError "Missing API key" unless a stable
+            # `x-session-id` UUID header is present.
+            "x-session-id": self._settings.zen_session_id,
             "Content-Type": "application/json",
             "User-Agent": ua,
             "x-opencode-client": "cli",

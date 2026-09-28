@@ -7,6 +7,7 @@ one in README.md.
 from __future__ import annotations
 
 import os
+import uuid
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -65,6 +66,10 @@ class Settings:
     zen_timeout_s: int = 300
     # Optional egress proxy for the zen client, e.g. "http://127.0.0.1:7897".
     zen_proxy: str = ""
+    # Session gate (enforced by Zen since 2026-09): anonymous free-tier
+    # requests MUST carry an `x-session-id` header (any stable UUID).
+    # Empty -> a fresh UUID is generated once per process.
+    zen_session_id: str = ""
     zen_client_version: str = DEFAULT_ZEN_CLIENT_VERSION
     zen_bun_version: str = DEFAULT_ZEN_BUN_VERSION
 
@@ -169,6 +174,10 @@ def load_settings() -> Settings:
         or list(DEFAULT_ZEN_MODELS),
         zen_timeout_s=int(os.environ.get("OPENCODE_ZEN_TIMEOUT_S", "300")),
         zen_proxy=os.environ.get("ZEN_PROXY", "").strip(),
+        zen_session_id=(
+            os.environ.get("OPENCODE_ZEN_SESSION_ID", "").strip()
+            or str(uuid.uuid4())
+        ),
         zen_client_version=os.environ.get(
             "OPENCODE_ZEN_CLIENT_VERSION", DEFAULT_ZEN_CLIENT_VERSION
         ),
