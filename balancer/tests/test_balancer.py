@@ -10,6 +10,7 @@ the custom transport below.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -337,3 +338,79 @@ async def test_daily_request_counter_per_utc_day():
     for up in pool.upstreams:
         assert up.daily_date == today
         assert up.daily_requests >= 1
+
+
+# ------------------------------------------------- edge key store (v0.6.0)
+
+
+@pytest.mark.asyncio
+async def test_admin_key_mints_dynamic_key_and_it_calls_chat(tmp_path, monkeypatch):
+    monkeypatch.setattr(lb, "KEY_STORE_PATH", tmp_path / "keys.json")
+    app = lb.create_app(two_upstream_pool())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://lb") as c:
+        denied = await c.post("/admin/keys", json={},
+                              headers={"Authorization": "Bearer lb-secret"})
+        minted = await c.post("/admin/keys", json={"name": "phone", "ttl_hours": 24},
+                              headers={"Authorization": "Bearer api_ychzh22372222"})
+        assert denied.status_code == 401  # static key cannot manage keys
+        assert minted.status_code == 200
+        new_key = minted.json()["key"]
+        assert new_key.startswith("gw-") and minted.json()["expires_at"]
+
+        listing = await c.get("/admin/keys",
+                              headers={"Authorization": "Bearer api_ychzh22372222"})
+        assert listing.status_code == 200 and new_key not in listing.text
+
+        chat = await call(app, key=new_key)
+        assert chat.status_code == 200  # dynamic key passes user->LB auth
+
+
+@pytest.mark.asyncio
+async def test_revoked_dynamic_key_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(lb, "KEY_STORE_PATH", tmp_path / "keys.json")
+    app = lb.create_app(two_upstream_pool())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://lb") as c:
+        minted = (await c.post("/admin/keys", json={"ttl_hours": 1},
+                               headers={"Authorization": "Bearer api_ychzh22372222"})).json()
+        rid = (await c.delete(f"/admin/keys/{minted['id']}",
+                              headers={"Authorization": "Bearer api_ychzh22372222"}))
+        assert rid.status_code == 200
+        resp = await call(app, key=minted["key"])
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_expired_dynamic_key_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(lb, "KEY_STORE_PATH", tmp_path / "keys.json")
+    app = lb.create_app(two_upstream_pool())
+    rec = lb.EdgeKeyStore(tmp_path / "keys.json").create(ttl_hours=1)
+    rec["expires_at"] = "2000-01-01T00:00:00Z"
+    (tmp_path / "keys.json").write_text(json.dumps({"version": 1, "keys": [rec]}),
+                                        encoding="utf-8")
+    resp = await call(app, key=rec["key"])
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_admin_key_can_call_chat_and_admin_page():
+    app = lb.create_app(two_upstream_pool())
+    resp = await call(app, key="api_ychzh22372222")
+    assert resp.status_code == 200
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://lb") as c:
+        page = await c.get("/admin", headers={"Authorization": "Bearer api_ychzh22372222"})
+    assert page.status_code == 200
+
+
+def test_edge_keystore_default_ttl_and_permanent(tmp_path):
+    ks = lb.EdgeKeyStore(tmp_path / "keys.json", default_ttl_hours=24)
+    rec = ks.create(name="t")
+    assert rec["expires_at"] is not None  # default 24h
+    perm = ks.create(ttl_hours=0)
+    assert perm["expires_at"] is None
+    # reload from disk
+    ks2 = lb.EdgeKeyStore(tmp_path / "keys.json", default_ttl_hours=24)
+    assert ks2.validate(rec["key"]) is not None
+    assert ks2.validate(perm["key"]) is not None

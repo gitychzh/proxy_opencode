@@ -1,10 +1,18 @@
 """Least-connection load balancer in front of two OpenAI-compatible gateways.
 
 Each upstream is a separate proxy_opencode instance with its own egress IP
-(and therefore its own anonymous free-tier quota bucket) and its own inbound
-bearer key. The balancer presents one key to clients and rewrites
-Authorization per upstream, which is why this is a Python reverse proxy and
-not nginx: nginx cannot vary proxy_set_header per upstream server.
+(and therefore its own anonymous free-tier quota bucket). The balancer
+authenticates END USERS (permanent admin keys + dynamic 24h keys minted via
+/admin/keys), then rewrites Authorization to the shared bucket key per
+upstream — which is why this is a Python reverse proxy and not nginx: nginx
+cannot vary proxy_set_header per upstream server.
+
+Key model (v0.6.0):
+  * user -> LB:  ZEN_LB_ADMIN_KEYS (permanent, can manage /admin/*) plus
+                 dynamic keys from the JSON store (default 24h, 0=permanent)
+  * LB -> bucket: one shared bucket key (api_local22372222) for all buckets;
+                 the dynamic-key store lives ONLY here, so keys minted at the
+                 edge work across every bucket.
 
 Selection is least-connections with round-robin tie-breaking, so a slow or
 stalled bucket drains away instead of queueing behind it. Upstreams are
@@ -21,12 +29,16 @@ import itertools
 import json
 import logging
 import os
+import secrets
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import uvicorn
@@ -34,6 +46,18 @@ import uvicorn
 LOG_PATH = os.environ.get("ZEN_LB_LOG") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "logs", "lb.log")
 LB_KEY = os.environ.get("ZEN_LB_API_KEY", "")
+# Permanent admin keys (manage /admin/*, also valid for chat calls).
+LB_ADMIN_KEYS = [k for k in (
+    p.strip() for p in os.environ.get(
+        "ZEN_LB_ADMIN_KEYS", "api_ychzh22372222").split(",")) if k]
+# Extra static permanent keys (back-compat: ZEN_LB_API_KEY joins this set).
+LB_STATIC_KEYS = [k for k in (p.strip() for p in
+                  os.environ.get("ZEN_LB_API_KEYS", "").split(",")) if k]
+if LB_KEY and LB_KEY not in LB_STATIC_KEYS and LB_KEY not in LB_ADMIN_KEYS:
+    LB_STATIC_KEYS.append(LB_KEY)
+KEY_STORE_PATH = os.environ.get("ZEN_LB_KEY_STORE") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "keys.json")
+KEY_DEFAULT_TTL_HOURS = float(os.environ.get("ZEN_LB_KEY_TTL_HOURS", "24"))
 BIND_HOST = os.environ.get("ZEN_LB_HOST", "0.0.0.0")
 BIND_PORT = int(os.environ.get("ZEN_LB_PORT", "7892"))
 HEALTH_INTERVAL_S = float(os.environ.get("ZEN_LB_HEALTH_INTERVAL", "20"))
@@ -99,6 +123,111 @@ class Upstream:
 
     def target(self, path: str) -> str:
         return self.base_url.rstrip("/") + path
+
+
+class EdgeKeyStore:
+    """Dynamic edge key store: JSON persistence, default 24h expiry, revoke.
+
+    Minimal standalone twin of proxy_opencode.auth.keystore.KeyStore — the
+    edge box runs balancer/ without the gateway package installed, so this
+    file must stay dependency-free. Minted keys default to 24h validity
+    (0 = permanent); expired/revoked keys stop authenticating immediately.
+    """
+
+    def __init__(self, path: str | Path, default_ttl_hours: float = 24.0) -> None:
+        self.path = Path(path)
+        self.default_ttl_hours = default_ttl_hours
+        self._records: list[dict[str, Any]] = []
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            items = data.get("keys") or []
+            self._records = [r for r in items if isinstance(r, dict)]
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError):
+            logger.warning("edge key store unreadable; starting empty: %s", self.path)
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent),
+                                   prefix=".lbkeys-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({"version": 1, "keys": self._records}, fh,
+                          ensure_ascii=False, indent=2)
+            os.replace(tmp, self.path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    def create(self, name: str = "", ttl_hours: float | None = None) -> dict[str, Any]:
+        effective = self.default_ttl_hours if ttl_hours is None else ttl_hours
+        expires_at = None
+        if effective is not None and effective > 0:
+            expires_at = (self._now() + timedelta(hours=effective)) \
+                .isoformat().replace("+00:00", "Z")
+        record = {
+            "id": "k-" + secrets.token_hex(4),
+            "key": "gw-" + secrets.token_urlsafe(24),
+            "name": name,
+            "created_at": self._now().isoformat().replace("+00:00", "Z"),
+            "expires_at": expires_at,
+            "revoked": False,
+        }
+        self._records.append(record)
+        self._save()
+        logger.info("edge key created id=%s ttl=%s name=%s",
+                    record["id"], effective, name)
+        return record
+
+    @staticmethod
+    def _valid(record: dict[str, Any], now: datetime | None = None) -> bool:
+        if record.get("revoked"):
+            return False
+        exp = record.get("expires_at")
+        if not exp:
+            return True
+        try:
+            return (now or EdgeKeyStore._now()) < datetime.fromisoformat(
+                str(exp).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+
+    def validate(self, key: str) -> dict[str, Any] | None:
+        for r in self._records:
+            if r.get("key") == key and self._valid(r):
+                return r
+        return None
+
+    def list_public(self) -> list[dict[str, Any]]:
+        out = []
+        for r in self._records:
+            k = str(r.get("key") or "")
+            out.append({
+                "id": r.get("id"), "name": r.get("name"),
+                "created_at": r.get("created_at"),
+                "expires_at": r.get("expires_at"),
+                "revoked": r.get("revoked"),
+                "key_preview": k[:10] + "…" + k[-4:] if len(k) > 16 else k[:4] + "…",
+            })
+        return out
+
+    def revoke(self, key_id: str) -> bool:
+        for r in self._records:
+            if r.get("id") == key_id and not r.get("revoked"):
+                r["revoked"] = True
+                self._save()
+                logger.info("edge key revoked id=%s", key_id)
+                return True
+        return False
 
 
 def load_upstreams(spec: str | None = None) -> list[Upstream]:
@@ -334,6 +463,35 @@ def admin_page(snap: list[dict[str, Any]]) -> str:
 
 def create_app(pool: Pool) -> Any:
     client = make_client()
+    keystore = EdgeKeyStore(KEY_STORE_PATH, KEY_DEFAULT_TTL_HOURS)
+
+    def classify(token: str) -> str:
+        """admin | static | dynamic | none"""
+        if not token:
+            return "none"
+        if token in LB_ADMIN_KEYS:
+            return "admin"
+        if token in LB_STATIC_KEYS:
+            return "static"
+        if keystore.validate(token) is not None:
+            return "dynamic"
+        return "none"
+
+    async def _auth_401(send: Any, hint: str = "") -> None:
+        with contextlib.suppress(Exception):
+            await send({"type": "http.response.start", "status": 401,
+                        "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body", "body": json.dumps({
+                "error": {"message": "Invalid, expired, or missing API key" + hint,
+                          "type": "authentication_error",
+                          "code": "invalid_key"}}).encode()})
+
+    async def _json(send: Any, status: int, payload: dict[str, Any]) -> None:
+        with contextlib.suppress(Exception):
+            await send({"type": "http.response.start", "status": status,
+                        "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body",
+                        "body": json.dumps(payload, ensure_ascii=False).encode()})
 
     async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] == "lifespan":
@@ -373,28 +531,70 @@ def create_app(pool: Pool) -> Any:
             await send({"type": "http.response.body", "body": payload})
             return
 
-        if not LB_KEY:
+        token = client_bearer(headers)
+        kind = classify(token)
+        qs_key = ""
+        if path.startswith("/admin"):
+            qs = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+            qs_key = next(iter(qs.get("key", []) or []), "")
+            if kind == "none" and qs_key:
+                kind = classify(qs_key)
+
+        # /admin/keys management: admin keys only.
+        if path == "/admin/keys" or path.startswith("/admin/keys/"):
+            if kind != "admin":
+                logger.warning("lb admin-keys access denied client=%s",
+                               (scope.get("client") or ("-",))[0])
+                await _auth_401(send, " (admin key required)")
+                return
+            if method == "POST":
+                try:
+                    raw = json.loads(body_bytes) if (body_bytes := await read_body(receive)) else {}
+                except ValueError:
+                    raw = {}
+                if not isinstance(raw, dict):
+                    raw = {}
+                try:
+                    ttl = float(raw.get("ttl_hours", KEY_DEFAULT_TTL_HOURS))
+                except (TypeError, ValueError):
+                    ttl = -1.0
+                if ttl < 0:
+                    await _json(send, 400, {"error": {
+                        "message": "ttl_hours must be a number (0 = permanent).",
+                        "type": "invalid_request_error"}})
+                    return
+                rec = keystore.create(name=str(raw.get("name") or "")[:64], ttl_hours=ttl)
+                await _json(send, 200, {
+                    "id": rec["id"], "key": rec["key"], "name": rec["name"],
+                    "created_at": rec["created_at"], "expires_at": rec["expires_at"],
+                    "ttl_hours": ttl if ttl > 0 else None})
+                return
+            if method == "GET":
+                await _json(send, 200, {"keys": keystore.list_public()})
+                return
+            if method == "DELETE":
+                key_id = path.split("/admin/keys/", 1)[1].strip("/")
+                if keystore.revoke(key_id):
+                    await _json(send, 200, {"revoked": key_id})
+                else:
+                    await _json(send, 404, {"error": {
+                        "message": f"Key id {key_id!r} not found (or already revoked).",
+                        "type": "invalid_request_error"}})
+                return
+
+        if not LB_ADMIN_KEYS and not LB_STATIC_KEYS:
             await send({"type": "http.response.start", "status": 503,
                         "headers": [(b"content-type", b"application/json")]})
             await send({"type": "http.response.body", "body": json.dumps({
-                "error": {"message": "ZEN_LB_API_KEY not set; balancer is locked",
+                "error": {"message": "ZEN_LB_ADMIN_KEYS not set; balancer is locked",
                           "type": "configuration_error"}}).encode()})
             return
 
-        authorized = client_bearer(headers) == LB_KEY
-        if not authorized and path.startswith("/admin"):
-            # Browser-friendly admin auth: /admin?key=...
-            from urllib.parse import parse_qs
-            qs = parse_qs(scope.get("query_string", b"").decode("latin-1"))
-            authorized = any(v == LB_KEY for v in qs.get("key", []))
+        authorized = kind in ("admin", "static", "dynamic")
         if not authorized:
-            logger.warning("lb auth rejected %s %s client=%s", method, path,
-                           (scope.get("client") or ("-",))[0])
-            await send({"type": "http.response.start", "status": 401,
-                        "headers": [(b"content-type", b"application/json")]})
-            await send({"type": "http.response.body", "body": json.dumps({
-                "error": {"message": "Invalid API key", "type": "authentication_error",
-                          "code": "invalid_key"}}).encode()})
+            logger.warning("lb auth rejected %s %s client=%s kind=%s", method, path,
+                           (scope.get("client") or ("-",))[0], kind)
+            await _auth_401(send)
             return
 
         if path == "/admin":
@@ -519,12 +719,17 @@ def create_app(pool: Pool) -> Any:
 
 def main() -> None:
     setup_logging()
-    if BIND_HOST not in ("127.0.0.1", "localhost", "::1") and not LB_KEY:
-        raise SystemExit("refusing to bind a non-loopback host without ZEN_LB_API_KEY")
+    if BIND_HOST not in ("127.0.0.1", "localhost", "::1") \
+            and not (LB_ADMIN_KEYS or LB_STATIC_KEYS):
+        raise SystemExit(
+            "refusing to bind a non-loopback host without ZEN_LB_ADMIN_KEYS")
     pool = Pool(load_upstreams())
-    logger.info("zen_lb starting bind=%s:%d lb_key=%s upstreams=%s",
-                BIND_HOST, BIND_PORT, "set" if LB_KEY else "MISSING",
-                [(u.name, u.host_port) for u in pool.upstreams])
+    logger.info(
+        "zen_lb starting bind=%s:%d admin_keys=%d static_keys=%d "
+        "keystore=%s ttl=%sh upstreams=%s",
+        BIND_HOST, BIND_PORT, len(LB_ADMIN_KEYS), len(LB_STATIC_KEYS),
+        KEY_STORE_PATH, KEY_DEFAULT_TTL_HOURS,
+        [(u.name, u.host_port) for u in pool.upstreams])
     server = uvicorn.Server(uvicorn.Config(
         create_app(pool), host=BIND_HOST, port=BIND_PORT,
         log_level="warning", access_log=False, timeout_keep_alive=75))
