@@ -40,9 +40,9 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
 
 | 桶 | 端口 | 守护方式 | 注意 |
 |---|---|---|---|
-| win10-local | 8791 | 手动/会话后台启动 | `repo/start_gateway.bat` 或 `HOST=0.0.0.0 PORT=8791 GATEWAY_API_KEYS=<key> .venv/Scripts/python.exe -m proxy_opencode` |
-| owin10 | 8791 | 同上 | 偶发 ConnectTimeout，LB 自动熔断跳过 |
-| ubuntu-26 | 8791 | 同上 | — |
+| win10-local | 8791 | 计划任务 `zen-gw-local`（登录自启） | 脚本 `scripts_local/start_gw_detached.cmd`；健康检查 `GET /healthz` |
+| owin10 | 8791 | 计划任务 `ProxyOpencode`（**登录触发**，重启后需人工登录一次） | sshd 在 **2222** 端口；本机公钥未授权时无法远程救援 |
+| ubuntu-26 | 8791 | systemd `proxy_opencode.service` | `ssh opc2_uname@<tailnet> -p 222` |
 | phone115 | 8792 | `~/run_gw.sh` 死循环 + Termux Boot 自启 | 配置 `~/repo/.env` 必须 **LF** 换行；升级版本需手机内手动清理 0.4.0 幽灵进程（Magisk `su`） |
 
 升级桶版本：拉取 repo → `uv pip install -e .`（editable）→ 重启进程 → `/healthz` 核对版本号。
@@ -67,10 +67,19 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
 
 ## 6. 已知问题 / TODO
 
+- [x] ~~本机网关随终端会话退出~~ → 已注册计划任务 `zen-gw-local`（AtLogOn 触发）
+- [ ] **owin10 桶下线**（2026-09-29 起）：机器疑似重启后无人登录，`ProxyOpencode`
+      任务（登录触发）未启动，sshd(2222) 拒绝本机公钥。**恢复步骤**：到 owin10
+      本机登录一次（任务自动拉起网关），并把本机 `~/.ssh/id_ed25519.pub` 追加进
+      `%USERPROFILE%\.ssh\authorized_keys`（管理员用户）
+- [ ] **big-pickle 上游答案质量不稳定**（Zen/Space Bunny 好坏后端混布，简单数学题
+      ~30-50% 错误率，错误响应通常缺 `reasoning_content`）。缓解：
+      ① 请求带 `reasoning_effort: high` 或提示词要求逐步推理；② 需要稳定性的场景
+      切 `gw-nemotron`（实测更稳）；③ 网关层无法根治，属上游问题
 - [ ] **速度慢**（~22 tokens/s）：候选优化——LB 侧按延迟选桶；筛选响应更快的免费模型；
       排查 CF Tunnel 与跨洋链路开销；压缩注入的系统提示词（~7.8k prompt tokens 偏高）
-- [ ] owin10 桶间歇 ConnectTimeout（Tailscale 链路待查）
-- [ ] 本机网关进程随终端会话退出，考虑注册为 Windows 服务/计划任务实现开机自启
+- [ ] Zen 偶发上游 400/invalid request（如 `400 {"model":"big-pickle"}`）会原样
+      透传给客户端（`_raw_relay_body`），属瞬时故障；LB 熔断 + 客户端重试即可
 
 ## 7. 版本历史
 
