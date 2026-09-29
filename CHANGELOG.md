@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.1] - 2026-09-29
+
+### Fixed
+
+- **Zen 新会话门禁适配**：匿名请求必须携带稳定 `x-session-id`（UUID）头，
+  否则 Zen 返回 401 "Missing API key"。网关启动时自动生成会话 UUID 并随每个
+  上游请求发送（`Settings.zen_session_id`，可用 `OPENCODE_ZEN_SESSION_ID`
+  固定）。注意：会话 UUID 与 Zen 后端行为存在粘性，遇到持续劣质/异常响应时
+  **重启桶进程换新会话** 即可恢复。
+
+### Docs
+
+- `docs/OPERATIONS.md`：脱敏运维手册（架构拓扑、四桶守护与开机自启、
+  Zen 协议要点、Hermes 接入、已知问题与 TODO）。
+
 ## [0.5.0] - 2026-09-28
 
 ### Added
