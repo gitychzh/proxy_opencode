@@ -40,10 +40,10 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
 
 | 桶 | 端口 | 守护方式 | 注意 |
 |---|---|---|---|
-| win10-local | 8791 | 计划任务 `zen-gw-local`（登录自启） | 脚本 `scripts_local/start_gw_detached.cmd`；健康检查 `GET /healthz` |
-| owin10 | 8791 | 计划任务 `ProxyOpencode`（**登录触发**，重启后需人工登录一次） | sshd 在 **2222** 端口；本机公钥未授权时无法远程救援 |
-| ubuntu-26 | 8791 | systemd `proxy_opencode.service` | `ssh opc2_uname@<tailnet> -p 222` |
-| phone115 | 8792 | `~/run_gw.sh` 死循环 + Termux Boot 自启 | 配置 `~/repo/.env` 必须 **LF** 换行；升级版本需手机内手动清理 0.4.0 幽灵进程（Magisk `su`） |
+| win10-local | 8791 | 计划任务 `zen-gw-local`：**开机+登录自启**（S4U 后台会话，脱离交互会话存活），脚本内 `:loop` 自愈循环（退出 5s 重启） | 脚本 `scripts_local/start_gw_detached.cmd`；健康检查 `GET /healthz` |
+| owin10 | 8791 | 计划任务 `ProxyOpencode`（**登录触发**，重启后需人工登录一次） | sshd 在 **2222** 端口；本机公钥未授权时无法远程救援。建议登录后把任务也加开机触发 |
+| ubuntu-26 | 8791 | systemd `proxy_opencode.service`（`enabled` + `Restart=always`，开机自启 ✅） | `ssh opc2_uname@<tailnet> -p 222` |
+| phone115 | 8792 | Termux:Boot `~/.termux/boot/start_gw.sh`（开机自启 ✅）+ 死循环 + wake-lock | 配置 `~/repo/.env` 必须 **LF** 换行；升级版本需手机内手动清理 0.4.0 幽灵进程（Magisk `su`） |
 
 升级桶版本：拉取 repo → `uv pip install -e .`（editable）→ 重启进程 → `/healthz` 核对版本号。
 ⚠️ editable 安装时若 repo 内残留 `proxy_opencode.egg-info/`，cwd 在 repo 启动的进程会读到旧版本号
