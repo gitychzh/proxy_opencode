@@ -33,10 +33,16 @@
 ## 架构
 
 ```
-hermes / 任意 OpenAI SDK
+hermes / codex CLI / claude code / 任意 OpenAI SDK
   -> proxy_opencode.app          # FastAPI 装配（只接线）
-    -> routes/                   # 薄 HTTP 层（chat.py, models.py）
-    -> security.py               # Bearer 鉴权 + 限流
+    -> routes/                   # 薄 HTTP 层（chat / models / responses_api /
+                                 #   anthropic_api / admin）
+    -> formats/                  # 协议转换（responses_proto / anthropic_proto /
+                                 #   sse_iter）——进转 OpenAI chat，出转回各协议
+    -> auth/                     # core.py（Bearer/x-api-key 鉴权 + 限流 + 管理员）
+                                 #   keystore.py（动态 key 存储，默认 24h 有效期）
+    -> registry.py               # 对外模型目录（掩码：ds41f_cus -> 上游模型）
+    -> sse_mask.py               # 流式 SSE 的 model 字段改写
     -> upstreams/                # 适配器协议 + 实现
        - zen_direct.py           # 直连 Zen（协议重构 + 标记注入 + SSE 透传）
        - zen_prompt_default.txt  # opencode 1.18.32 系统提示词资产（标记）
@@ -52,7 +58,8 @@ SSE 透传，死桶自动跳过。配置模板见 `balancer/run.cmd.example`，�
 数据与已知坑见 **`docs/dual-bucket-topology.md`（改拓扑前必读）**。
 
 新增上游模式 = 在 `upstreams/` 加一个实现 `UpstreamAdapter` 协议的模块 +
-`build_adapter` 里注册一行。
+`build_adapter` 里注册一行。新增客户端协议 = 在 `formats/` 加一对
+请求/响应转换器 + `routes/` 加一个薄路由（参考 responses_api.py）。
 
 ### 双桶相关的硬约束（2026-09-28 实测）
 

@@ -12,16 +12,21 @@ from typing import Any, AsyncIterator
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..auth import build_auth_dependency
+from ..auth.keystore import KeyStore
 from ..config import Settings
 from ..errors import openai_error
-from ..security import build_auth_dependency
+from ..registry import ModelRegistry
+from ..sse_mask import mask_model_field
 from ..upstreams.fields import filter_payload
 from ..upstreams.openai_http import StreamRelay
 from ..upstreams.opencode_serve import (
-    ServeAdapter,
     ServeCompletion,
     ServeError,
     WaitTimeoutError,
+)
+from ..upstreams.opencode_serve import (
+    completion_to_chat_response as _serve_response,
 )
 
 logger = logging.getLogger("proxy_opencode.chat")
@@ -36,8 +41,10 @@ def _log(
     )
 
 
-def make_router(settings: Settings) -> APIRouter:
-    auth = build_auth_dependency(settings)
+def make_router(
+    settings: Settings, keystore: KeyStore, registry: ModelRegistry
+) -> APIRouter:
+    auth = build_auth_dependency(settings, keystore)
     app_router = APIRouter()
 
     @app_router.post("/v1/chat/completions")
@@ -53,7 +60,12 @@ def make_router(settings: Settings) -> APIRouter:
             return openai_error(400, "Request body must be a JSON object.")
 
         payload = filter_payload(body, settings.reasoning_passthrough)
-        model = str(payload.get("model") or "")
+        requested_model = str(payload.get("model") or "")
+        # Alias layer: any requested model resolves to the upstream model;
+        # the public id is what users see in every response below.
+        payload["model"] = registry.resolve(requested_model)
+        public_model = registry.public_id(requested_model)
+        model = str(payload["model"])
         stream = bool(payload.get("stream"))
 
         def log(status: int, usage: Any = None) -> None:
@@ -103,9 +115,13 @@ def make_router(settings: Settings) -> APIRouter:
             return openai_error(500, "Internal gateway error.")
 
         if isinstance(result, StreamRelay):
+            chunks_iter = result.chunks()
+            if registry.enabled:
+                chunks_iter = mask_model_field(chunks_iter, public_model)
             return StreamingResponse(
                 _relay(
-                    result,
+                    chunks_iter,
+                    result.usage_holder,
                     log,
                     request_id=request_id,
                     model=model,
@@ -121,49 +137,21 @@ def make_router(settings: Settings) -> APIRouter:
                 status_code=int(result["__status__"]), content=result["content"]
             )
         if isinstance(result, dict):  # openai passthrough non-stream JSON
+            if registry.enabled:
+                result["model"] = public_model
             log(200, result.get("usage") if isinstance(result, dict) else None)
             return JSONResponse(status_code=200, content=result)
         if isinstance(result, ServeCompletion):
-            response = _serve_response(model, result)
+            response = _serve_response(public_model or model, result)
             log(200, response.get("usage"))
             if stream:
-                return _synthetic_stream(model, response)
+                return _synthetic_stream(public_model or model, response)
             return JSONResponse(status_code=200, content=response)
 
         log(502)
         return openai_error(502, "Unexpected upstream result type.")
 
     return app_router
-
-
-def _serve_response(model: str, result: ServeCompletion) -> dict[str, Any]:
-    message: dict[str, Any] = {"role": "assistant", "content": result.text or None}
-    if result.reasoning:
-        message["reasoning_content"] = result.reasoning
-    if result.tool_calls:
-        message["tool_calls"] = result.tool_calls
-    metadata: dict[str, Any] = {"adapter": ServeAdapter.name}
-    if result.tool_calls:
-        metadata["tools_source"] = "json-contract-bridge"
-    if result.internal_tool_calls:
-        metadata["internal_tools"] = result.internal_tool_calls
-        metadata["internal_tools_source"] = "opencode-agent"
-    response: dict[str, Any] = {
-        "id": f"chatcmpl-serve-{uuid.uuid4().hex[:8]}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "message": message,
-                "finish_reason": "tool_calls" if result.tool_calls else "stop",
-            }
-        ],
-        "usage": result.usage or None,
-        "metadata": metadata,
-    }
-    return response
 
 
 def _synthetic_stream(model: str, response: dict[str, Any]) -> StreamingResponse:
@@ -204,7 +192,8 @@ def _synthetic_stream(model: str, response: dict[str, Any]) -> StreamingResponse
 
 
 async def _relay(
-    relay: StreamRelay,
+    chunks: AsyncIterator[bytes],
+    usage_holder: dict[str, Any],
     log: Any,
     *,
     request_id: str,
@@ -218,16 +207,16 @@ async def _relay(
     would otherwise vanish silently from the logs.
     """
     started = time.perf_counter()
-    chunks = 0
+    chunks_count = 0
     ttfb_ms: float | None = None
     reason = "completed"
     try:
-        async for chunk in relay.chunks():
+        async for chunk in chunks:
             if ttfb_ms is None:
                 ttfb_ms = round((time.perf_counter() - started) * 1000, 1)
-            chunks += 1
+            chunks_count += 1
             yield chunk
-        log(200, relay.usage_holder.get("usage"))
+        log(200, usage_holder.get("usage"))
     except (asyncio.CancelledError, GeneratorExit):
         reason = "client_disconnected"
         raise
@@ -239,7 +228,7 @@ async def _relay(
                 "request_id": request_id,
                 "model": model,
                 "client": client,
-                "chunks": chunks,
+                "chunks": chunks_count,
                 "reason": reason,
                 "error_detail": str(exc)[:200],
             },
@@ -252,7 +241,7 @@ async def _relay(
                 "request_id": request_id,
                 "model": model,
                 "client": client,
-                "chunks": chunks,
+                "chunks": chunks_count,
                 "ttfb_ms": ttfb_ms,
                 "duration_ms": round((time.perf_counter() - started) * 1000, 1),
                 "reason": reason,

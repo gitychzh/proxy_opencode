@@ -19,6 +19,22 @@ LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 DEFAULT_SERVE_MODELS = ("opencode/big-pickle",)
 DEFAULT_ZEN_MODELS = ("opencode/big-pickle",)
 
+# Public-facing model catalogue. Entries are "id:display_name:upstream".
+# Users only ever see `id`; upstream is resolved server-side and scrubbed
+# from every response (JSON bodies and streamed SSE chunks alike).
+DEFAULT_PUBLIC_MODELS = ("ds41f_cus:DeepSeek V4.1 Flash:opencode/big-pickle",)
+
+# Admin API keys: permanent, can manage the dynamic key store via /admin/*.
+DEFAULT_ADMIN_API_KEYS = ("api_ychzh22372222",)
+
+
+def _default_public_models() -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    for part in DEFAULT_PUBLIC_MODELS:
+        mid, display, upstream = part.split(":")
+        out.append({"id": mid, "display_name": display, "upstream": upstream})
+    return out
+
 # Client fingerprint constants observed in a genuine opencode 1.18.32 capture
 # (mitm, 2026-09). Kept as defaults so the zen-direct adapter speaks the same
 # protocol; overridable for forward-compatibility when opencode releases
@@ -38,6 +54,20 @@ class Settings:
     upstream_api_key: str = ""
 
     gateway_api_keys: list[str] = field(default_factory=list)
+    # Permanent admin keys (manage /admin/keys; also valid for chat calls).
+    admin_api_keys: list[str] = field(
+        default_factory=lambda: list(DEFAULT_ADMIN_API_KEYS)
+    )
+    # Dynamic key store (JSON file). Keys created via POST /admin/keys live
+    # here with an expiry timestamp; static GATEWAY_API_KEYS stay permanent.
+    key_store_path: str = "keys.json"
+    key_default_ttl_hours: float = 24.0
+    # Model masking: when True, /v1/models lists only the public catalogue
+    # and every response's model field is rewritten to the public id.
+    mask_models: bool = True
+    public_models: list[dict[str, str]] = field(
+        default_factory=_default_public_models
+    )
     # Bind address. Loopback by default; set HOST=0.0.0.0 to serve the LAN
     # (requires GATEWAY_API_KEYS — enforced in load_settings).
     host: str = "127.0.0.1"
@@ -91,6 +121,18 @@ def _csv(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
+def _parse_public_models(value: str) -> list[dict[str, str]]:
+    """Parse "id:display_name:upstream" entries into catalogue dicts."""
+    out: list[dict[str, str]] = []
+    for part in _csv(value):
+        pieces = part.split(":")
+        if len(pieces) != 3 or not all(pieces):
+            continue
+        mid, display, upstream = pieces
+        out.append({"id": mid, "display_name": display, "upstream": upstream})
+    return out
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -138,6 +180,13 @@ def load_settings() -> Settings:
             "would expose an unauthenticated OpenAI-compatible proxy to the "
             "network; set GATEWAY_API_KEYS first"
         )
+    public_models = _parse_public_models(
+        os.environ.get(
+            "PUBLIC_MODELS", ",".join(DEFAULT_PUBLIC_MODELS)
+        )
+    )
+    if not public_models:
+        public_models = _parse_public_models(",".join(DEFAULT_PUBLIC_MODELS))
     return Settings(
         upstream_mode=mode,
         upstream_base_url=os.environ.get(
@@ -145,6 +194,12 @@ def load_settings() -> Settings:
         ).rstrip("/"),
         upstream_api_key=os.environ.get("UPSTREAM_API_KEY", ""),
         gateway_api_keys=gateway_api_keys,
+        admin_api_keys=_csv(os.environ.get("ADMIN_API_KEYS", ""))
+        or list(DEFAULT_ADMIN_API_KEYS),
+        key_store_path=os.environ.get("KEY_STORE_PATH", "keys.json"),
+        key_default_ttl_hours=float(os.environ.get("KEY_DEFAULT_TTL_HOURS", "24")),
+        mask_models=_env_bool("MASK_MODELS", True),
+        public_models=public_models,
         host=host,
         port=int(os.environ.get("PORT", "8787")),
         requests_per_minute=int(os.environ.get("REQUESTS_PER_MINUTE", "60")),

@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -63,6 +65,43 @@ class ServeCompletion:
     usage: dict[str, Any] = field(default_factory=dict)
     model_id: str = ""
     internal_tool_calls: list[dict[str, Any]] = field(default_factory=list)
+
+
+def completion_to_chat_response(
+    model: str, result: ServeCompletion
+) -> dict[str, Any]:
+    """Shape a ServeCompletion as an OpenAI chat-completion response body.
+
+    Shared by all three protocol routes (chat completions / responses /
+    anthropic messages) so serve-mode results convert uniformly.
+    """
+    message: dict[str, Any] = {"role": "assistant", "content": result.text or None}
+    if result.reasoning:
+        message["reasoning_content"] = result.reasoning
+    if result.tool_calls:
+        message["tool_calls"] = result.tool_calls
+    metadata: dict[str, Any] = {"adapter": ServeAdapter.name}
+    if result.tool_calls:
+        metadata["tools_source"] = "json-contract-bridge"
+    if result.internal_tool_calls:
+        metadata["internal_tools"] = result.internal_tool_calls
+        metadata["internal_tools_source"] = "opencode-agent"
+    response: dict[str, Any] = {
+        "id": f"chatcmpl-serve-{uuid.uuid4().hex[:8]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": "tool_calls" if result.tool_calls else "stop",
+            }
+        ],
+        "usage": result.usage or None,
+        "metadata": metadata,
+    }
+    return response
 
 
 class ServeAdapter:

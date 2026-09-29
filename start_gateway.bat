@@ -14,7 +14,7 @@ echo  proxy_opencode gateway
 echo  Local : http://127.0.0.1:8791/v1
 echo  LAN   : http://^<this-machine-IP^>:8791/v1
 echo  APIkey: dev-local-key
-echo  Model : opencode/big-pickle
+echo  Model : ds41f_cus  (POST /v1/chat/completions | /v1/responses | /v1/messages)
 echo ================================================
 echo.
 

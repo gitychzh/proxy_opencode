@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.6.0] - 2026-09-30
+
+### Added
+
+- **模型掩码层（`registry.py`）**：对外只暴露 `ds41f_cus`（DeepSeek V4.1 Flash）
+  一个模型；客户端请求任意模型名都透明路由到上游真实模型，且响应（JSON 与
+  流式 SSE）中的模型字段一律改写为对外 id——上游模型名不出网关。
+  `PUBLIC_MODELS` 可配置目录（`对外id:展示名:上游模型`），`MASK_MODELS=false`
+  可整体关闭回退旧行为。
+- **SSE 模型字段改写（`sse_mask.py`）**：流式中继逐行改写 `"model"` 字段，
+  行缓冲处理跨 TCP chunk 断行的 JSON 载荷。
+- **API key 有效期（`auth/` 包）**：新增动态 key 存储（JSON 原子写持久化），
+  通过管理接口签发的 key 默认 **24 小时**有效（`KEY_DEFAULT_TTL_HOURS`），
+  支持自定义 TTL 与 `ttl_hours: 0` 永久；到期/吊销立即失效并记审计日志。
+  `ADMIN_API_KEYS`（默认 `api_ychzh22372222`）永久有效；存量
+  `GATEWAY_API_KEYS` 静态 key 保持永久（四桶配置向后兼容）。
+- **管理接口**：`POST /admin/keys`（签发）、`GET /admin/keys`（列表，脱敏）、
+  `DELETE /admin/keys/{id}`（吊销），仅管理员 key 可用。
+- **OpenAI Responses API（`POST /v1/responses`）**：codex CLI 可直连。
+  请求侧转换 `instructions`/`input`（字符串或类型化 items）/扁平 function
+  tools；响应侧输出完整 Responses 信封；流式按
+  `response.created → output_item.added → output_text.delta →
+  output_item.done → response.completed` 事件序列下发，含 usage 汇总。
+- **Anthropic Messages API（`POST /v1/messages`）**：claude code 可直连。
+  支持 `x-api-key` 与 Bearer 两种认证；`system`/content blocks
+  （text/tool_use/tool_result）/`input_schema` tools 双向转换；流式按
+  `message_start → content_block_start → content_block_delta →
+  content_block_stop → message_delta → message_stop` 事件序列下发；
+  401/429 错误使用 Anthropic 错误信封。
+
+### Changed
+
+- **模块化细分**：`security.py` 升级为 `auth/` 包（`core.py` 鉴权依赖 +
+  `keystore.py` 动态 key 存储）；新增 `registry.py`（模型别名层）、
+  `sse_mask.py`（流式改写）、`formats/` 包（`responses_proto.py` /
+  `anthropic_proto.py` / `sse_iter.py` 协议转换）；routes 拆分为
+  chat / models / responses_api / anthropic_api / admin 五个模块；
+  serve 模式响应整形抽取为共享的 `completion_to_chat_response()`。
+- healthz 启动日志增加 admin key 数量与对外模型目录。
+
+### Tests
+
+- 测试 49 → 86：新增 registry/掩码（含跨 chunk 断行）、keystore（默认
+  24h/永久/过期/吊销/持久化）、admin 接口（鉴权隔离/脱敏）、Responses
+  请求与流式事件序列、Anthropic 请求/块转换/流式事件序列/x-api-key 认证、
+  两种协议错误信封。
+- 端到端真机验证 20/20 通过（真实上游）：三种协议接口、掩码无泄漏、
+  key 全生命周期。
+
 ## [0.5.1] - 2026-09-29
 
 ### Fixed

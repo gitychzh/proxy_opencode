@@ -133,4 +133,7 @@ async def test_models():
     ) as client:
         resp = await client.get("/v1/models", headers=GW_HEADERS)
     assert resp.status_code == 200
-    assert resp.json()["data"][0]["id"] == "opencode/big-pickle"
+    data = resp.json()["data"]
+    # Model masking: only the public alias is ever listed.
+    assert data[0]["id"] == "ds41f_cus"
+    assert all(m["id"] != "opencode/big-pickle" for m in data)

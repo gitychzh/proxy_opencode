@@ -57,7 +57,27 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
 3. 配额按出口 IP 计（约 600 请求/日/IP，UTC 零点重置）；LB 检测 429 自动熔断
 4. 协议三要素（系统提示词标记 + 内置工具 schema + stream:true）由网关自动注入
 
-## 5. Hermes 接入
+## 5. 接入各客户端（0.6.0 起）
+
+- **对外唯一模型：`ds41f_cus`**（DeepSeek V4.1 Flash）。客户端请求任意模型名
+  都透明路由到上游；响应（含流式 SSE）的模型字段一律改写为 `ds41f_cus`，
+  上游真实模型名不出网关（`MASK_MODELS=false` 可关闭）。
+- **三种协议接口**：
+  - `POST /v1/chat/completions`——OpenAI 格式（hermes / 任意 SDK），Bearer 认证
+  - `POST /v1/responses`——OpenAI Responses 格式（**codex CLI** 直连，
+    `wire_api = "responses"`），Bearer 认证
+  - `POST /v1/messages`——Anthropic Messages 格式（**claude code** 直连，
+    `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`），`x-api-key` 或 Bearer
+- **API key 有效期**（0.6.0 起）：
+  - 管理员 key：`api_ychzh22372222`（`ADMIN_API_KEYS`，**永久**，可管理 key）
+  - 存量 `GATEWAY_API_KEYS` 静态 key：永久（四桶配置向后兼容）
+  - 新签发 key：默认 **24 小时**；`POST /admin/keys` 可自定义 TTL（0=永久）
+  - 管理：`POST/GET/DELETE /admin/keys`（仅管理员 key；列表脱敏）
+  - 存储文件：`keys.json`（KEY_STORE_PATH，已 gitignore；**不要删桶上的
+    keys.json**，删了已签发 key 全部失效）
+- Hermes 桌面版仍需 `model_aliases` 才会显示自建模型（别名指向 `ds41f_cus`）。
+
+## 6. Hermes 接入（chat_completions）
 
 - CLI 与桌面版共用 `%LOCALAPPDATA%\hermes\config.yaml`（HERMES_HOME）
 - `model.default` + `provider: custom` + `base_url` + `api_key` 四件套
@@ -65,7 +85,7 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
   在 config 顶层加 `model_aliases`（别名 → model/provider/base_url/api_key）才会显示
 - 验证：`hermes -z "..."` 基础对话；`--reasoning high` 思考；工具调用建文件
 
-## 6. 已知问题 / TODO
+## 7. 已知问题 / TODO
 
 - [x] ~~本机网关随终端会话退出~~ → 已注册计划任务 `zen-gw-local`（AtLogOn 触发）
 - [x] ~~owin10 桶下线~~ → 2026-09-29 晚恢复：拉起网关 + 建 `ProxyOpencodeBoot`（ONSTART/SYSTEM）
@@ -79,8 +99,10 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
 - [ ] Zen 偶发上游 400/invalid request（如 `400 {"model":"big-pickle"}`）会原样
       透传给客户端（`_raw_relay_body`），属瞬时故障；LB 熔断 + 客户端重试即可
 
-## 7. 版本历史
+## 8. 版本历史
 
+- **0.6.0**（2026-09-30）：对外唯一模型 ds41f_cus（掩码）；key 有效期 + /admin/keys；
+  Responses API（codex）与 Anthropic API（claude code）；auth/ formats/ 模块化细分
 - **0.5.1**（2026-09-29）：适配 Zen 新门禁（x-session-id 稳定头）
 - **0.5.0**：配额感知熔断、request_id 追踪、/admin 面板、双桶→四桶拓扑
 - **0.4.x**：单桶原型（Docker 部署，已淘汰）

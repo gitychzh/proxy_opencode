@@ -43,8 +43,52 @@ python -m proxy_opencode                       # 默认 127.0.0.1:8787（本地�
 curl -H "Authorization: Bearer dev-local-key" http://127.0.0.1:8787/healthz
 curl -H "Authorization: Bearer dev-local-key" http://127.0.0.1:8787/v1/models
 curl -H "Authorization: Bearer dev-local-key" -H "Content-Type: application/json" -d @- http://127.0.0.1:8787/v1/chat/completions <<'EOF'
-{"model":"opencode/big-pickle","messages":[{"role":"user","content":"用一句话回答 1+1=?"}]}
+{"model":"ds41f_cus","messages":[{"role":"user","content":"用一句话回答 1+1=?"}]}
 EOF
+```
+
+## 三种协议接口（v0.6.0 起）
+
+对外只暴露一个模型 `ds41f_cus`（DeepSeek V4.1 Flash），客户端请求任意模型名
+都会透明路由到它，且响应（JSON 与流式 SSE）中的模型字段一律改写为
+`ds41f_cus`——上游真实模型名不出网关。
+
+| 接口 | 客户端 | 认证方式 |
+| --- | --- | --- |
+| `POST /v1/chat/completions` | 任意 OpenAI SDK / hermes | `Authorization: Bearer <key>` |
+| `POST /v1/responses` | **codex CLI**（OpenAI Responses API） | `Authorization: Bearer <key>` |
+| `POST /v1/messages` | **claude code**（Anthropic Messages API） | `x-api-key: <key>` 或 Bearer |
+
+codex CLI 配置（`~/.codex/config.toml`）：
+
+```toml
+[model_providers.gateway]
+name = "gateway"
+base_url = "http://127.0.0.1:8787/v1"
+wire_api = "responses"
+
+[model_providers.gateway.env_key]
+name = "GATEWAY_API_KEY"
+```
+
+claude code 配置（环境变量）：
+
+```bash
+set ANTHROPIC_BASE_URL=http://127.0.0.1:8787
+set ANTHROPIC_API_KEY=dev-local-key
+```
+
+API key 管理（管理员 key 永久有效；新生成 key 默认 24 小时有效）：
+
+```bash
+# 签发（默认 24h；ttl_hours: 0 = 永久）
+curl -X POST http://127.0.0.1:8787/admin/keys \
+  -H "Authorization: Bearer api_ychzh22372222" -H "Content-Type: application/json" \
+  -d '{"name":"my-phone","ttl_hours":24}'
+# 列表（脱敏）
+curl -H "Authorization: Bearer api_ychzh22372222" http://127.0.0.1:8787/admin/keys
+# 吊销
+curl -X DELETE http://127.0.0.1:8787/admin/keys/<key_id> -H "Authorization: Bearer api_ychzh22372222"
 ```
 
 hermes 配置（`config.yaml` 的 `providers:` 下加一条）：
@@ -54,7 +98,7 @@ providers:
   proxyo:
     name: proxyo
     base_url: http://127.0.0.1:8787/v1
-    model: opencode/big-pickle
+    model: ds41f_cus
     api_key: dev-local-key
     discover_models: false
     api_mode: chat_completions
@@ -118,7 +162,12 @@ python balancer/lb.py
 | `OPENCODE_SERVE_URL` | `http://127.0.0.1:4096` | 仅 serve 模式；**只允许 loopback** |
 | `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` | `opencode` / 空 | serve 模式的 Basic auth |
 | `OPENCODE_SERVE_MODELS` | `opencode/big-pickle` | serve 模式 `/v1/models` 列表 |
-| `GATEWAY_API_KEYS` | 空（dev-open） | 网关 Bearer key（逗号分隔） |
+| `GATEWAY_API_KEYS` | 空（dev-open） | 网关 Bearer key（逗号分隔，**永久有效**） |
+| `ADMIN_API_KEYS` | `api_ychzh22372222` | 管理员 key（永久有效，可管理 `/admin/keys`，也可直接调用对话接口） |
+| `KEY_STORE_PATH` | `keys.json` | 动态 key 存储文件（JSON，原子写） |
+| `KEY_DEFAULT_TTL_HOURS` | `24` | 新生成 key 的默认有效期（小时）；`/admin/keys` 传 `ttl_hours: 0` 可签发永久 key |
+| `MASK_MODELS` | `true` | 模型掩码开关；开启后对外只暴露 `PUBLIC_MODELS` 目录，上游模型名从所有响应中抹除 |
+| `PUBLIC_MODELS` | `ds41f_cus:DeepSeek V4.1 Flash:opencode/big-pickle` | 对外模型目录，格式 `对外id:展示名:上游模型`（逗号分隔多条） |
 | `LOG_FORMAT` | `text` | 日志格式：`text`（人类可读）/ `json`（JSON 行，便于采集归档） |
 | `REQUESTS_PER_MINUTE` | `60` | 每个网关 key 的限流 |
 | `HOST` | `127.0.0.1` | 绑定地址；设 `0.0.0.0` 供局域网调用（**必须**同时设置 `GATEWAY_API_KEYS`） |

@@ -148,7 +148,7 @@ async def _collect_relay(relay):
 
     out = []
     async for chunk in _relay(
-        relay, lambda status, usage=None: None,
+        relay.chunks(), relay.usage_holder, lambda status, usage=None: None,
         request_id="req1", model="m", client="127.0.0.1",
     ):
         out.append(chunk)
@@ -190,7 +190,7 @@ async def test_stream_relay_logs_client_disconnect(caplog):
     from proxy_opencode.routes.chat import _relay
 
     gen = _relay(
-        FakeStreamRelay(), lambda status, usage=None: None,
+        FakeStreamRelay().chunks(), {}, lambda status, usage=None: None,
         request_id="req1", model="m", client="127.0.0.1",
     )
     with caplog.at_level(logging.INFO, logger="proxy_opencode.chat"):

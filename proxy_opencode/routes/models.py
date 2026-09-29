@@ -9,13 +9,17 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from .. import __version__
+from ..auth import build_auth_dependency
+from ..auth.keystore import KeyStore
 from ..config import Settings
 from ..errors import openai_error
-from ..security import build_auth_dependency
+from ..registry import ModelRegistry
 
 
-def make_router(settings: Settings) -> APIRouter:
-    auth = build_auth_dependency(settings)
+def make_router(
+    settings: Settings, keystore: KeyStore, registry: ModelRegistry
+) -> APIRouter:
+    auth = build_auth_dependency(settings, keystore)
     router = APIRouter()
 
     @router.get("/healthz")
@@ -29,6 +33,9 @@ def make_router(settings: Settings) -> APIRouter:
 
     @router.get("/v1/models")
     async def list_models(request: Request, _: str = Depends(auth)) -> Any:
+        # Masking on: users only ever see the public catalogue.
+        if registry.enabled:
+            return registry.catalog()
         adapter = request.app.state.adapter
         try:
             result = await adapter.list_models()
