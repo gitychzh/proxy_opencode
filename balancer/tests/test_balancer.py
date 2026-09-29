@@ -163,6 +163,19 @@ async def test_wrong_lb_key_rejected_401():
 
 
 @pytest.mark.asyncio
+async def test_x_api_key_header_accepted():
+    """Anthropic clients auth via x-api-key; LB must honor it (v0.6.0 fix)."""
+    app = lb.create_app(two_upstream_pool())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://lb") as c:
+        resp = await c.post("/v1/messages", json={"model": "m", "messages": []},
+                            headers={"x-api-key": "lb-secret",
+                                     "anthropic-version": "2023-06-01"})
+    assert resp.status_code == 200
+    assert SEEN, "request should be forwarded to an upstream"
+
+
+@pytest.mark.asyncio
 async def test_authorization_rewritten_per_upstream():
     pool = two_upstream_pool()
     app = lb.create_app(pool)

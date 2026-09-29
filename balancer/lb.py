@@ -377,8 +377,11 @@ def make_client() -> httpx.AsyncClient:
 
 
 def client_bearer(headers: dict[str, str]) -> str:
+    """Extract the client key: Bearer token or Anthropic-style x-api-key."""
     auth = headers.get("authorization", "")
-    return auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return headers.get("x-api-key", "").strip()
 
 
 def forwardable(raw_headers: list[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
