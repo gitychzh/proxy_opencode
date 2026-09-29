@@ -41,7 +41,7 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
 | 桶 | 端口 | 守护方式 | 注意 |
 |---|---|---|---|
 | win10-local | 8791 | 计划任务 `zen-gw-local`：**开机+登录自启**（S4U 后台会话，脱离交互会话存活），脚本内 `:loop` 自愈循环（退出 5s 重启） | 脚本 `scripts_local/start_gw_detached.cmd`；健康检查 `GET /healthz` |
-| owin10 | 8791 | 计划任务 `ProxyOpencode`（**登录触发**，重启后需人工登录一次） | sshd 在 **2222** 端口；本机公钥未授权时无法远程救援。建议登录后把任务也加开机触发 |
+| owin10 | 8791 | 计划任务 `ProxyOpencodeBoot`（**开机 SYSTEM 自启** ✅）+ `ProxyOpencode`（登录触发）+ `run.cmd` 内置 `:loop` 自愈循环 | SSH：`ssh -p 2222 owin10@<tailnet>`（已装本机公钥，免密 ✅；Windows OpenSSH，管理员公钥在 `C:\ProgramData\ssh\administrators_authorized_keys`） |
 | ubuntu-26 | 8791 | systemd `proxy_opencode.service`（`enabled` + `Restart=always`，开机自启 ✅） | `ssh opc2_uname@<tailnet> -p 222` |
 | phone115 | 8792 | Termux:Boot `~/.termux/boot/start_gw.sh`（开机自启 ✅）+ 死循环 + wake-lock | 配置 `~/repo/.env` 必须 **LF** 换行；升级版本需手机内手动清理 0.4.0 幽灵进程（Magisk `su`） |
 
@@ -68,10 +68,8 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
 ## 6. 已知问题 / TODO
 
 - [x] ~~本机网关随终端会话退出~~ → 已注册计划任务 `zen-gw-local`（AtLogOn 触发）
-- [ ] **owin10 桶下线**（2026-09-29 起）：机器疑似重启后无人登录，`ProxyOpencode`
-      任务（登录触发）未启动，sshd(2222) 拒绝本机公钥。**恢复步骤**：到 owin10
-      本机登录一次（任务自动拉起网关），并把本机 `~/.ssh/id_ed25519.pub` 追加进
-      `%USERPROFILE%\.ssh\authorized_keys`（管理员用户）
+- [x] ~~owin10 桶下线~~ → 2026-09-29 晚恢复：拉起网关 + 建 `ProxyOpencodeBoot`（ONSTART/SYSTEM）
+      开机自启任务 + `run.cmd` 加自愈循环 + 本机公钥装入 `administrators_authorized_keys`（免密 SSH ✅）
 - [ ] **big-pickle 上游答案质量不稳定**（Zen/Space Bunny 好坏后端混布，简单数学题
       ~30-50% 错误率，错误响应通常缺 `reasoning_content`）。缓解：
       ① 请求带 `reasoning_effort: high` 或提示词要求逐步推理；② 需要稳定性的场景
