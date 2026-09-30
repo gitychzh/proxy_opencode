@@ -218,6 +218,7 @@ uvicorn --factory proxy_opencode.app:create_app_from_env --host 127.0.0.1 --port
 | --- | --- |
 | `AGENTS.md` | 维护约定、架构、免费层校验三要素（**改代码前必读**） |
 | `docs/dual-bucket-topology.md` | 已验证的双桶拓扑、实测容量数据、**已知坑**（改部署前必读） |
+| `docs/plan-v2-slot-pool.md` | **v2 规划**：单网关 + 多出口槽位、容器化、双网关并行上线（待确认后执行） |
 | `docs/topology-evaluation.md` | 拓扑评估：四桶分散 vs 统一部署到 ECS + 代理 IP（含机房 IP 实测、延迟对比、`workbuddy2api` 对照） |
 | `docs/roadmap.md` | 正式网关 + 正式对外网站路线图与待拍板决策点 |
 | `docs/engineering-constraints.md` | 工程化基线与红线 |
