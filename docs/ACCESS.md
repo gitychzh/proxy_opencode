@@ -55,8 +55,8 @@ ssh -p 2222 owin10@100.109.109.108          # 备用密码：223722
 |---|---|
 | SSH | Windows OpenSSH，端口 **2222**；用户 `owin10`；密码 `223722`（免密优先） |
 | 公钥位置 | `C:\ProgramData\ssh\administrators_authorized_keys`（管理员用户） |
-| 网关目录 | `C:\Users\owin10\proxy_opencode`，启动脚本 `run.cmd`（带 `:loop` 自愈） |
-| 守护 | 计划任务 `ProxyOpencodeBoot`（**开机 SYSTEM 自启**）+ `ProxyOpencode`（登录触发） |
+| 网关目录 | `C:\Users\owin10\proxy_opencode`，启动脚本 `run.cmd`（自举 VBS 无窗 + pythonw + `:loop` 自愈；备份 `.bak_20260930_windowless`） |
+| 守护 | 计划任务 `ProxyOpencodeBoot`（开机 SYSTEM 自启，**不限时** PT0S，无窗口） |
 | 远端 Python | `C:\Users\Owin10\AppData\Local\Programs\Python\Python312\python.exe` |
 | Hermes 配置 | `C:\Users\Owin10\AppData\Local\hermes\config.yaml`（CLI 与桌面版共用，接入示例见 §7） |
 
