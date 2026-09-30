@@ -170,7 +170,7 @@ python balancer/lb.py
 | `PUBLIC_MODELS` | `ds41f_cus:DeepSeek V4.1 Flash:opencode/big-pickle` | 对外模型目录，格式 `对外id:展示名:上游模型`（逗号分隔多条） |
 | `LOG_FORMAT` | `text` | 日志格式：`text`（人类可读）/ `json`（JSON 行，便于采集归档） |
 | `ZEN_MARKER_MODE` | `bridge` | zen 免费层指纹注入：`bridge`（默认，仅 ~70 token 工具提示）/ `full`（旧版完整 opencode prompt，~7.8k tokens）/ `none`（不注入） |
-| `ZEN_TOOLS_MODE` | `minimal` | zen 免费层内置工具 schema：`minimal`（默认，仅 bash+read，~1k tokens）/ `all`（完整 11 工具 schema，~6k tokens，门禁收紧时按桶回退用） |
+| `ZEN_TOOLS_MODE` | `minimal` | zen 免费层内置工具注入档：`minimal`（默认，两个合成最小 schema，~60 token；门禁只校验**名字**不校验 schema——见 AGENTS.md）/ `captured2`（bash+read 捕获 schema，~2k token，中间回退）/ `all`（完整 11 工具，~6k token，门禁收紧时回退用） |
 | `HOST` | `127.0.0.1` | 绑定地址；设 `0.0.0.0` 供局域网调用（**必须**同时设置 `GATEWAY_API_KEYS`） |
 | `PORT` | `8787` | 网关端口 |
 | `UPSTREAM_BASE_URL` / `UPSTREAM_API_KEY` | `https://api.openai.com` / 空 | 仅 `openai` 透传模式 |

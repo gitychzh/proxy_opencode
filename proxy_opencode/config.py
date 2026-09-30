@@ -101,12 +101,15 @@ class Settings:
     #                        behaviour, kept as a per-bucket fallback)
     #   "none"             — no system message injected at all
     zen_marker_mode: str = "bridge"
-    # Which builtin tool schemas to inject for the free-tier gate:
-    #   "minimal" (default) — only {bash, read} (~1k prompt tokens; verified
-    #                         against the live gate 2026-09-30: 1 tool 403s,
-    #                         bash+read 200s)
-    #   "all"               — the full captured 11-tool schema list (~6k
-    #                         tokens; legacy behaviour, per-bucket fallback)
+    # Which builtin tool schemas to inject for the free-tier gate.
+    # Live ablation 2026-09-30: the gate requires >= 2 tools whose NAMES are
+    # opencode builtin names and ignores their schema content entirely.
+    #   "minimal"   (default) — two synthesized ~30-token schemas (~60 prompt
+    #                           tokens total; was ~1,970 with the captured set)
+    #   "captured2"           — the {bash, read} subset of the captured asset
+    #                           (~2k tokens; intermediate fallback)
+    #   "all"                 — the full captured 11-tool schema list
+    #                           (~6k tokens; legacy, per-bucket fallback)
     zen_tools_mode: str = "minimal"
     # Empty -> anonymous free tier ("Bearer public" + system-prompt marker).
     zen_api_key: str = ""
@@ -222,9 +225,9 @@ def load_settings() -> Settings:
             f"got {zen_marker_mode!r}"
         )
     zen_tools_mode = os.environ.get("ZEN_TOOLS_MODE", "minimal").strip().lower()
-    if zen_tools_mode not in ("minimal", "all"):
+    if zen_tools_mode not in ("minimal", "captured2", "all"):
         raise ValueError(
-            "ZEN_TOOLS_MODE must be one of minimal|all, "
+            "ZEN_TOOLS_MODE must be one of minimal|captured2|all, "
             f"got {zen_tools_mode!r}"
         )
     return Settings(

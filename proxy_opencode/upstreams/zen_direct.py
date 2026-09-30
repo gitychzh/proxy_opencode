@@ -94,12 +94,47 @@ _BRIDGE_NOTE_STANDALONE = (
     "of the client's latest message."
 )
 
-# Minimal builtin schema set that still satisfies the gate (live ablation
-# 2026-09-30: 1 tool -> 403, {bash, read} -> 200, full 11 -> 200). Keeps the
-# mandatory fingerprint at ~1k prompt tokens instead of ~6k. ZEN_TOOLS_MODE
-# =all restores the full schema list (per-bucket fallback if the gate
-# tightens again).
+# Minimal builtin schema set that still satisfies the gate.
+#
+# Live ablation on 2026-09-30 (ubuntu26 egress, reproducible) established the
+# exact rule: the gate requires **>= 2 tools whose NAMES are opencode builtin
+# names**, and ignores their schemas completely.
+#
+#   bash+read, full captured schemas (7,872 ch)  -> 200
+#   bash+read, name + empty params   (246 ch)    -> 200
+#   bash+read, name only             (104 ch)    -> 200
+#   bash only                        (123 ch)    -> 403
+#   two non-builtin names            (~250 ch)   -> 403
+#   bash+read+edit                   (369 ch)    -> 200
+#
+# So the mandatory fingerprint costs ~60 prompt tokens instead of ~1,970:
+# `ZEN_TOOLS_MODE=minimal` injects two synthesized tiny schemas.
+# `captured2` restores the old 2-tool subset of the captured asset and `all`
+# the full 11-tool list, as fallbacks if the gate ever tightens again.
 _MINIMAL_TOOL_NAMES = ("bash", "read")
+
+_MIN_INJECTED_TOOLS = 2
+
+# Injected names, in preference order. A name the client already uses is
+# skipped: injecting a duplicate would not add a distinct builtin name (the
+# gate counts names, not entries) and the old code dropped the builtin in that
+# case, which could push the count below two.
+_INJECT_NAME_POOL = (
+    "bash", "read", "todowrite", "skill", "task", "list",
+    "webfetch", "websearch", "glob", "grep", "edit", "write",
+)
+
+
+def _minimal_schema(name: str) -> dict[str, Any]:
+    """Smallest structurally valid function-tool schema for `name`."""
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": "",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
 
 
 def _default_prompt() -> str:
@@ -353,21 +388,42 @@ class ZenDirectAdapter:
     def _merge_tools(self, client_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Builtin schemas first (required by the gate), client tools after.
 
-        Name collisions (client tool named like a builtin) resolve in favour
-        of the client tool; the builtin with the same name is dropped.
-        ZEN_TOOLS_MODE=minimal (default) injects only {bash, read}; "all"
-        restores the full captured schema list.
+        `ZEN_TOOLS_MODE=minimal` (default) injects two synthesized ~30-token
+        schemas under builtin names the client is not already using;
+        `captured2` injects the {bash, read} subset of the captured asset;
+        `all` injects the full captured 11-tool list (legacy behaviour, which
+        also drops a builtin whose name a client tool claims).
         """
+        mode = self._settings.zen_tools_mode
         client_names = _tool_names(client_tools)
-        if self._settings.zen_tools_mode == "minimal":
-            builtins = [
+
+        if mode == "all":
+            injected = [
+                t for t in self._builtin_tools
+                if not (_tool_names([t]) & client_names)
+            ]
+        elif mode == "captured2":
+            injected = [
                 t for t in self._builtin_tools
                 if _tool_names([t]) & set(_MINIMAL_TOOL_NAMES)
+                and not (_tool_names([t]) & client_names)
             ]
-        else:
-            builtins = list(self._builtin_tools)
-        merged = [t for t in builtins if not (_tool_names([t]) & client_names)]
-        return [*merged, *client_tools]
+        else:  # minimal
+            injected = []
+            for name in _INJECT_NAME_POOL:
+                if name in client_names:
+                    continue
+                injected.append(_minimal_schema(name))
+                if len(injected) >= _MIN_INJECTED_TOOLS:
+                    break
+            if len(injected) < _MIN_INJECTED_TOOLS:
+                # The client claims every pool name (pathological). Fall back
+                # to the captured subset so the gate still sees >= 2 names.
+                injected = [
+                    t for t in self._builtin_tools
+                    if _tool_names([t]) & set(_MINIMAL_TOOL_NAMES)
+                ]
+        return [*injected, *client_tools]
 
 
 def _merge_tool_call_delta(

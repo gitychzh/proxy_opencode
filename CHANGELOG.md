@@ -77,6 +77,30 @@
   现修正为 `-t terminal -t file`，并新增**落盘断言**（工具用例必须真的产出
   文件，否则整轮判失败），让这类静默失效无法再被掩盖。
 
+### Changed — 提示词瘦身（2026-09-30 抓包实测，本轮重点）
+
+对 claude code / hermes / codex 三个客户端做了真实抓包，定位输入 token 的
+实际构成并裁剪。**端到端输入 token 降低约 57%**（claude code：21.1k → 8.9k）。
+
+- **网关注入精简（省 ~1,900 tok/请求，全客户端生效）**：活体消融（ubuntu26
+  出口，可复现）确认免费层门禁的**真实规则**——它只要求**至少 2 个名字属于
+  opencode 内置工具集**的工具，**完全不校验 schema 内容**：
+  `bash+read` 全量 schema(7,872 字符) → 200；`bash+read` 空参数(246 字符) →
+  200；仅名字(104 字符) → 200；**只有 1 个工具 → 403**；**两个非内置名 →
+  403**；`bash+read+edit` → 200。
+  于是 `ZEN_TOOLS_MODE=minimal`（默认）改为注入两个**合成的最小 schema**
+  （~60 token，原 ~1,970）。新增 `captured2`（旧的 bash+read 捕获 schema，
+  ~2k token）作为中间回退档，`all` 保持全量 11 工具。注入时跳过客户端已占用
+  的名字——旧实现会在同名时丢掉内置工具，可能把数量压到 2 个以下而 403。
+- **claude code 工具裁剪（省 ~9,500 tok/请求，降幅 50%）**：抓包显示其请求中
+  **23 个工具定义占 60,272 字符（~15,068 tok，79%）**，其中
+  DesignSync/SendMessage/Workflow/ScheduleWakeup/Cron*/Worktree*/
+  ReportFindings/ListAgents 共 11 个与编码无关。已通过 `settings.json` 的
+  `permissions.deny` 摘除（Claude Code 会把这些工具**从请求中移除**，而非仅
+  拒绝执行）：请求体 76,027 → 37,740 字符，工具 23 → 11（保留 Agent/Bash/
+  Edit/Glob/Grep/NotebookEdit/Read/Skill/WebFetch/WebSearch/Write）。
+  工具链回归：Write+Read 落盘验证通过。
+
 ### Changed — 工程化 / 模块化
 
 - **新增 `routes/_pipeline.py`（共享请求管线）**：`/v1/chat/completions`、

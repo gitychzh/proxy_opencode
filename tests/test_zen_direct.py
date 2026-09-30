@@ -119,6 +119,68 @@ async def test_body_tools_mode_all_restores_full_builtin_list() -> None:
 
 
 @pytest.mark.asyncio
+async def test_body_minimal_injection_is_two_tiny_schemas() -> None:
+    """Live ablation 2026-09-30: the gate only needs >=2 tools with builtin
+    names and ignores their schemas, so the mandatory fingerprint drops from
+    ~1,970 prompt tokens to ~60."""
+    adapter = ZenDirectAdapter(make_settings())
+    body = adapter._build_body(
+        {"model": "big-pickle", "messages": [{"role": "user", "content": "hi"}]},
+        "big-pickle",
+    )
+    tools = body["tools"]
+    assert len(tools) == 2
+    names = {t["function"]["name"] for t in tools}
+    assert names == {"bash", "read"}
+    # tiny: the whole injected set must stay far under the captured ~7.9k chars
+    assert len(json.dumps(tools)) < 400
+    for t in tools:
+        assert t["function"]["parameters"] == {"type": "object", "properties": {}}
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_body_minimal_injection_avoids_client_claimed_names() -> None:
+    """Injecting a name the client already uses adds no distinct builtin name
+    (the gate counts names) and the old code dropped the builtin instead."""
+    adapter = ZenDirectAdapter(make_settings())
+    client_tools = [
+        {"type": "function", "function": {"name": n, "parameters": {}}}
+        for n in ("bash", "read")
+    ]
+    body = adapter._build_body(
+        {
+            "model": "big-pickle",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": client_tools,
+        },
+        "big-pickle",
+    )
+    names = [t["function"]["name"] for t in body["tools"]]
+    # client tools kept verbatim, plus two injected names that do not collide
+    assert names.count("bash") == 1
+    assert names.count("read") == 1
+    injected = [n for n in names if n in ("todowrite", "skill", "task", "list")]
+    assert len(injected) == 2
+    assert len(names) == 4
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_body_captured2_mode_uses_two_captured_schemas() -> None:
+    adapter = ZenDirectAdapter(make_settings(zen_tools_mode="captured2"))
+    body = adapter._build_body(
+        {"model": "big-pickle", "messages": [{"role": "user", "content": "hi"}]},
+        "big-pickle",
+    )
+    tools = body["tools"]
+    assert {t["function"]["name"] for t in tools} == {"bash", "read"}
+    # the captured schemas are far larger than the synthesized ones
+    assert len(json.dumps(tools)) > 5000
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
 async def test_body_full_mode_injects_opencode_prompt() -> None:
     adapter = ZenDirectAdapter(make_settings(zen_marker_mode="full"))
     body = adapter._build_body(

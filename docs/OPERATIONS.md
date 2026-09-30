@@ -202,3 +202,43 @@ owin10 的 hermes / claude code 目前都指向公网入口，尚未启用直连
 
 > 上述两项均在**部署版 0.6.1** 上实测复现；修复位于 0.6.2，**需要把四桶与
 > ECS LB 重新部署**后才会生效。
+
+### 9.5 三个客户端实际使用的协议（抓包实证）
+
+用本机 8877 透明抓包代理（stdlib，转发到真实网关）实测：
+
+| 客户端 | 协议 | 端点 | 备注 |
+| --- | --- | --- | --- |
+| hermes | **chat_completions**（主）+ responses（辅助） | `/v1/chat/completions` 2 次；`/v1/responses` 1 次 | 主请求 40KB；另有 `/v1/models`、`/api/tags` 等探测 |
+| codex / codex++ | **responses** | `/v1/responses` | `config.toml` 里 `wire_api = "responses"` |
+| claude code | **anthropic messages** | `/v1/messages?beta=true` | 同时发 stream=True 与 False 两版 |
+
+**结论：三种格式都在被真实使用，都必须保留。** hermes 走 chat（还顺带打了
+一次 responses），codex 走 responses，claude code 走 anthropic。
+
+### 9.6 提示词构成与瘦身（本轮重点）
+
+输入 token 的构成（抓包实测）：
+
+| 客户端 | 工具定义 | 系统提示词 | 消息 | 合计 |
+| --- | --- | --- | --- | --- |
+| claude code | **15,068 tok / 23 个（79%）** | 1,451 tok | 2,416 tok | ~19.1k |
+| codex | **6,786 tok / 15 个** | 42 tok | ~1,600 tok | ~8.5k |
+| hermes | **5,989 tok / 14 个** | 4,042 tok | ~13 tok | ~10.1k |
+
+**工具定义是绝对大头**，故优化都落在工具上：
+
+1. **网关注入（全客户端，省 ~1,900 tok/请求）**：门禁只认「≥2 个内置工具名」，
+   schema 内容不校验 → 注入从 7,872 字符降到 246 字符。
+2. **claude code（省 ~9,500 tok/请求，-50%）**：`permissions.deny` 摘除 11 个
+   与编码无关的工具（DesignSync/SendMessage/Workflow/ScheduleWakeup/Cron*/
+   Worktree*/ReportFindings/ListAgents）——Claude Code 会把它们**从请求里
+   移除**。请求体 76,027 → 37,740 字符。
+3. **codex（待定，潜在 ~5,500 tok）**：`~/.codex/config.toml` 启用了
+   `browser` / `unified-computer-use` / `visualize` / `codex-app-tools`
+   四个 bundled 插件，其工具（`multi_agent_v1` 2,385 tok、`mcp__cua_repl`
+   992、`mcp__node_repl` 525、goals 系列 ~1,175、MCP 资源系列 ~486）占了
+   codex 工具预算的绝大部分。未擅自关闭（可能影响 codex++ 既有能力），
+   需要时把对应 `[plugins."..."]` 的 `enabled` 改为 `false` 即可。
+
+**合计效果（claude code 端到端）**：上行请求 21.1k → 8.9k tok，**降幅 ~57%**。

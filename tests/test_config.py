@@ -85,3 +85,12 @@ def test_public_models_skips_malformed_entries(monkeypatch):
     monkeypatch.setenv("PUBLIC_MODELS", "a:onlytwo,good:Good Name:up-model")
     s = config.load_settings()
     assert [m["id"] for m in s.public_models] == ["good"]
+
+
+def test_zen_tools_mode_accepts_captured2(monkeypatch):
+    for value in ("minimal", "captured2", "all"):
+        monkeypatch.setenv("ZEN_TOOLS_MODE", value)
+        assert config.load_settings().zen_tools_mode == value
+    monkeypatch.setenv("ZEN_TOOLS_MODE", "bogus")
+    with pytest.raises(ValueError):
+        config.load_settings()
