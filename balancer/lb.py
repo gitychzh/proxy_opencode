@@ -66,6 +66,13 @@ CONNECT_TIMEOUT_S = float(os.environ.get("ZEN_LB_CONNECT_TIMEOUT", "15"))
 READ_TIMEOUT_S = float(os.environ.get("ZEN_LB_READ_TIMEOUT", "600"))
 WRITE_TIMEOUT_S = float(os.environ.get("ZEN_LB_WRITE_TIMEOUT", "60"))
 MAX_INFLIGHT_PER_UPSTREAM = int(os.environ.get("ZEN_LB_MAX_INFLIGHT", "64"))
+# How long a bucket is cordoned after an upstream 429. The free tier resets at
+# UTC midnight, but a 429 is NOT proof the daily quota is gone — measured live
+# 2026-09-30: a bucket answered 429 and then served 200s five minutes later,
+# while the old "cordon until UTC midnight" rule had removed it for ~24h.
+# So cordon for a short cooldown (re-probed automatically) and never past the
+# daily reset. Set ZEN_LB_QUOTA_COOLDOWN to tune (seconds; 0 = until reset).
+QUOTA_COOLDOWN_S = float(os.environ.get("ZEN_LB_QUOTA_COOLDOWN", "900"))
 
 # No usable default: the buckets' credentials differ per deployment and must
 # come from the environment (see balancer/run.cmd.example). An empty value
@@ -315,12 +322,15 @@ class Pool:
 
     async def mark_quota_exhausted(self, up: Upstream, reason: str = "") -> None:
         async with self._lock:
-            until = next_utc_reset()
+            reset = next_utc_reset()
+            until = reset
+            if QUOTA_COOLDOWN_S > 0:
+                until = min(reset, time.time() + QUOTA_COOLDOWN_S)
             up.quota_exhausted_until = until
             up.quota_hits += 1
             up._quota_reason = reason[:200]
             logger.warning(
-                "upstream %s QUOTA EXHAUSTED until %s (%s)",
+                "upstream %s QUOTA CORDONED until %s (%s)",
                 up.name, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(until)),
                 reason[:120])
 

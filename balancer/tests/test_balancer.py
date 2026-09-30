@@ -319,6 +319,32 @@ async def test_own_rate_limit_429_does_not_cordon():
 
 
 @pytest.mark.asyncio
+async def test_quota_cordon_uses_short_cooldown(monkeypatch):
+    """A 429 is not proof the daily quota is gone: measured live 2026-09-30 a
+    bucket 429'd and then served 200s minutes later, while the old rule had
+    cordoned it until UTC midnight (~24h)."""
+    monkeypatch.setattr(lb, "QUOTA_COOLDOWN_S", 900.0)
+    pool = lb.Pool([lb.Upstream("a", "http://a", "kA")])
+    up = pool.upstreams[0]
+    await pool.mark_quota_exhausted(up, "429 FreeUsageLimitError")
+    remaining = up.quota_exhausted_until - time.time()
+    assert 0 < remaining <= 905, remaining
+    assert up.quota_hits == 1
+    # and it must never outlive the daily reset
+    assert up.quota_exhausted_until <= lb.next_utc_reset() + 1
+
+
+@pytest.mark.asyncio
+async def test_quota_cordon_zero_cooldown_waits_for_utc_reset(monkeypatch):
+    monkeypatch.setattr(lb, "QUOTA_COOLDOWN_S", 0.0)
+    pool = lb.Pool([lb.Upstream("a", "http://a", "kA")])
+    up = pool.upstreams[0]
+    await pool.mark_quota_exhausted(up, "429")
+    assert up.quota_exhausted_until > time.time()
+    assert up.quota_exhausted_until <= lb.next_utc_reset() + 1
+
+
+@pytest.mark.asyncio
 async def test_request_id_forwarded_and_echoed():
     pool = two_upstream_pool()
     resp = await call(lb.create_app(pool))

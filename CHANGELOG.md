@@ -58,6 +58,25 @@
 - **`PUBLIC_MODELS` 解析丢条目**：展示名含冒号的目录项此前被静默丢弃并回落
   到内置目录；现按“首段=id、末段=上游、中间=展示名”解析，畸形条目单独跳过。
 
+### Fixed — 四桶 + 客户端全链路实测新增（2026-09-30）
+
+- **SSE 泄漏上游模型展示名（严重）**：Zen 在 `delta.name` 里回填上游模型的
+  人类可读名（实测 `{"role":"assistant","content":"OK","name":"Space Bunny"}`）。
+  掩码层只改写顶层 `model` 字段，于是 `Space Bunny` 随流式响应泄漏给客户端，
+  “上游模型名不出网关”的设计目标被绕过。现按“工具/函数名不可能含空白字符”
+  的判据，在字节层剔除带空白的 `delta.name`（连同分隔逗号，保持 JSON 合法）；
+  非流式路径的 `message.name` 同样处理。
+- **LB 配额熔断过于激进（严重）**：任一上游 429 即把该桶熔断到 **UTC 零点**
+  （最长 ~24h）。但 Zen 的 429 文案是 “Rate limit exceeded. Please try again
+  later.”，实测同一桶 429 后 **5 分钟内即恢复 200**——却仍被排除在调度之外
+  约 24h，静默损失 1/4 容量。现改为**冷却窗口**（`ZEN_LB_QUOTA_COOLDOWN`，
+  默认 900s，自动重探），且永不越过当日重置点；`0` 恢复旧的“熔断到重置”。
+- **`scripts/e2e_hermes.py` 的 toolset 名错误**：`-t files` 并非合法
+  toolset（正确是单数 `file`）。hermes 会打印 “Unknown toolset: files” 后
+  **加载 0 个工具**，而模型仍会礼貌作答——工具类用例因此长期“看似通过”。
+  现修正为 `-t terminal -t file`，并新增**落盘断言**（工具用例必须真的产出
+  文件，否则整轮判失败），让这类静默失效无法再被掩盖。
+
 ### Changed — 工程化 / 模块化
 
 - **新增 `routes/_pipeline.py`（共享请求管线）**：`/v1/chat/completions`、

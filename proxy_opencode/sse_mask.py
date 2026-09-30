@@ -1,9 +1,17 @@
 """SSE stream rewriting: scrub upstream model names out of relayed chunks.
 
-Chat-completion SSE chunks carry a top-level `"model": "<id>"` field. When
-model masking is on, every such field is rewritten to the public model id
-before the chunk reaches the client. Line-buffered so JSON payloads split
-across TCP chunks are handled correctly.
+Two leaks are handled here:
+
+1. `"model": "<id>"` at the top level of every chunk — rewritten to the
+   public model id.
+2. `delta.name` — Zen puts the *upstream model's human-readable name* there
+   (observed live 2026-09-30: `{"role":"assistant","content":"OK","name":"Space Bunny"}`).
+   That field is not part of the OpenAI chat-delta contract, and leaving it
+   in defeats model masking just as surely as an unmasked `model` field.
+
+Both are rewritten at the byte level (no JSON re-serialisation) so the
+passthrough stays faithful, and line-buffered so payloads split across TCP
+chunks are handled correctly.
 """
 
 from __future__ import annotations
@@ -13,14 +21,28 @@ from typing import Any, AsyncIterator
 
 _MODEL_FIELD = re.compile(rb'("model"\s*:\s*")[^"]*(")')
 
+# A tool/function name can never contain whitespace, so a `name` value with a
+# space in it is always the leaked upstream model display name. Drop the key
+# together with its separating comma so the JSON stays valid.
+_LEAKY_NAME_TRAILING = re.compile(rb',\s*"name"\s*:\s*"[^"]*\s[^"]*"')
+_LEAKY_NAME_LEADING = re.compile(rb'"name"\s*:\s*"[^"]*\s[^"]*"\s*,')
+
+
+def _scrub_leaked_name(line: bytes) -> bytes:
+    line = _LEAKY_NAME_TRAILING.sub(b"", line)
+    return _LEAKY_NAME_LEADING.sub(b"", line)
+
 
 def rewrite_sse_line(line: bytes, public_model: str) -> bytes:
-    """Rewrite the model field of one SSE data line, if present."""
-    if line.startswith(b"data:") and b'"model"' in line:
-        repl = _MODEL_FIELD.sub(
+    """Rewrite the model / leaked-name fields of one SSE data line."""
+    if not line.startswith(b"data:"):
+        return line
+    if b'"model"' in line:
+        line = _MODEL_FIELD.sub(
             rb"\g<1>" + public_model.encode("utf-8") + rb"\g<2>", line
         )
-        return repl
+    if b'"name"' in line:
+        line = _scrub_leaked_name(line)
     return line
 
 
@@ -41,7 +63,21 @@ async def mask_model_field(
 
 
 def mask_json_model(body: dict[str, Any], public_model: str) -> dict[str, Any]:
-    """Rewrite the model field of a non-streaming JSON response in place."""
-    if isinstance(body, dict):
-        body["model"] = public_model
+    """Rewrite the model field of a non-streaming JSON response in place.
+
+    Also drops a leaked `message.name` (same signature as the SSE leak) so
+    the upstream model identity never reaches the client in either shape.
+    """
+    if not isinstance(body, dict):
+        return body
+    body["model"] = public_model
+    for choice in body.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            continue
+        name = message.get("name")
+        if isinstance(name, str) and " " in name:
+            message.pop("name", None)
     return body

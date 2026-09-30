@@ -144,3 +144,61 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
 - **0.5.1**（2026-09-29）：适配 Zen 新门禁（x-session-id 稳定头）
 - **0.5.0**：配额感知熔断、request_id 追踪、/admin 面板、双桶→四桶拓扑
 - **0.4.x**：单桶原型（Docker 部署，已淘汰）
+
+## 9. 全链路验证记录（2026-09-30）
+
+在 owin10 上以 hermes 与 claude code 为客户端，覆盖四桶直连 + LB + 公网入口
+的实测记录。可复现命令见 `scripts/e2e_hermes.md`。
+
+### 9.1 拓扑连通性（全部通过）
+
+| 目标 | 地址 | healthz | 版本 |
+| --- | --- | --- | --- |
+| win10-local | `100.121.137.118:8791` | 200（本机 5ms） | 0.6.1 |
+| owin10 | `100.109.109.108:8791` | 200 | 0.6.1 |
+| ubuntu26 | `100.109.57.26:8791` | 200 | 0.6.1 |
+| phone115 | `100.87.219.115:8792` | 200 | 0.6.1 |
+| ECS LB | `100.90.84.65:7892` / `47.250.130.52:7892` | 200 | — |
+| 公网入口 | `https://llm.223722.xyz` | 200 | — |
+
+四桶直连非流式 / 流式对话均 200；`/v1/responses`（codex 协议）与
+`/v1/messages`（Anthropic 协议）经公网入口均返回正确内容。
+
+### 9.2 延迟基准（N=5 非流式，max_tokens=200）
+
+| 路径 | TTFB 中位 | 总耗时 中位 | 总耗时 min/max |
+| --- | --- | --- | --- |
+| ubuntu26 直连 | 2946ms | **2948ms** | 2441/4863 |
+| owin10 直连 | 3184ms | 3197ms | 2401/7527 |
+| phone115 直连 | 3042ms | 4061ms | 2354/5805 |
+| LB 公网入口 | 4554ms | **5082ms** | 4444/5885 |
+
+结论：**直连桶比公网入口快约 1.5–2.1s/请求**（与 ACCESS.md 的 ~2s 一致）。
+owin10 的 hermes / claude code 目前都指向公网入口，尚未启用直连提速。
+注意 phone115（Termux）出现 1/6 连接失败，稳定性弱于其他三桶。
+
+### 9.3 客户端实测（owin10）
+
+| 用例 | 耗时 | 结果 |
+| --- | --- | --- |
+| hermes 普通问答 | 20.0s | ✅ 正确 |
+| hermes 推理（`--reasoning high`） | 18.2s | ✅ 正确（Reasoning 面板可见） |
+| hermes 工具（`-t terminal -t file --yolo`） | 25s | ✅ 落盘 `e2e_probe.txt`=hello，6 次工具调用 |
+| claude code 普通问答 | 18.8s | ✅ 正确 |
+| claude code 工具（Write/Read） | 77.3s | ✅ 落盘 `c_e2e.txt`=hi |
+
+⚠️ claude code 对 `ds41f_cus` 报 `[claude-code:unrecognized_model]`：不在其模型
+目录内，auto-compact 按 200k 上下文估算。功能不受影响；如需消除告警，可用
+`modelOverrides`/`behavesAs` 映射，或设 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`。
+
+### 9.4 实测确认的两个部署缺陷（已在 0.6.2 修复，需重新部署桶与 LB）
+
+1. **SSE 泄漏 `delta.name`**：Zen 回填上游模型名 `Space Bunny`，旧掩码只改
+   `model`，故随流式响应泄漏。已在 `sse_mask.py` 修复。
+2. **LB 熔断过激**：win10-local 桶在实测中 **可正常服务**（多次 200），却因
+   早先一次 429 被 LB 熔断到 UTC 零点（快照显示 `quota_exhausted=true,
+   reset=747min`，而直连该桶持续返回 200），静默损失 1/4 容量。已改为冷却
+   窗口（默认 900s 自动重探）。
+
+> 上述两项均在**部署版 0.6.1** 上实测复现；修复位于 0.6.2，**需要把四桶与
+> ECS LB 重新部署**后才会生效。

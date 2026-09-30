@@ -12,6 +12,12 @@ logs/
 *.log
 keys.json
 
+# 端到端脚本产出的报告（scripts/e2e_hermes.py）
+e2e_report.json
+
 # balancer 本地配置（含真实 key，绝不提交）
 balancer/run.cmd
 balancer/run.local.cmd
+
+# WorkBuddy 本地工作数据（不进入仓库）
+.workbuddy-ai/

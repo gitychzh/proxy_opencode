@@ -6,7 +6,11 @@ import json
 
 from proxy_opencode.config import Settings
 from proxy_opencode.registry import ModelRegistry
-from proxy_opencode.sse_mask import mask_model_field, rewrite_sse_line
+from proxy_opencode.sse_mask import (
+    mask_json_model,
+    mask_model_field,
+    rewrite_sse_line,
+)
 
 
 def make_registry(**kw) -> ModelRegistry:
@@ -73,6 +77,44 @@ def test_rewrite_sse_line_masks_model_field():
     assert b"big-pickle" not in out
 
 
+def test_rewrite_sse_line_scrubs_leaked_delta_name_trailing():
+    """Live 2026-09-30: Zen puts the upstream model display name in
+    `delta.name`; the old masking only rewrote `model`, so it leaked."""
+    line = (
+        b'data: {"model":"big-pickle","choices":[{"index":0,"delta":'
+        b'{"role":"assistant","content":"OK","name":"Space Bunny"}}]}'
+    )
+    out = rewrite_sse_line(line, "ds41f_cus")
+    assert b"Space Bunny" not in out
+    assert b'"name"' not in out
+    # the rewritten line must still be valid JSON
+    payload = json.loads(out[5:])
+    assert payload["choices"][0]["delta"] == {"role": "assistant", "content": "OK"}
+
+
+def test_rewrite_sse_line_scrubs_leaked_delta_name_in_the_middle():
+    line = (
+        b'data: {"choices":[{"delta":{"role":"assistant","name":"Space Bunny",'
+        b'"content":"hi"}}]}'
+    )
+    out = rewrite_sse_line(line, "ds41f_cus")
+    assert b"Space Bunny" not in out
+    assert json.loads(out[5:])["choices"][0]["delta"] == {
+        "role": "assistant",
+        "content": "hi",
+    }
+
+
+def test_rewrite_sse_line_keeps_real_tool_names():
+    """Tool/function names never contain whitespace, so they must survive."""
+    line = (
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+        b'"function":{"name":"write_file","arguments":"{}"}}]}}]}'
+    )
+    out = rewrite_sse_line(line, "ds41f_cus")
+    assert b'"name":"write_file"' in out
+
+
 def test_rewrite_sse_line_ignores_non_model_lines():
     line = b": keep-alive"
     assert rewrite_sse_line(line, "ds41f_cus") == line
@@ -107,3 +149,21 @@ async def test_mask_handles_lines_split_across_chunks():
 async def test_mask_passes_through_plain_lines():
     out = await _collect([b"data: [DONE]\n\n"])
     assert out == b"data: [DONE]\n\n"
+
+
+def test_mask_json_model_drops_leaked_message_name():
+    body = {
+        "model": "opencode/big-pickle",
+        "choices": [
+            {"message": {"role": "assistant", "content": "OK", "name": "Space Bunny"}}
+        ],
+    }
+    mask_json_model(body, "ds41f_cus")
+    assert body["model"] == "ds41f_cus"
+    assert "name" not in body["choices"][0]["message"]
+
+
+def test_mask_json_model_keeps_non_space_names():
+    body = {"model": "x", "choices": [{"message": {"name": "assistant"}}]}
+    mask_json_model(body, "ds41f_cus")
+    assert body["choices"][0]["message"]["name"] == "assistant"

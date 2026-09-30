@@ -33,7 +33,11 @@ N_TARGET = int(os.environ.get("E2E_N", "36"))
 
 COMMON = [HERMES, "chat", "--provider", PROVIDER, "-m", MODEL,
           "--oneshot", "--cli", "--in", WORKDIR]
-TOOL_FLAGS = ["-t", "terminal", "-t", "files", "--yolo"]
+# hermes toolset names are singular: `terminal` and `file` (NOT `files`).
+# `-t files` silently yields "Unknown toolset" and hermes then loads ZERO
+# tools — the model still answers, so the failure is invisible unless the
+# tool-using cases actually check that a file landed on disk.
+TOOL_FLAGS = ["-t", "terminal", "-t", "file", "--yolo"]
 
 PROMPTS = [
     # plain conversation
@@ -81,6 +85,13 @@ PROMPTS = [
      TOOL_FLAGS),
 ]
 
+def _workdir_files() -> set[str]:
+    try:
+        return set(os.listdir(WORKDIR))
+    except OSError:
+        return set()
+
+
 def main() -> int:
     if not (os.path.exists(HERMES) or shutil.which(HERMES)):
         print(
@@ -103,8 +114,10 @@ def main() -> int:
 
     results = []
     ok = fail = tools_seen = reasoning_seen = 0
+    tool_jobs = tool_files = 0
     for idx, (kind, prompt, extra) in enumerate(jobs, 1):
         cmd = COMMON + ["-q", prompt] + extra
+        before = _workdir_files() if kind == "tool" else set()
         t0 = time.time()
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=420,
                               encoding="utf-8", errors="replace")
@@ -117,21 +130,37 @@ def main() -> int:
             or ("\u256d" in out and ("ran" in out.lower() or "tool" in out.lower()))
         )
         has_reason = "Reasoning" in out
+        # Ground truth for tool jobs: did anything actually land on disk?
+        # (a mis-named toolset makes hermes load 0 tools while still replying
+        # politely, so the text heuristic alone can't catch it)
+        created = sorted(_workdir_files() - before) if kind == "tool" else []
+        if kind == "tool":
+            tool_jobs += 1
+            tool_files += len(created)
         ok += bool(good)
         tools_seen += bool(has_tool)
         reasoning_seen += bool(has_reason)
         fail += not good
         print(f"[{idx}/{n_target}] {kind} rc={proc.returncode} {dt}s"
-              f" tool={has_tool} reason={has_reason}")
+              f" tool={has_tool} reason={has_reason} files={created}")
         results.append({
             "idx": idx, "kind": kind, "prompt": prompt, "rc": proc.returncode,
             "elapsed_s": dt, "ok": good, "tool_used": has_tool,
-            "reasoning": has_reason,
+            "reasoning": has_reason, "files_created": created,
             "tail": out[-400:],
         })
         with open(REPORT, "w", encoding="utf-8") as f:
             json.dump({"results": results}, f, ensure_ascii=False, indent=1)
-    print(f"DONE ok={ok} fail={fail} tools_seen={tools_seen} reasoning_seen={reasoning_seen}")
+    if tool_jobs and tool_files == 0:
+        print(
+            "FAIL: none of the tool jobs produced a file — check the hermes "
+            "toolset flags (must be `-t terminal -t file`; `files` is invalid "
+            "and silently loads zero tools)",
+            file=sys.stderr,
+        )
+        fail += 1
+    print(f"DONE ok={ok} fail={fail} tools_seen={tools_seen} "
+          f"reasoning_seen={reasoning_seen} tool_files={tool_files}")
     return 0 if fail == 0 else 1
 
 if __name__ == "__main__":
