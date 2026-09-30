@@ -53,6 +53,8 @@ class OpenAIHttpAdapter:
                 "Authorization": f"Bearer {settings.upstream_api_key}",
                 "Content-Type": "application/json",
             },
+            # Never follow ambient proxy settings (see upstream_trust_env).
+            trust_env=settings.upstream_trust_env,
         )
 
     async def aclose(self) -> None:

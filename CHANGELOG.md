@@ -77,6 +77,19 @@
   现修正为 `-t terminal -t file`，并新增**落盘断言**（工具用例必须真的产出
   文件，否则整轮判失败），让这类静默失效无法再被掩盖。
 
+### Fixed — 出口路径不再跟随环境代理（2026-10-01 实测）
+
+- **`trust_env` 默认关闭**：四个 httpx 客户端（zen-direct / openai 透传 /
+  balancer）此前都用 httpx 默认的 `trust_env=True`，会跟随
+  `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 与 Windows 注册表代理。实测
+  win10-local 桶因此**持续 502**：上游调用在 ~2.0s 内
+  `ConnectError: All connection attempts failed`，而同一台机器的网络完全正常
+  （`curl --noproxy` 与 `trust_env=False` 均 200）。复现实验确认：带上
+  `HTTP_PROXY=http://127.0.0.1:7897`（已失效的 Clash）后，失败耗时 2.3s，与
+  线上观测的 2.0s 吻合。
+  现新增 `UPSTREAM_TRUST_ENV`（默认 `false`）统一控制四个客户端；需要走代理
+  请用显式的 `ZEN_PROXY`，不要让出口路径依赖机器的环境变量状态。
+
 ### Changed — 提示词瘦身（2026-09-30 抓包实测，本轮重点）
 
 对 claude code / hermes / codex 三个客户端做了真实抓包，定位输入 token 的

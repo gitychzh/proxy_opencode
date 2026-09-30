@@ -94,3 +94,12 @@ def test_zen_tools_mode_accepts_captured2(monkeypatch):
     monkeypatch.setenv("ZEN_TOOLS_MODE", "bogus")
     with pytest.raises(ValueError):
         config.load_settings()
+
+
+def test_upstream_trust_env_defaults_off(monkeypatch):
+    """Ambient HTTP_PROXY must not steer the gateway by default: a stale
+    proxy env var once 502'd a bucket whose network was fine."""
+    monkeypatch.delenv("UPSTREAM_TRUST_ENV", raising=False)
+    assert config.load_settings().upstream_trust_env is False
+    monkeypatch.setenv("UPSTREAM_TRUST_ENV", "1")
+    assert config.load_settings().upstream_trust_env is True

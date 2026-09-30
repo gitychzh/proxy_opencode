@@ -219,11 +219,13 @@ class ZenDirectAdapter:
             base_url=base,
             timeout=httpx.Timeout(float(settings.zen_timeout_s), connect=15.0),
             proxy=proxy,
-            # trust_env stays ON deliberately: on Windows httpx then follows
-            # the registry/env system proxy (e.g. Clash), which changes the
-            # egress region the free-tier gate inspects. An explicit
-            # ZEN_PROXY always wins. Set to False only for direct egress.
-            trust_env=True,
+            # trust_env defaults to False: following ambient HTTP_PROXY /
+            # HTTPS_PROXY couples the egress path to machine state. Measured
+            # 2026-10-01: a stale HTTP_PROXY (dead Clash) made every upstream
+            # call fail with ConnectError in ~2s and the bucket 502'd while
+            # its network was fine. Route explicitly with ZEN_PROXY instead;
+            # set ZEN_TRUST_ENV=1 only if you really want env/registry proxies.
+            trust_env=settings.upstream_trust_env,
         )
         self._auth_free = not settings.zen_api_key
         # tool_choice "auto" + stream_options mirror the genuine client body.

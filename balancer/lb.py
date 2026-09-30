@@ -73,6 +73,11 @@ MAX_INFLIGHT_PER_UPSTREAM = int(os.environ.get("ZEN_LB_MAX_INFLIGHT", "64"))
 # So cordon for a short cooldown (re-probed automatically) and never past the
 # daily reset. Set ZEN_LB_QUOTA_COOLDOWN to tune (seconds; 0 = until reset).
 QUOTA_COOLDOWN_S = float(os.environ.get("ZEN_LB_QUOTA_COOLDOWN", "900"))
+# Never follow ambient HTTP_PROXY/HTTPS_PROXY by default: a stale proxy env
+# var once made every upstream call fail while the network was healthy.
+TRUST_ENV = os.environ.get("UPSTREAM_TRUST_ENV", "").strip().lower() in (
+    "1", "true", "yes", "on"
+)
 
 # No usable default: the buckets' credentials differ per deployment and must
 # come from the environment (see balancer/run.cmd.example). An empty value
@@ -391,6 +396,9 @@ def make_client() -> httpx.AsyncClient:
                               write=WRITE_TIMEOUT_S, pool=CONNECT_TIMEOUT_S),
         limits=httpx.Limits(max_connections=256, max_keepalive_connections=64),
         follow_redirects=False,
+        # Never follow ambient HTTP_PROXY/HTTPS_PROXY: a stale proxy env var
+        # once made every upstream call fail while the network was fine.
+        trust_env=TRUST_ENV,
     )
 
 

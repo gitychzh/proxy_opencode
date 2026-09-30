@@ -123,6 +123,17 @@ class Settings:
     zen_timeout_s: int = 300
     # Optional egress proxy for the zen client, e.g. "http://127.0.0.1:7897".
     zen_proxy: str = ""
+    # Whether the httpx clients may follow ambient proxy settings
+    # (HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY, plus the Windows
+    # registry proxy). Applies to every outbound client: zen-direct, the
+    # generic openai passthrough adapter and the balancer.
+    #
+    # Default FALSE. Measured 2026-10-01: the win10-local bucket inherited a
+    # stale HTTP_PROXY pointing at a dead Clash instance, so every upstream
+    # call failed with ConnectError in ~2.0s and the bucket answered 502 while
+    # its network was perfectly healthy. Coupling the egress path to ambient
+    # machine state is fragile; route explicitly with ZEN_PROXY instead.
+    upstream_trust_env: bool = False
     # Session gate (enforced by Zen since 2026-09): anonymous free-tier
     # requests MUST carry an `x-session-id` header (any stable UUID).
     # Empty -> a fresh UUID is generated once per process.
@@ -280,6 +291,7 @@ def load_settings() -> Settings:
         or list(DEFAULT_ZEN_MODELS),
         zen_timeout_s=int(os.environ.get("OPENCODE_ZEN_TIMEOUT_S", "300")),
         zen_proxy=os.environ.get("ZEN_PROXY", "").strip(),
+        upstream_trust_env=_env_bool("UPSTREAM_TRUST_ENV", False),
         zen_session_id=(
             os.environ.get("OPENCODE_ZEN_SESSION_ID", "").strip()
             or str(uuid.uuid4())
