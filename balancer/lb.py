@@ -642,10 +642,15 @@ def create_app(pool: Pool) -> Any:
                     client.build_request(method, up.target(path), content=body,
                                          headers=headers_fwd),
                     stream=True)
+                # TTFB at the edge = headers from the bucket received. Bucket
+                # hop + bucket gateway code + upstream TTFT all sit inside
+                # this number; the difference to total is pure body streaming.
+                ttfb_ms = (time.perf_counter() - t0) * 1000
                 if resp.status_code == 429:
                     err = await resp.aread()
                     await resp.aclose()
-                    last_error = f"{up.name} status=429 body={err[:200]!r}"
+                    last_error = (f"{up.name} status=429 ttfb={ttfb_ms:.0f}ms "
+                                  f"body={err[:200]!r}")
                     await pool.release(up, False, (time.perf_counter() - t0) * 1000,
                                        last_error)
                     if _is_own_rate_limit(err):
@@ -661,12 +666,12 @@ def create_app(pool: Pool) -> Any:
                 if resp.status_code in RETRYABLE_STATUS:
                     err = await resp.aread()
                     await resp.aclose()
-                    last_error = f"{up.name} status={resp.status_code} body={err[:200]!r}"
+                    last_error = (f"{up.name} status={resp.status_code} "
+                                  f"ttfb={ttfb_ms:.0f}ms body={err[:200]!r}")
                     await pool.release(up, False, (time.perf_counter() - t0) * 1000, last_error)
-                    logger.warning("lb retryable %s from %s", resp.status_code, up.name)
+                    logger.warning("lb retryable %s from %s (ttfb=%.0fms)",
+                                   resp.status_code, up.name, ttfb_ms)
                     continue
-                logger.info("rid=%s lb %s %s -> %s status=%d attempt=%d", rid, method,
-                            path, up.name, resp.status_code, tried)
                 out_headers = response_headers(resp.headers.raw) + [
                     (b"x-request-id", rid.encode())]
                 await send({"type": "http.response.start", "status": resp.status_code,
@@ -677,11 +682,20 @@ def create_app(pool: Pool) -> Any:
                         await send({"type": "http.response.body", "body": chunk,
                                     "more_body": True})
                 await send({"type": "http.response.body", "body": b"", "more_body": False})
-                await pool.release(up, True, (time.perf_counter() - t0) * 1000)
+                total_ms = (time.perf_counter() - t0) * 1000
+                await pool.release(up, True, total_ms)
+                # Full-chain observability (2026-09-30): ttfb covers
+                # LB->bucket->upstream first byte; total covers the whole body
+                # relay. Sustained ttfb growth with flat total => upstream or
+                # bucket slowness; flat ttfb with growing total => big bodies.
+                logger.info("rid=%s lb %s %s -> %s status=%d attempt=%d "
+                            "ttfb=%.0fms total=%.0fms", rid, method, path,
+                            up.name, resp.status_code, tried, ttfb_ms, total_ms)
                 return
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
                     httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.PoolTimeout) as exc:
-                last_error = f"{up.name} {type(exc).__name__}: {exc}"
+                last_error = (f"{up.name} {type(exc).__name__}: {exc} "
+                              f"(elapsed={(time.perf_counter() - t0) * 1000:.0f}ms)")
                 await pool.release(up, False, (time.perf_counter() - t0) * 1000, last_error)
                 if streamed:
                     raise

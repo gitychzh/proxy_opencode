@@ -26,6 +26,29 @@ OpenCode Zen（匿名免费层，配额按出口 IP 计）
 - 公网入口由 Cloudflare Tunnel `zen-gw` 承载：ECS 上 `cloudflared-tunnel.service`，
   配置 `/etc/cloudflared/config.yml`，凭据 `/root/.cloudflared/`
 
+### 2.1 请求级耗时日志（0.6.1 起，ECS 端可观测）
+
+```bash
+ssh root@<ECS_IP> tail -f /opt/proxy_opencode/balancer/logs/lb.log
+```
+
+每条转发成功日志：
+
+```
+rid=<id> lb POST /v1/chat/completions -> win10-local status=200 attempt=1 ttfb=4247ms total=5468ms
+```
+
+读法（2026-09-30 三路径 ablation 标定：直打上游 TTFT ~2.3-4.2s，桶内开销 <0.5s，
+公网链路固定 ~0.7s）：
+
+| 字段 | 覆盖段 | 异常解读 |
+|---|---|---|
+| `ttfb` | LB→桶→上游首字节（含桶代码 + Zen TTFT） | 持续走高 = 上游慢或桶慢；对照直打上游基线 |
+| `total` | 整个响应流回传完 | ttfb 平稳而 total 增长 = 大响应体（正常） |
+| `attempt` | 重试次数 | >1 = 有桶 429/502 被跳过（看 WARNING 行详情） |
+
+429/502/超时日志同样带 `ttfb=`/`elapsed=`，配额熔断行有 `cordoned for quota`。
+
 ## 2. ECS（SWAS 吉隆坡）
 
 ```bash
