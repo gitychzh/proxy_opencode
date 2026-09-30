@@ -96,8 +96,13 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
       ~30-50% 错误率，错误响应通常缺 `reasoning_content`）。缓解：
       ① 请求带 `reasoning_effort: high` 或提示词要求逐步推理；② 需要稳定性的场景
       切 `gw-nemotron`（实测更稳）；③ 网关层无法根治，属上游问题
-- [ ] **速度慢**（~22 tokens/s）：候选优化——LB 侧按延迟选桶；筛选响应更快的免费模型；
-      排查 CF Tunnel 与跨洋链路开销；压缩注入的系统提示词（~7.8k prompt tokens 偏高）
+- [x] ~~速度慢——网关侧可做的部分~~ → **0.6.1 已完成**（2026-09-30）：①拆除每 key
+      60 RPM 限速（agent 并发扇出不再被自建层惩罚）；②活体 ablation 实测 Zen 门禁
+      只查工具 schema（≥2 个即过），`ZEN_MARKER_MODE=bridge` + `ZEN_TOOLS_MODE=minimal`
+      把每请求 prefill 从 ~7.8k 降到 ~2.3k tokens（-70%）；③两台 Windows 的 hermes
+      切本桶直连（省公网链路 ~2s/请求）。
+- [ ] **剩余慢因子全在上游**（网关无法再压）：Zen TTFT ~2-4s（上游排队+启动）、
+      生成 ~22 tokens/s（模型速度）。候选：筛选响应更快的免费模型
 - [ ] Zen 偶发上游 400/invalid request（如 `400 {"model":"big-pickle"}`）会原样
       透传给客户端（`_raw_relay_body`），属瞬时故障；LB 熔断 + 客户端重试即可
 
