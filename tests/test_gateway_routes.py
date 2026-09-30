@@ -7,6 +7,8 @@ agent fan-out. test_no_rate_limit_burst guards the removal.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -144,3 +146,70 @@ async def test_models():
     # Model masking: only the public alias is ever listed.
     assert data[0]["id"] == "ds41f_cus"
     assert all(m["id"] != "opencode/big-pickle" for m in data)
+
+
+# ------------------------------------------------- payload dump (debug)
+
+
+@pytest.mark.asyncio
+async def test_payload_dump_disabled_by_default(tmp_path):
+    app, _ = make_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/v1/chat/completions",
+            json={"model": "opencode/big-pickle",
+                  "messages": [{"role": "user", "content": "hi"}]},
+            headers=GW_HEADERS,
+        )
+    assert not any(tmp_path.rglob("*_chat.json"))
+
+
+@pytest.mark.asyncio
+async def test_payload_dump_writes_raw_body(tmp_path):
+    app, _ = make_app(payload_dump_dir=str(tmp_path))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "opencode/big-pickle",
+                "messages": [{"role": "user", "content": "hi"}],
+                "metadata": {"junk": "stripped-later-by-whitelist"},
+            },
+            headers=GW_HEADERS,
+        )
+    dumps = list(tmp_path.glob("*_chat.json"))
+    assert len(dumps) == 1
+    raw = json.loads(dumps[0].read_text(encoding="utf-8"))
+    # the raw body is dumped BEFORE whitelist filtering: the junk field survives
+    assert raw["metadata"] == {"junk": "stripped-later-by-whitelist"}
+
+
+@pytest.mark.asyncio
+async def test_payload_dump_covers_all_three_protocols(tmp_path):
+    """The audit must see claude code / codex traffic too, not just chat."""
+    app, _ = make_app(payload_dump_dir=str(tmp_path))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        await client.post(
+            "/v1/chat/completions",
+            json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            headers=GW_HEADERS,
+        )
+        await client.post(
+            "/v1/responses",
+            json={"model": "m", "input": "hi"},
+            headers=GW_HEADERS,
+        )
+        await client.post(
+            "/v1/messages",
+            json={"model": "m", "max_tokens": 16,
+                  "messages": [{"role": "user", "content": "hi"}]},
+            headers=GW_HEADERS,
+        )
+    slugs = sorted(p.name.rsplit("_", 1)[-1] for p in tmp_path.glob("*.json"))
+    assert slugs == ["chat.json", "messages.json", "responses.json"]

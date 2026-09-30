@@ -49,7 +49,7 @@ def make_router(
 
     @router.post("/v1/responses")
     async def handler(request: Request, _: str = Depends(auth)) -> Any:
-        body = await parse_json_object(request)
+        body = await parse_json_object(request, settings.payload_dump_dir)
         if body is None:
             return openai_error(400, "Request body must be a valid JSON object.")
 

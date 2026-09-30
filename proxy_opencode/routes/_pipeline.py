@@ -13,10 +13,12 @@ error mapping was maintained three times.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import Request
@@ -31,6 +33,8 @@ from ..upstreams.opencode_serve import ServeError, WaitTimeoutError
 # (status, message, err_type, code) -> protocol-shaped error response.
 ErrorFactory = Callable[[int, str, str, "str | None"], JSONResponse]
 
+logger = logging.getLogger("proxy_opencode.pipeline")
+
 
 def openai_error_factory(
     status: int, message: str, err_type: str, code: str | None
@@ -39,13 +43,54 @@ def openai_error_factory(
     return openai_error(status, message, err_type=err_type, code=code)
 
 
-async def parse_json_object(request: Request) -> dict[str, Any] | None:
-    """Parse the request body as a JSON object; None when it is not one."""
+async def parse_json_object(
+    request: Request, dump_dir: str = ""
+) -> dict[str, Any] | None:
+    """Parse the request body as a JSON object; None when it is not one.
+
+    When `dump_dir` is set (PAYLOAD_DUMP_DIR), the raw body is also persisted
+    for offline prompt-bloat auditing. The dump happens BEFORE whitelist
+    filtering so client-side waste (tool schemas, system prompts) is visible.
+    """
     try:
         body = await request.json()
     except Exception:
         return None
-    return body if isinstance(body, dict) else None
+    if not isinstance(body, dict):
+        return None
+    if dump_dir:
+        _dump_payload(dump_dir, request.url.path, body)
+    return body
+
+
+_DUMP_KEEP = 200
+
+
+def _protocol_slug(path: str) -> str:
+    if path.endswith("/chat/completions"):
+        return "chat"
+    if path.endswith("/responses"):
+        return "responses"
+    if path.endswith("/messages"):
+        return "messages"
+    return "other"
+
+
+def _dump_payload(directory: str, path: str, body: dict[str, Any]) -> None:
+    """Persist one raw client body for offline bloat auditing (best-effort)."""
+    try:
+        dump_dir = Path(directory)
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%H%M%S")
+        name = f"{stamp}_{uuid.uuid4().hex[:8]}_{_protocol_slug(path)}.json"
+        (dump_dir / name).write_text(
+            json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        files = sorted(dump_dir.glob("*.json"))
+        for old in files[: max(0, len(files) - _DUMP_KEEP)]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("payload dump failed", exc_info=True)
 
 
 @dataclass

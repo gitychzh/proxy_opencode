@@ -43,7 +43,7 @@ def make_router(
 
     @app_router.post("/v1/chat/completions")
     async def handler(request: Request, _: str = Depends(auth)) -> Any:
-        body = await parse_json_object(request)
+        body = await parse_json_object(request, settings.payload_dump_dir)
         if body is None:
             return openai_error(
                 400,

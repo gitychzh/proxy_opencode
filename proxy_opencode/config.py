@@ -111,6 +111,12 @@ class Settings:
     #   "all"                 — the full captured 11-tool schema list
     #                           (~6k tokens; legacy, per-bucket fallback)
     zen_tools_mode: str = "minimal"
+    # Debug: dump every raw client request body to this directory (one JSON
+    # file per request, oldest pruned beyond 200 files). Empty -> disabled.
+    # Bodies are dumped BEFORE whitelist filtering, so client-side prompt
+    # bloat (claude code tool schemas, hermes system prompt, ...) can be
+    # audited offline for token waste. Covers all three protocol routes.
+    payload_dump_dir: str = ""
     # Empty -> anonymous free tier ("Bearer public" + system-prompt marker).
     zen_api_key: str = ""
     zen_models: list[str] = field(default_factory=lambda: list(DEFAULT_ZEN_MODELS))
@@ -266,6 +272,7 @@ def load_settings() -> Settings:
         ).rstrip("/"),
         zen_marker_mode=zen_marker_mode,
         zen_tools_mode=zen_tools_mode,
+        payload_dump_dir=os.environ.get("PAYLOAD_DUMP_DIR", "").strip(),
         zen_api_key=os.environ.get("OPENCODE_ZEN_API_KEY", ""),
         zen_models=_csv(
             os.environ.get("OPENCODE_ZEN_MODELS", ",".join(DEFAULT_ZEN_MODELS))
