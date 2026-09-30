@@ -323,3 +323,54 @@ async def test_responses_endpoint_non_stream(tmp_path):
     assert body["object"] == "response"
     assert body["model"] == "ds41f_cus"
     assert body["output"][-1]["content"][0]["text"] == "pong"
+
+
+# ------------------------------------------------- unpaired tool / empty input
+
+def test_orphan_tool_message_degrades_to_user():
+    """Regression: compressed-history replay can contain unpaired tool turns;
+    relaying them verbatim made upstream 400 (invalid_request_error)."""
+    payload = to_chat_payload(
+        {
+            "model": "ds41f_cus",
+            "input": [
+                {"type": "message", "role": "user", "content": "run ls"},
+                {"type": "message", "role": "tool", "content": "file1.txt"},
+            ],
+        }
+    )
+    roles = [m["role"] for m in payload["messages"]]
+    assert roles == ["user", "user"]
+    assert payload["messages"][1]["content"] == "[tool result] file1.txt"
+
+
+def test_tool_message_with_call_id_stays_tool():
+    payload = to_chat_payload(
+        {
+            "model": "ds41f_cus",
+            "input": [
+                {"type": "function_call", "call_id": "call_9",
+                 "name": "t", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_9",
+                 "output": "ok"},
+                {"type": "message", "role": "tool", "tool_call_id": "call_9",
+                 "content": "ok too"},
+            ],
+        }
+    )
+    tool_msgs = [m for m in payload["messages"] if m["role"] == "tool"]
+    assert len(tool_msgs) == 2
+    assert all(m["tool_call_id"] == "call_9" for m in tool_msgs)
+
+
+def test_reasoning_only_input_never_yields_empty_messages():
+    """Regression: all-skippable input produced messages: [] and upstream
+    rejected the request outright."""
+    payload = to_chat_payload(
+        {
+            "model": "ds41f_cus",
+            "input": [{"type": "reasoning", "summary": [{"text": "hmm"}]}],
+        }
+    )
+    assert payload["messages"]
+    assert payload["messages"][-1]["role"] == "user"

@@ -56,6 +56,23 @@ def _input_items_to_messages(items: list[Any]) -> list[dict[str, Any]]:
             text = _content_text(item.get("content"))
             if role == "assistant" and not text:
                 continue
+            if role == "tool":
+                # chat wire only allows tool messages that answer a preceding
+                # assistant tool_calls message via tool_call_id. Clients that
+                # replay compressed histories can emit unpaired tool turns;
+                # relaying them verbatim makes upstream reject the whole
+                # request (HTTP 400 invalid_request_error). Degrade any tool
+                # item without a usable id into a user message instead.
+                tcid = str(item.get("tool_call_id") or item.get("call_id") or "")
+                if tcid:
+                    messages.append(
+                        {"role": "tool", "tool_call_id": tcid, "content": text}
+                    )
+                else:
+                    messages.append(
+                        {"role": "user", "content": f"[tool result] {text}" if text else "[tool result]"}
+                    )
+                continue
             messages.append({"role": role, "content": text})
         elif itype == "function_call":
             messages.append(
@@ -128,6 +145,11 @@ def to_chat_payload(body: dict[str, Any]) -> dict[str, Any]:
             payload[dst] = body[src]
     if body.get("max_output_tokens") is not None:
         payload["max_tokens"] = body["max_output_tokens"]
+    if not messages:
+        # Input consisted solely of skippable items (e.g. reasoning-only
+        # history replay). An empty messages array is rejected outright by
+        # upstream, so substitute a benign continuation prompt.
+        messages.append({"role": "user", "content": "[no convertible input; continue]"})
     return payload
 
 
