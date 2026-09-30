@@ -250,6 +250,40 @@ async def test_body_strips_extra_message_fields() -> None:
     await adapter.aclose()
 
 
+@pytest.mark.asyncio
+async def test_body_drops_turns_with_no_content_or_tool_calls() -> None:
+    """Regression: an empty assistant turn (e.g. a reasoning-only message)
+    used to be forwarded verbatim and made upstream reject the whole request."""
+    adapter = ZenDirectAdapter(make_settings(zen_api_key="oc_sk_test"))
+    body = adapter._build_body(
+        {
+            "model": "big-pickle",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": None},
+                {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
+            ],
+        },
+        "big-pickle",
+    )
+    assert body["messages"] == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "tool_calls": [{"id": "c1"}]},
+    ]
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_body_rejects_when_every_turn_is_empty() -> None:
+    adapter = ZenDirectAdapter(make_settings(zen_api_key="oc_sk_test"))
+    with pytest.raises(ValueError):
+        adapter._build_body(
+            {"model": "big-pickle", "messages": [{"role": "assistant", "content": None}]},
+            "big-pickle",
+        )
+    await adapter.aclose()
+
+
 # --------------------------------------------------------------- chat flow
 
 

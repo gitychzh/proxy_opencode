@@ -63,3 +63,25 @@ def test_loopback_bind_allows_dev_open(monkeypatch):
     s = config.load_settings()
     assert s.host == "127.0.0.1"
     assert s.dev_open
+
+
+def test_public_models_accept_colon_in_display_name(monkeypatch):
+    """Regression: an extra colon used to drop the entry silently, so the
+    gateway quietly fell back to the built-in catalogue."""
+    monkeypatch.setenv(
+        "PUBLIC_MODELS", "dsv41f:DeepSeek V4.1 Flash:fast:opencode/big-pickle"
+    )
+    s = config.load_settings()
+    assert s.public_models == [
+        {
+            "id": "dsv41f",
+            "display_name": "DeepSeek V4.1 Flash:fast",
+            "upstream": "opencode/big-pickle",
+        }
+    ]
+
+
+def test_public_models_skips_malformed_entries(monkeypatch):
+    monkeypatch.setenv("PUBLIC_MODELS", "a:onlytwo,good:Good Name:up-model")
+    s = config.load_settings()
+    assert [m["id"] for m in s.public_models] == ["good"]

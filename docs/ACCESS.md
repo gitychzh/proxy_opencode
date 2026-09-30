@@ -30,7 +30,7 @@ curl http://127.0.0.1:8791/healthz          # 健康检查（版本号在此确�
 
 | 项 | 值 |
 |---|---|
-| 仓库 | `D:\wb_ps\proxy_opencode\repo`（v0.6.0） |
+| 仓库 | `D:\wb_ps\proxy_opencode\repo`（v0.6.2） |
 | Python | `D:\wb_ps\proxy_opencode\repo\.venv\Scripts\python.exe` |
 | 启动脚本 | `D:\wb_ps\proxy_opencode\scripts_local\start_gw_detached.cmd`（`HOST=0.0.0.0`，`:loop` 自愈，退出 5s 重启） |
 | 守护 | 计划任务 **`zen-gw-local`**：开机+登录自启（S4U 后台会话，脱离交互会话存活） |

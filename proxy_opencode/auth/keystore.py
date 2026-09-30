@@ -31,7 +31,7 @@ def _iso(dt: datetime) -> str:
 
 
 def _parse_iso(value: str | None) -> datetime | None:
-    if not value:
+    if not isinstance(value, str) or not value:
         return None
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -95,18 +95,32 @@ class KeyStore:
                 extra={"path": str(self.path)},
             )
             return
-        for item in data.get("keys") or []:
+        if not isinstance(data, dict):
+            # A corrupted/foreign file (e.g. a JSON array) must not crash
+            # startup: refuse it loudly and start from an empty store instead
+            # of clobbering it — _save() only runs on the next mutation.
+            logger.warning(
+                "key store has unexpected top-level shape; starting empty",
+                extra={"path": str(self.path), "shape": type(data).__name__},
+            )
+            return
+        keys = data.get("keys")
+        if not isinstance(keys, list):
+            return
+        for item in keys:
             if not isinstance(item, dict):
                 continue
+            expires_at = item.get("expires_at")
+            meta = item.get("meta")
             self._records.append(
                 KeyRecord(
                     id=str(item.get("id") or ""),
                     key=str(item.get("key") or ""),
                     name=str(item.get("name") or ""),
                     created_at=str(item.get("created_at") or ""),
-                    expires_at=item.get("expires_at"),
+                    expires_at=expires_at if isinstance(expires_at, str) else None,
                     revoked=bool(item.get("revoked")),
-                    meta=item.get("meta") or {},
+                    meta=meta if isinstance(meta, dict) else {},
                 )
             )
 

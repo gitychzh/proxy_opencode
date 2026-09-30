@@ -31,7 +31,7 @@ DEFAULT_ADMIN_API_KEYS = ("api_ychzh22372222",)
 def _default_public_models() -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     for part in DEFAULT_PUBLIC_MODELS:
-        mid, display, upstream = part.split(":")
+        mid, display, upstream = (p.strip() for p in part.split(":", 2))
         out.append({"id": mid, "display_name": display, "upstream": upstream})
     return out
 
@@ -140,13 +140,23 @@ def _csv(value: str) -> list[str]:
 
 
 def _parse_public_models(value: str) -> list[dict[str, str]]:
-    """Parse "id:display_name:upstream" entries into catalogue dicts."""
+    """Parse "id:display_name:upstream" entries into catalogue dicts.
+
+    `id` never contains a colon and `upstream` is a "provider/model" pair that
+    never contains one either, so the display name is allowed to (everything
+    between the first and last segment). Malformed entries are skipped rather
+    than silently dropping the whole catalogue.
+    """
     out: list[dict[str, str]] = []
     for part in _csv(value):
         pieces = part.split(":")
-        if len(pieces) != 3 or not all(pieces):
+        if len(pieces) < 3:
             continue
-        mid, display, upstream = pieces
+        mid = pieces[0].strip()
+        upstream = pieces[-1].strip()
+        display = ":".join(pieces[1:-1]).strip()
+        if not (mid and upstream):
+            continue
         out.append({"id": mid, "display_name": display, "upstream": upstream})
     return out
 

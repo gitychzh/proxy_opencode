@@ -55,6 +55,20 @@ def test_json_formatter_outputs_parseable_line():
     assert "ts" in parsed
 
 
+def test_key_lifecycle_fields_are_rendered():
+    """Regression: key_id/ttl_hours/path were passed as `extra` but missing
+    from the whitelist, so they vanished from every log line."""
+    fmt = ExtraFormatter(fmt="%(message)s")
+    out = fmt.format(
+        _record(key_id="k-1", ttl_hours=24.0, key_name="phone", path="/tmp/keys.json")
+    )
+    for fragment in ("key_id=k-1", "ttl_hours=24.0", "key_name=phone", "path=/tmp/keys.json"):
+        assert fragment in out
+    parsed = json.loads(JsonFormatter().format(_record(key_id="k-1", shape="list")))
+    assert parsed["key_id"] == "k-1"
+    assert parsed["shape"] == "list"
+
+
 def test_setup_logging_env_json(monkeypatch):
     monkeypatch.setenv("LOG_FORMAT", "json")
     setup_logging()

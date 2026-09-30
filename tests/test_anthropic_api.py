@@ -82,6 +82,31 @@ def test_content_blocks_with_tool_roundtrip():
     assert payload["tools"][0]["function"]["parameters"] == {"type": "object", "properties": {}}
 
 
+def test_empty_assistant_turn_is_dropped():
+    """Regression: an assistant turn whose only part is internal reasoning (or
+    an empty content list) used to become {"role":"assistant","content":null},
+    which the chat upstream rejects with HTTP 400."""
+    payload = to_chat_payload(
+        {
+            "model": "ds41f_cus",
+            "max_tokens": 64,
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [{"type": "thinking", "thinking": "..."}]},
+                {"role": "assistant", "content": []},
+            ],
+        }
+    )
+    assert payload["messages"] == [{"role": "user", "content": "hi"}]
+
+
+def test_all_empty_turns_rejected_as_client_error():
+    with pytest.raises(ValueError):
+        to_chat_payload(
+            {"model": "m", "max_tokens": 16, "messages": [{"role": "assistant", "content": []}]}
+        )
+
+
 # -------------------------------------------------------------- response
 
 
@@ -241,6 +266,22 @@ async def test_stream_anthropic_tool_use_block():
     assert delta_ev["delta"]["stop_reason"] == "tool_use"
 
 
+@pytest.mark.asyncio
+async def test_content_block_stop_carries_only_index():
+    """The Anthropic spec puts just type+index on content_block_stop."""
+    chunks = _sse_bytes(
+        [
+            {"choices": [{"delta": {"content": "hi"}, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ]
+    )
+    events = await _collect_events(chunks)
+    stops = [d for n, d in events if n == "content_block_stop"]
+    assert stops
+    for stop in stops:
+        assert set(stop.keys()) == {"type", "index"}
+
+
 # ------------------------------------------------------------ HTTP layer
 
 
@@ -288,3 +329,40 @@ async def test_messages_endpoint_non_stream_and_x_api_key(tmp_path):
         assert r2.json()["type"] == "error"
         # The full key value must never leak in the error body.
         assert "nope" not in r2.text
+
+
+@pytest.mark.asyncio
+async def test_serve_completion_is_logged_exactly_once(tmp_path, caplog):
+    """Regression: the serve-mode branch logged the same completion twice."""
+    import logging
+
+    from proxy_opencode.app import create_app
+    from proxy_opencode.config import Settings
+    from tests.test_gateway_routes import FakeAdapter
+
+    app = create_app(
+        Settings(
+            upstream_mode="opencode-serve",
+            gateway_api_keys=["gw-key"],
+            key_store_path=str(tmp_path / "keys.json"),
+            opencode_server_password="pw",
+        )
+    )
+    app.state.adapter = FakeAdapter()
+    with caplog.at_level(logging.INFO, logger="proxy_opencode.anthropic"):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/v1/messages",
+                json={"model": "ds41f_cus", "max_tokens": 32,
+                      "messages": [{"role": "user", "content": "hi"}]},
+                headers={"x-api-key": "gw-key"},
+            )
+    assert resp.status_code == 200
+    completions = [
+        r for r in caplog.records
+        if r.getMessage() == "anthropic messages completion"
+    ]
+    assert len(completions) == 1
+

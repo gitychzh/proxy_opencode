@@ -73,7 +73,3 @@ class ModelRegistry:
             if raw in (e["id"], e["upstream"]):
                 return e["id"]
         return self.default_public_id
-
-
-def build_registry(settings: Settings) -> ModelRegistry:
-    return ModelRegistry(settings)

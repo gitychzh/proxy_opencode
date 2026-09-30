@@ -150,13 +150,20 @@ def is_valid_opencode_id(value: str, prefix: str) -> bool:
 
 
 def _clean_messages(messages: list[Any]) -> list[dict[str, Any]]:
-    """Keep only OpenAI-core per-message fields (upstream rejects extras)."""
+    """Keep only OpenAI-core per-message fields (upstream rejects extras).
+
+    A message left with neither `content` nor `tool_calls` (e.g. an assistant
+    turn whose only part was internal reasoning) is dropped: the upstream
+    rejects such turns with HTTP 400 and would fail the whole request.
+    """
     keep = ("role", "content", "tool_calls", "tool_call_id", "name")
     out: list[dict[str, Any]] = []
     for m in messages:
         if not isinstance(m, dict):
             continue
         cleaned = {k: v for k, v in m.items() if k in keep and v is not None}
+        if "content" not in cleaned and not cleaned.get("tool_calls"):
+            continue
         out.append(cleaned)
     return out
 
@@ -298,6 +305,11 @@ class ZenDirectAdapter:
         body = {k: v for k, v in payload.items() if k != "model"}
         body["model"] = model
         messages = _clean_messages(body.get("messages") or [])
+        if not messages:
+            raise ValueError(
+                "messages must contain at least one usable turn "
+                "(content or tool_calls)"
+            )
         client_tools = [t for t in (body.get("tools") or []) if isinstance(t, dict)]
         if self._auth_free:
             mode = self._settings.zen_marker_mode
@@ -444,7 +456,3 @@ async def _aggregate_sse(resp: httpx.Response, model: str) -> dict[str, Any]:
         "usage": usage,
         "metadata": {"adapter": "zen-direct", "aggregated_stream": True},
     }
-
-
-def timestamps() -> tuple[int, str]:
-    return int(time.time()), f"chatcmpl-zen-{secrets.token_hex(8)}"

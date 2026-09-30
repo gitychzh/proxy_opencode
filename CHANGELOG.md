@@ -1,5 +1,99 @@
 # Changelog
 
+## [0.6.2] - 2026-09-30
+
+一轮系统性缺陷排查与工程化重构（逻辑 / 代码 / 部署 / 使用四面）。所有修复
+均带回归测试；网关 92 → 108 项、LB 23 → 28 项，全绿；ruff 与 mypy 首次
+真正纳入 CI 门禁并全绿。
+
+### Fixed — 逻辑与协议正确性
+
+- **Responses 流式 `output_index` 冲突（严重）**：`/v1/responses` 流式中，
+  assistant 消息项固定占 `output_index=0`，而工具调用项也从 0 开始编号，
+  两者同时出现时**索引重复**，客户端会把工具调用挂到消息项上；且流内索引
+  与最终 `response.completed` 信封的 `output` 顺序不一致。改为单一自增
+  计数器为所有 output item 分配唯一索引，`final_output()` 按索引排序。
+- **Responses 流式补齐函数调用增量事件**：新增
+  `response.function_call_arguments.delta` / `.done`，此前只在
+  `output_item.done` 里一次性给出完整参数，codex 等按增量拼装的客户端
+  会拿到空参数。
+- **Anthropic SSE 事件体缺 `type` 字段**：数据体只含 `index`/`delta` 等，
+  而 Anthropic 线格式要求 `data` 内重复事件名（SDK 依赖 `data["type"]`
+  分发）。现所有事件数据体均带 `"type": "<event>"`。
+- **Anthropic 空 assistant 轮次（严重）**：仅含 `thinking` 块或 `content: []`
+  的 assistant 消息被转成 `{"role":"assistant","content":null}` 原样上送，
+  上游整单 400。现直接丢弃此类空轮次；全部轮次皆空时报 400 客户端错误。
+- **`content_block_stop` 事件体规范化**：移除多余 `content_block` 字段，
+  仅保留 `index`（对齐 Anthropic 规范）。
+- **zen-direct 空消息清洗**：`_clean_messages` 现在丢弃既无 `content` 也无
+  `tool_calls` 的轮次（reasoning-only 消息等），全部被丢弃时抛 `ValueError`
+  → 网关返回规范 400，而不是把必然 400 的请求打到上游。
+- **`opencode-serve` 去掉 `assert`**：`assert result is not None` 在 `-O`
+  下被剥离；改为显式 `ServeError`。
+
+### Fixed — 健壮性与运维
+
+- **keystore 非对象 JSON 崩溃（严重）**：`keys.json` 若为 JSON 数组等非对象
+  结构，`data.get("keys")` 抛 `AttributeError` 未被捕获，**网关在导入期直接
+  崩溃无法启动**。现校验顶层结构并跳过畸形记录，`expires_at` 非字符串时按
+  “无过期”处理。LB 侧 `EdgeKeyStore` 同缺陷同修。
+- **balancer 全桶饱和误返 502（严重）**：所有桶 `inflight >= MAX_INFLIGHT`
+  时，跳过逻辑把每个桶都 skip 掉，请求以“全部上游不可用”502 结束。现仅在
+  **存在空闲桶**时才跳过饱和桶，否则照常尝试（让上游排队）。
+- **balancer `/admin/keys` 方法回落**：PUT/PATCH 等未支持方法此前会穿透到
+  代理路径被打到桶上，现返回 405；非法 JSON 请求体此前被当作空体静默签发
+  24h key，现返回 400。
+- **admin 接口错误码**：`POST /admin/keys` 非法 `ttl_hours`、
+  `DELETE /admin/keys/{id}` 未知 id 此前返回 **HTTP 200 + error 体**，
+  客户端必须解析响应体才知道失败。现分别为 400 / 404，并使用统一
+  OpenAI 错误信封。
+- **导入期副作用移除**：`proxy_opencode.app` 不再在导入时构造应用（原先会
+  创建 httpx 客户端、读 `keys.json`、校验环境）。`python -m proxy_opencode`
+  改为构造一次应用对象交给 uvicorn，`load_settings()` 不再执行两次（此前
+  匿名会话 UUID 会被生成两次）。新增
+  `uvicorn --factory proxy_opencode.app:create_app_from_env`。
+- **日志白名单缺字段**：`key_id` / `key_name` / `ttl_hours` / `path` /
+  `admin_keys` / `public_models` 等作为 `extra` 传入却不在白名单，被两个
+  formatter **静默丢弃**（密钥生命周期与存储告警实际不可见）。已补齐。
+- **`PUBLIC_MODELS` 解析丢条目**：展示名含冒号的目录项此前被静默丢弃并回落
+  到内置目录；现按“首段=id、末段=上游、中间=展示名”解析，畸形条目单独跳过。
+
+### Changed — 工程化 / 模块化
+
+- **新增 `routes/_pipeline.py`（共享请求管线）**：`/v1/chat/completions`、
+  `/v1/responses`、`/v1/messages` 三条路由原本各自复制了“解析 → 模型别名 →
+  字段白名单 → 调用适配器 → 异常映射 → 日志”约 60% 的代码，导致缺陷同步
+  复制（serve 分支重复记录同一条完成日志）与错误映射三处维护。现统一收敛，
+  三条路由只保留各自的**请求转换**与**响应整形**。
+- **修复重复日志**：`/v1/responses`、`/v1/messages` 在 serve 模式非流式分支
+  会把同一次完成记录两遍；管线化后仅记录一次。
+- **balancer `create_app` 结构化**：单函数 260 余行拆为
+  `_handle_admin_keys` / `_handle_admin_views` / `_proxy` 三个职责单一的处理
+  器，主 `app()` 退化为可读的分发器；顺带修掉 `any_ok` 的冗余恒等表达式。
+- **清理死代码**：`zen_direct.timestamps` / `openai_http.timestamps` /
+  `registry.build_registry` 删除；`sse_mask.mask_json_model` 改为在 chat 路由
+  实际使用（不再游离）。`upstreams/__init__.py` 的协议文档与返回类型更正
+  （原文档提到的 `PassThroughStream` 并不存在）。
+- **`scripts/e2e_hermes.py` 可移植**：hermes 路径、工作目录、报告路径、模型
+  与条数全部改为环境变量可覆盖（`E2E_*`），默认从 `PATH` 找 hermes；找不到
+  时快速失败并给出提示，不再硬编码 `C:\Users\...`。
+
+### CI / 工程基线
+
+- **lint 与类型门禁此前形同虚设**：CI 的 ruff 步骤以“ruff 已安装”为前提，
+  但 `.[test]` 并不含 ruff，**从未真正执行过**。现新增 `[project.optional-dependencies].dev`
+  （ruff + mypy），CI 无条件执行 `ruff check proxy_opencode tests balancer`
+  与 `mypy proxy_opencode`（release workflow 同样执行）。
+- `pyproject.toml` 版本 0.6.1 → 0.6.2；mypy 全绿（修复 2 处类型错误）。
+
+### Tests
+
+- 新增回归：Responses 输出索引唯一性与顺序一致性、函数调用增量事件、
+  Anthropic 空轮次丢弃 / 全空报错 / `content_block_stop` 形状、
+  admin 400/404 契约、keystore 异形 JSON 与畸形记录、日志新白名单字段、
+  `PUBLIC_MODELS` 含冒号、zen-direct 空消息清洗、LB 全桶饱和仍转发 /
+  饱和跳过 / 405 / 400 / 边缘 keystore 异形 JSON。
+
 ## [0.6.1] - 2026-09-30
 
 ### Changed

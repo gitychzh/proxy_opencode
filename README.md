@@ -195,13 +195,22 @@ LOG_FORMAT=json python -m proxy_opencode   # JSON 行格式（机器解析/长�
 
 ```bash
 pytest tests/ -q                    # 单元 + 路由测试（respx 伪上游，CI 可跑）
-pytest balancer/tests/ -q           # LB 单测（10 项，含 failover / key 改写）
+pytest balancer/tests/ -q           # LB 单测（含 failover / key 改写 / 配额熔断）
+ruff check proxy_opencode tests balancer   # 静态检查（CI 强制）
+mypy proxy_opencode                 # 类型检查（CI 强制）
 python scripts/e2e_hermes.py        # 端到端：本机 hermes 真实请求
 ```
 
-端到端与 drive 细节见 `scripts/e2e_hermes.md`。
-CI：`.github/workflows/ci.yml`（Python 3.12.13 + pytest + ruff；`test` 与
-`balancer` 两个 job）。
+端到端与 drive 细节见 `scripts/e2e_hermes.md`（路径与条数可用 `E2E_*`
+环境变量覆盖，不再硬编码机器路径）。
+CI：`.github/workflows/ci.yml`（Python 3.12.13 + ruff + mypy + pytest；
+`test` 与 `balancer` 两个 job）。
+
+直接交给 ASGI 服务器时用工厂入口（不会在导入期构造应用）：
+
+```bash
+uvicorn --factory proxy_opencode.app:create_app_from_env --host 127.0.0.1 --port 8787
+```
 
 ## 文档索引
 

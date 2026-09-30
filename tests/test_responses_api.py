@@ -238,6 +238,102 @@ async def test_stream_event_sequence_tool_call():
     assert "big-pickle" not in json.dumps(events)
 
 
+@pytest.mark.asyncio
+async def test_stream_emits_function_call_arguments_events():
+    """codex builds tool arguments incrementally from these events."""
+    chunks = _sse_bytes(
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "function": {"name": "f", "arguments": ""},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"index": 0, "function": {"arguments": "{\"a\""}}
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [{"index": 0, "function": {"arguments": ":1}"}}]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ]
+    )
+    events = await _collect_events(chunks)
+    deltas = [
+        d["delta"] for n, d in events if n == "response.function_call_arguments.delta"
+    ]
+    assert "".join(deltas) == "{\"a\":1}"
+    done = [d for n, d in events if n == "response.function_call_arguments.done"]
+    assert done and done[0]["arguments"] == "{\"a\":1}"
+    # every delta must reference an already-announced output item
+    announced = {d["output_index"] for n, d in events if n == "response.output_item.added"}
+    for n, d in events:
+        if n == "response.function_call_arguments.delta":
+            assert d["output_index"] in announced
+
+
+@pytest.mark.asyncio
+async def test_stream_output_indices_unique_when_text_and_tool_calls_mix():
+    """Regression: the message item and the first function call both used to
+    claim output_index 0, so clients mis-associated the streamed items."""
+    chunks = _sse_bytes(
+        [
+            {"choices": [{"delta": {"content": "hi"}, "finish_reason": None}]},
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "function": {"name": "f", "arguments": "{}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ]
+    )
+    events = await _collect_events(chunks)
+    added = [
+        (d["output_index"], d["item"]["type"])
+        for n, d in events
+        if n == "response.output_item.added"
+    ]
+    indices = [i for i, _ in added]
+    assert len(indices) == len(set(indices)), f"duplicate output_index in {added}"
+    assert {t for _, t in added} == {"message", "function_call"}
+    # the streamed indices must agree with the final envelope's item order
+    final = events[-1][1]["response"]
+    assert [t for _, t in sorted(added)] == [o["type"] for o in final["output"]]
+
+
 # ------------------------------------------------------------ HTTP layer
 
 
@@ -323,6 +419,40 @@ async def test_responses_endpoint_non_stream(tmp_path):
     assert body["object"] == "response"
     assert body["model"] == "ds41f_cus"
     assert body["output"][-1]["content"][0]["text"] == "pong"
+
+
+@pytest.mark.asyncio
+async def test_serve_completion_is_logged_exactly_once(tmp_path, caplog):
+    """Regression: the serve-mode branch logged the same completion twice
+    (once with usage, once without) because the code fell through."""
+    import logging
+
+    from proxy_opencode.app import create_app
+    from proxy_opencode.config import Settings
+    from tests.test_gateway_routes import FakeAdapter
+
+    app = create_app(
+        Settings(
+            upstream_mode="opencode-serve",
+            gateway_api_keys=["gw-key"],
+            key_store_path=str(tmp_path / "keys.json"),
+            opencode_server_password="pw",
+        )
+    )
+    app.state.adapter = FakeAdapter()
+    with caplog.at_level(logging.INFO, logger="proxy_opencode.responses"):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/v1/responses",
+                json={"model": "ds41f_cus", "input": "hello"},
+                headers={"Authorization": "Bearer gw-key"},
+            )
+    assert resp.status_code == 200
+    completions = [r for r in caplog.records if r.getMessage() == "responses completion"]
+    assert len(completions) == 1
+    assert completions[0].usage == {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4}
 
 
 # ------------------------------------------------- unpaired tool / empty input

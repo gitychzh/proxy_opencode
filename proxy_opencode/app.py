@@ -81,4 +81,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+def create_app_from_env() -> FastAPI:
+    """Factory for `uvicorn --factory proxy_opencode.app:create_app_from_env`.
+
+    Deliberately no module-level `app` instance: building one at import time
+    would create an httpx client, read the key store and validate the
+    environment as a side effect of merely importing this module.
+    """
+    return create_app(load_settings())

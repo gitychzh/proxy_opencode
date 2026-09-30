@@ -26,16 +26,19 @@ from ..formats.responses_proto import (
     to_chat_payload,
 )
 from ..registry import ModelRegistry
-from ..upstreams.fields import filter_payload
 from ..upstreams.openai_http import StreamRelay
-from ..upstreams.opencode_serve import (
-    ServeCompletion,
-    ServeError,
-    WaitTimeoutError,
-    completion_to_chat_response,
+from ..upstreams.opencode_serve import ServeCompletion, completion_to_chat_response
+from ._pipeline import (
+    dispatch,
+    is_error_relay,
+    new_call,
+    openai_error_factory,
+    parse_json_object,
 )
 
 logger = logging.getLogger("proxy_opencode.responses")
+
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
 def make_router(
@@ -46,15 +49,9 @@ def make_router(
 
     @router.post("/v1/responses")
     async def handler(request: Request, _: str = Depends(auth)) -> Any:
-        started = time.perf_counter()
-        request_id = uuid.uuid4().hex[:12]
-        client = request.client.host if request.client else "-"
-        try:
-            body = await request.json()
-        except Exception:
-            return openai_error(400, "Request body must be valid JSON.")
-        if not isinstance(body, dict):
-            return openai_error(400, "Request body must be a JSON object.")
+        body = await parse_json_object(request)
+        if body is None:
+            return openai_error(400, "Request body must be a valid JSON object.")
 
         try:
             payload = to_chat_payload(body)
@@ -62,84 +59,52 @@ def make_router(
             return openai_error(
                 400, "Malformed Responses request.", err_type="invalid_request_error"
             )
-        requested_model = str(payload.get("model") or "")
-        payload["model"] = registry.resolve(requested_model)
-        public_model = registry.public_id(requested_model)
-        payload = filter_payload(payload, settings.reasoning_passthrough)
-        # filter_payload drops unknown keys; stream flag is preserved.
-        stream = bool(payload.get("stream"))
 
-        def log(status: int, usage: Any = None) -> None:
-            logger.info(
-                "responses completion",
-                extra={
-                    "request_id": request_id,
-                    "model": str(payload["model"]),
-                    "client": client,
-                    "stream": stream,
-                    "has_tools": bool(payload.get("tools")),
-                    "status": status,
-                    "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-                    "usage": usage,
-                },
-            )
-
+        call = new_call(
+            request, payload, settings, registry, log_message="responses completion"
+        )
         adapter = request.app.state.adapter
-        try:
-            result = await adapter.chat(payload)
-        except WaitTimeoutError as exc:
-            log(504)
-            return openai_error(504, str(exc), err_type="timeout_error", code="upstream_timeout")
-        except ServeError as exc:
-            log(502)
-            return openai_error(502, str(exc))
-        except ConnectionError as exc:
-            log(502)
-            return openai_error(
-                502, str(exc), err_type="api_connection_error", code="upstream_unreachable"
-            )
-        except ValueError as exc:
-            log(400)
-            return openai_error(400, str(exc), err_type="invalid_request_error")
-        except Exception:
-            log(500)
-            logger.exception(
-                "unhandled responses error", extra={"request_id": request_id}
-            )
-            return openai_error(500, "Internal gateway error.")
+        result = await dispatch(
+            adapter,
+            call,
+            openai_error_factory,
+            logger=logger,
+            unhandled_message="unhandled responses error",
+        )
+        if isinstance(result, JSONResponse):
+            return result
 
         if isinstance(result, StreamRelay):
-            chunks = result.chunks()
-            log(200)
+            call.log(logger, 200)
             return StreamingResponse(
-                stream_responses_events(chunks, public_model),
+                stream_responses_events(result.chunks(), call.public_model),
                 status_code=200,
                 media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                headers=_SSE_HEADERS,
             )
-        if isinstance(result, dict) and "__status__" in result:
-            log(int(result["__status__"]))
-            return JSONResponse(
-                status_code=int(result["__status__"]), content=result["content"]
-            )
+        if is_error_relay(result):
+            status = int(result["__status__"])
+            call.log(logger, status)
+            return JSONResponse(status_code=status, content=result["content"])
         if isinstance(result, ServeCompletion):
-            result = completion_to_chat_response(str(payload["model"]), result)
-            log(200, result.get("usage"))
+            result = completion_to_chat_response(call.upstream_model, result)
         if isinstance(result, dict):
-            if stream:
+            # Exactly one completion record per request, carrying usage.
+            if call.stream:
+                call.log(logger, 200, result.get("usage"))
                 return StreamingResponse(
                     stream_responses_events(
-                        _serve_completion_sse_from_chat(result), public_model
+                        _serve_completion_sse_from_chat(result), call.public_model
                     ),
                     status_code=200,
                     media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                    headers=_SSE_HEADERS,
                 )
-            body_out = chat_to_responses_body(result, public_model)
-            log(200)
+            body_out = chat_to_responses_body(result, call.public_model)
+            call.log(logger, 200, result.get("usage"))
             return JSONResponse(status_code=200, content=body_out)
 
-        log(502)
+        call.log(logger, 502)
         return openai_error(502, "Unexpected upstream result type.")
 
     return router

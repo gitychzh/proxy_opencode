@@ -17,16 +17,16 @@ jobs:
           python-version: "3.12.13"
           cache: pip
 
-      - name: Install package with test deps
-        run: pip install -e '.[test]'
+      - name: Install package with test + dev deps
+        run: pip install -e '.[test,dev]'
 
-      - name: Ruff (only if configured and installed)
-        run: |
-          if [ -f pyproject.toml ] && grep -q '^\[tool\.ruff\]' pyproject.toml && command -v ruff >/dev/null; then
-            ruff check proxy_opencode tests
-          else
-            echo "ruff not installed or not configured, skipping"
-          fi
+      # Lint and type gates are unconditional: the previous "only if ruff is
+      # installed" guard meant they silently never ran in CI.
+      - name: Ruff
+        run: ruff check proxy_opencode tests balancer
+
+      - name: Mypy
+        run: mypy proxy_opencode
 
       - name: Run tests
         run: pytest tests/ -q

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proxy_opencode"
-version = "0.6.1"
+version = "0.6.2"
 description = "Compliant OpenAI-compatible reverse proxy gateway"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -19,6 +19,12 @@ test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "respx>=0.21",
+]
+# Tooling the CI enforces. Kept separate from `test` so a node install stays
+# lean, but CI installs both (see .github/workflows/ci.yml).
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.10",
 ]
 
 [tool.setuptools.packages.find]

@@ -13,7 +13,10 @@ import os
 import time
 
 # Whitelisted structured fields. Everything else in record.__dict__ is
-# ignored by both formatters.
+# ignored by both formatters. Adding a field here is the ONLY way an `extra`
+# reaches the logs, so keep it in sync with the call sites: a name that is
+# logged but missing here is silently dropped (and has bitten us before —
+# key_id/ttl_hours/path used to vanish).
 FIELDS = (
     "request_id",
     "model",
@@ -28,12 +31,19 @@ FIELDS = (
     "mode",
     "bind",
     "keys",
+    "admin_keys",
+    "public_models",
     "adapter",
     "version",
     "chunks",
     "ttfb_ms",
     "duration_ms",
     "error_detail",
+    "key_id",
+    "key_name",
+    "ttl_hours",
+    "path",
+    "shape",
 )
 
 _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"

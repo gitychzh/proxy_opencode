@@ -96,15 +96,18 @@ def _blocks_to_messages(role: str, blocks: list[Any]) -> list[dict[str, Any]]:
             )
     out: list[dict[str, Any]] = []
     if role == "assistant":
-        message: dict[str, Any] = {
-            "role": "assistant",
-            "content": "\n".join(text_parts) or None,
-        }
-        if tool_calls:
-            message["tool_calls"] = tool_calls
-            if not text_parts:
-                message["content"] = None
-        out.append(message)
+        # An assistant turn that carries neither text nor tool_use (e.g. a
+        # message made of only `thinking` blocks, or an empty content list)
+        # would become {"role":"assistant","content":null}, which the chat
+        # upstream rejects outright. Drop it instead of poisoning the request.
+        if text_parts or tool_calls:
+            message: dict[str, Any] = {
+                "role": "assistant",
+                "content": "\n".join(text_parts) or None,
+            }
+            if tool_calls:
+                message["tool_calls"] = tool_calls
+            out.append(message)
     elif text_parts:
         out.append({"role": role, "content": "\n".join(text_parts)})
     out.extend(tool_messages)
@@ -141,6 +144,11 @@ def to_chat_payload(body: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
+    if not messages:
+        # Every turn was empty/unconvertible; the chat upstream rejects an
+        # empty messages array outright, so surface it as a client error.
+        raise ValueError("messages must contain at least one usable turn")
+
     payload: dict[str, Any] = {
         "model": str(body.get("model") or ""),
         "messages": messages,
@@ -162,12 +170,18 @@ def to_chat_payload(body: dict[str, Any]) -> dict[str, Any]:
 # -------------------------------------------------------------- response
 
 
-def _chat_usage(usage: dict[str, Any] | None) -> tuple[int, int]:
+def _chat_usage(usage: dict[str, Any] | None) -> dict[str, int]:
+    """Map a chat-completions usage block onto Anthropic token counters."""
     if not isinstance(usage, dict):
-        return 0, 0
+        return {"input_tokens": 0, "output_tokens": 0}
     prompt = int(usage.get("prompt_tokens") or 0)
     completion = int(usage.get("completion_tokens") or 0)
-    return prompt, completion
+    out = {"input_tokens": prompt, "output_tokens": completion}
+    details = usage.get("prompt_tokens_details") or {}
+    cached = int(details.get("cached_tokens") or 0)
+    if cached:
+        out["cache_read_input_tokens"] = cached
+    return out
 
 
 def chat_to_anthropic_body(
@@ -198,7 +212,7 @@ def chat_to_anthropic_body(
         )
     if not content:
         content = [{"type": "text", "text": ""}]
-    prompt, completion = _chat_usage(chat_resp.get("usage"))
+    usage = _chat_usage(chat_resp.get("usage"))
     stop_reason = "max_tokens" if finish in MAX_TOKENS_STOP else STOP_REASON_MAP.get(
         finish, "end_turn"
     )
@@ -210,10 +224,7 @@ def chat_to_anthropic_body(
         "content": content,
         "stop_reason": stop_reason,
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": prompt,
-            "output_tokens": completion,
-        },
+        "usage": usage,
     }
 
 
@@ -230,7 +241,6 @@ class _AnthropicStreamState:
         self.think_buf = ""
         # chat tool-call index -> block bookkeeping
         self.tool_blocks: dict[int, dict[str, Any]] = {}
-        self.current_tool: dict[str, Any] | None = None
         self.usage: dict[str, Any] | None = None
         self.finish_reason: str | None = None
 
@@ -240,7 +250,11 @@ class _AnthropicStreamState:
 
 
 def _event(name: str, data: dict[str, Any]) -> bytes:
-    return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
+    # The Anthropic wire format repeats the event name inside the JSON payload
+    # (`{"type": "<name>", ...}`); SDKs read `data["type"]` to dispatch, so it
+    # must be present even though the SSE `event:` line already carries it.
+    payload = {"type": name, **data}
+    return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
 
 
 async def stream_anthropic_events(
@@ -253,29 +267,9 @@ async def stream_anthropic_events(
         async def gen() -> AsyncIterator[bytes]:
             if st.open_type is None:
                 return
-            if st.open_type == "text":
-                yield _event(
-                    "content_block_stop",
-                    {"index": st.block_index, "content_block": {"type": "text"}},
-                )
-            elif st.open_type == "thinking":
-                yield _event(
-                    "content_block_stop",
-                    {"index": st.block_index, "content_block": {"type": "thinking"}},
-                )
-            elif st.open_type == "tool":
-                slot = st.current_tool
-                yield _event(
-                    "content_block_stop",
-                    {
-                        "index": st.block_index,
-                        "content_block": {
-                            "type": "tool_use",
-                            "id": slot["id"],
-                            "name": slot["name"],
-                        },
-                    },
-                )
+            # The Anthropic spec carries only `type` + `index` on
+            # content_block_stop; the block payload is not repeated.
+            yield _event("content_block_stop", {"index": st.block_index})
             st.open_type = None
 
         return gen()
@@ -368,7 +362,6 @@ async def stream_anthropic_events(
                         yield ev
                     slot["block_index"] = st.next_block()
                     st.open_type = "tool"
-                    st.current_tool = slot
                     st.tool_blocks[idx] = slot
                     yield _event(
                         "content_block_start",
@@ -400,7 +393,7 @@ async def stream_anthropic_events(
     async for ev in close_open_block():
         yield ev
 
-    prompt, completion = _chat_usage(st.usage)
+    usage = _chat_usage(st.usage)
     finish = st.finish_reason or "stop"
     stop_reason = (
         "max_tokens" if finish in MAX_TOKENS_STOP else STOP_REASON_MAP.get(finish, "end_turn")
@@ -411,7 +404,7 @@ async def stream_anthropic_events(
         "message_delta",
         {
             "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": completion},
+            "usage": {"output_tokens": usage["output_tokens"]},
         },
     )
     yield _event("message_stop", {})

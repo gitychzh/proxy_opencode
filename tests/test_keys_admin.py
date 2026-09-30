@@ -217,3 +217,64 @@ async def test_admin_create_permanent_key(tmp_path):
         )
         assert r.status_code == 200
         assert r.json()["expires_at"] is None
+
+
+# --------------------------------------------------- error contract (0.6.2)
+
+
+@pytest.mark.asyncio
+async def test_admin_bad_ttl_returns_400_not_200(tmp_path):
+    """Regression: a bad ttl_hours used to come back as HTTP 200 + error body."""
+    app = make_app(tmp_path)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        for bad in ({"ttl_hours": "soon"}, {"ttl_hours": -1}):
+            r = await client.post("/admin/keys", json=bad, headers=ADMIN_HEADERS)
+            assert r.status_code == 400, bad
+            assert r.json()["error"]["type"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_admin_revoke_unknown_key_returns_404(tmp_path):
+    app = make_app(tmp_path)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        r = await client.delete("/admin/keys/k-does-not-exist", headers=ADMIN_HEADERS)
+    assert r.status_code == 404
+
+
+# ----------------------------------------------------- store robustness
+
+
+def test_key_store_survives_foreign_json(tmp_path):
+    """A JSON array (or any non-object) must not crash gateway startup."""
+    path = tmp_path / "keys.json"
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+    store = KeyStore(path)
+    assert store.list() == []
+
+
+def test_key_store_skips_malformed_records(tmp_path):
+    path = tmp_path / "keys.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "keys": [
+                    "not-a-dict",
+                    {"id": "k-1", "key": "gw-abc", "name": "n", "created_at": "",
+                     "expires_at": 12345, "revoked": False, "meta": "oops"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = KeyStore(path)
+    records = store.list()
+    assert len(records) == 1
+    # a non-string expiry must be treated as "no expiry", not crash validate()
+    assert records[0].expiry() is None
+    assert store.validate("gw-abc") is not None
+

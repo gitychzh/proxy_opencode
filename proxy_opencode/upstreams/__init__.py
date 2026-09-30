@@ -12,6 +12,15 @@ from typing import Any, Protocol
 
 from ..config import Settings
 from . import openai_http, opencode_serve, zen_direct
+from .openai_http import StreamRelay
+from .opencode_serve import ServeCompletion
+
+# What ``chat()`` may return:
+#   * StreamRelay      -> a live upstream SSE stream (relayed / re-encoded)
+#   * ServeCompletion  -> a finished serve-mode turn (normalised by the route)
+#   * dict             -> a ready chat-completion JSON body, or an error relay
+#                         shaped as ``{"__status__": int, "content": {...}}``
+ChatResult = StreamRelay | ServeCompletion | dict[str, Any]
 
 
 class UpstreamAdapter(Protocol):
@@ -19,19 +28,17 @@ class UpstreamAdapter(Protocol):
 
     name: str
 
-    async def list_models(self) -> dict[str, Any]:
-        """OpenAI `GET /v1/models` response body."""
+    async def list_models(self) -> Any:
+        """OpenAI `GET /v1/models` response body (dict or httpx.Response)."""
         ...
 
-    async def chat(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def chat(self, payload: dict[str, Any]) -> ChatResult:
         """Handle one chat completion request.
 
-        `payload` is the already-whitelisted OpenAI chat-completion body.
-        Returns an OpenAI response body (non-stream or synthetic-stream;
-        adapters set `metadata.adapter`).
-
-        For real SSE passthrough (openai mode) the adapter instead raises
-        `PassThroughStream` handled by the route layer.
+        `payload` is the already-whitelisted OpenAI chat-completion body. The
+        adapter may return a JSON body, a `StreamRelay` for SSE passthrough,
+        a `ServeCompletion`, or an error relay; the route layer dispatches on
+        the concrete type.
         """
         ...
 
@@ -42,3 +49,12 @@ def build_adapter(settings: Settings) -> UpstreamAdapter:
     if settings.is_zen_direct:
         return zen_direct.ZenDirectAdapter(settings)
     return openai_http.OpenAIHttpAdapter(settings)
+
+
+__all__ = [
+    "ChatResult",
+    "ServeCompletion",
+    "StreamRelay",
+    "UpstreamAdapter",
+    "build_adapter",
+]

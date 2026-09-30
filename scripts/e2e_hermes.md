@@ -16,12 +16,23 @@ set GATEWAY_API_KEYS=dev-local-key
 python -m proxy_opencode                       # 127.0.0.1:8787
 
 # 终端2：单发冒烟
-hermes chat --provider proxyo -m opencode/big-pickle --oneshot --cli -q "Reply with exactly: pong"
+hermes chat --provider proxyo -m ds41f_cus --oneshot --cli -q "Reply with exactly: pong"
 
 # 批量（问答 + 推理强度 + 工具调用，--yolo 自动放行工具）
 python scripts/e2e_hermes.py
-# 报告写到 cap/e2e_report.json（路径见脚本顶部常量）
+# 报告默认写到 ./e2e_report.json（可用 E2E_REPORT 覆盖）
 ```
+
+可覆盖的环境变量（跨桶/跨机器可移植，无需改脚本）：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `E2E_HERMES_BIN` | `PATH` 中的 `hermes` | hermes 可执行文件路径 |
+| `E2E_PROVIDER` | `proxyo` | hermes provider 名 |
+| `E2E_MODEL` | `ds41f_cus` | 发给 hermes 的模型 id（网关对外模型） |
+| `E2E_WORKDIR` | 当前目录 | 工具类用例的工作目录 |
+| `E2E_REPORT` | `./e2e_report.json` | 报告输出路径 |
+| `E2E_N` | `36` | 执行条数 |
 
 ## 验收口径
 

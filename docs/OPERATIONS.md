@@ -131,6 +131,14 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
 
 ## 8. 版本历史
 
+- **0.6.2**（2026-09-30）：系统性缺陷排查与工程化重构。修复 Responses 流式
+  `output_index` 冲突与缺函数参数增量事件、Anthropic 空 assistant 轮次导致
+  上游 400、SSE 事件体缺 `type`、keystore 异形 JSON 致**启动崩溃**、LB 全桶
+  饱和误返 502、admin 错误码 200→400/404、日志白名单丢字段、`PUBLIC_MODELS`
+  解析丢条目；新增 `routes/_pipeline.py` 收敛三条协议路由重复代码；去除
+  `app` 导入期副作用；CI 补齐 ruff + mypy 门禁（此前从未真正执行）。
+- **0.6.1**（2026-09-30）：移除每 key 限流；Zen 门禁指纹重校准（bridge/minimal，
+  prefill ~7.8k → ~1k tokens）
 - **0.6.0**（2026-09-30）：对外唯一模型 ds41f_cus（掩码）；key 有效期 + /admin/keys；
   Responses API（codex）与 Anthropic API（claude code）；auth/ formats/ 模块化细分
 - **0.5.1**（2026-09-29）：适配 Zen 新门禁（x-session-id 稳定头）

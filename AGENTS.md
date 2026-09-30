@@ -26,23 +26,30 @@
    发布版同步。
 2. **回环限定**：`OPENCODE_SERVE_URL` 只允许 loopback（config.py 强制校验）；
    `OPENCODE_ZEN_BASE_URL` 只允许 opencode.ai / loopback（zen_direct 校验）。
-3. **工程化**：改代码必须同步改测试与文档；`pytest tests/` 全绿才可提交；
-   语义化版本 + CHANGELOG；commit 信息用 conventional commits。
+3. **工程化**：改代码必须同步改测试与文档；`pytest tests/` +
+   `pytest balancer/tests/` + `ruff check proxy_opencode tests balancer` +
+   `mypy proxy_opencode` 全绿才可提交（CI 无条件执行这四项，别再写
+   "未安装则跳过" 之类会让门禁静默失效的守卫）；语义化版本 + CHANGELOG；
+   commit 信息用 conventional commits。
 4. **日志红线**：绝不记录消息内容、prompt 或任何 key。
 
 ## 架构
 
 ```
 hermes / codex CLI / claude code / 任意 OpenAI SDK
-  -> proxy_opencode.app          # FastAPI 装配（只接线）
+  -> proxy_opencode.app          # FastAPI 装配（只接线；工厂式，无导入期副作用）
     -> routes/                   # 薄 HTTP 层（chat / models / responses_api /
                                  #   anthropic_api / admin）
+       - _pipeline.py            # 三条协议路由的共享管线：解析 → 模型别名 →
+                                 #   白名单 → 调适配器 → 异常映射 → 日志。
+                                 #   新增协议只写“请求转换 + 响应整形”，别再
+                                 #   复制中段（复制过就会走样，见 CHANGELOG 0.6.2）
     -> formats/                  # 协议转换（responses_proto / anthropic_proto /
                                  #   sse_iter）——进转 OpenAI chat，出转回各协议
-    -> auth/                     # core.py（Bearer/x-api-key 鉴权 + 限流 + 管理员）
+    -> auth/                     # core.py（Bearer/x-api-key 鉴权 + 管理员）
                                  #   keystore.py（动态 key 存储，默认 24h 有效期）
     -> registry.py               # 对外模型目录（掩码：ds41f_cus -> 上游模型）
-    -> sse_mask.py               # 流式 SSE 的 model 字段改写
+    -> sse_mask.py               # 流式/非流式响应的 model 字段改写
     -> upstreams/                # 适配器协议 + 实现
        - zen_direct.py           # 直连 Zen（协议重构 + 标记注入 + SSE 透传）
        - zen_prompt_default.txt  # opencode 1.18.32 系统提示词资产（标记）
@@ -118,12 +125,14 @@ SSE 透传，死桶自动跳过。配置模板见 `balancer/run.cmd.example`，�
 
 ```bash
 uv venv --python 3.12.13 .venv
-uv pip install -e '.[test]' --python .venv/Scripts/python.exe
+uv pip install -e '.[test,dev]' --python .venv/Scripts/python.exe
 pytest tests/ -q
 pytest balancer/tests/ -q          # LB 单测（需 httpx/uvicorn/pytest-asyncio）
+ruff check proxy_opencode tests balancer
+mypy proxy_opencode
 ```
 
-提交前两条 pytest 都要绿、ruff 也要干净。
+提交前两条 pytest 都要绿，ruff 与 mypy 也要干净（CI 会跑同样的四条）。
 
 端到端（需要本机已装 hermes）：见 `scripts/e2e_hermes.md`。
 

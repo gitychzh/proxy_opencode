@@ -1,23 +1,37 @@
 """End-to-end validation: drive the gateway from real hermes runs.
 
-Runs N one-shot hermes queries against the `proxyo` provider (which points at
-http://127.0.0.1:8787/v1, i.e. proxy_opencode -> opencode serve -> Zen
-big-pickle). Mixes plain Q&A, reasoning prompts and tool-using prompts.
-Writes a JSON report to cap/e2e_report.json.
+Runs N one-shot hermes queries against the configured hermes provider (which
+must point at the gateway, e.g. http://127.0.0.1:8787/v1) and writes a JSON
+report. Mixes plain Q&A, reasoning prompts and tool-using prompts.
+
+Everything machine-specific is overridable by environment variable so the
+script is portable across the buckets:
+
+    E2E_HERMES_BIN   hermes executable            (default: PATH lookup)
+    E2E_PROVIDER     hermes provider name          (default: proxyo)
+    E2E_MODEL        model id sent to hermes       (default: ds41f_cus)
+    E2E_WORKDIR      tool-using sandbox directory  (default: cwd)
+    E2E_REPORT       report output path            (default: ./e2e_report.json)
+    E2E_N            number of jobs to run         (default: 36)
 """
 
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import sys
 import time
 
-HERMES = r"C:\Users\ychzh\AppData\Local\hermes\bin\hermes.exe"
-WORKDIR = r"C:\Users\ychzh\Documents\ChatGPT\cap\proj"
-REPORT = r"C:\Users\ychzh\Documents\ChatGPT\cap\e2e_report.json"
+HERMES = os.environ.get("E2E_HERMES_BIN") or shutil.which("hermes") or "hermes"
+WORKDIR = os.environ.get("E2E_WORKDIR", os.getcwd())
+REPORT = os.environ.get("E2E_REPORT", os.path.join(os.getcwd(), "e2e_report.json"))
+PROVIDER = os.environ.get("E2E_PROVIDER", "proxyo")
+MODEL = os.environ.get("E2E_MODEL", "ds41f_cus")
+N_TARGET = int(os.environ.get("E2E_N", "36"))
 
-COMMON = [HERMES, "chat", "--provider", "proxyo", "-m", "opencode/big-pickle",
+COMMON = [HERMES, "chat", "--provider", PROVIDER, "-m", MODEL,
           "--oneshot", "--cli", "--in", WORKDIR]
 TOOL_FLAGS = ["-t", "terminal", "-t", "files", "--yolo"]
 
@@ -68,7 +82,15 @@ PROMPTS = [
 ]
 
 def main() -> int:
-    n_target = 36
+    if not (os.path.exists(HERMES) or shutil.which(HERMES)):
+        print(
+            f"hermes executable not found: {HERMES!r}\n"
+            "Install hermes or set E2E_HERMES_BIN to its full path.",
+            file=sys.stderr,
+        )
+        return 2
+    os.makedirs(os.path.dirname(os.path.abspath(REPORT)), exist_ok=True)
+    n_target = N_TARGET
     jobs = []
     i = 0
     while len(jobs) < n_target:

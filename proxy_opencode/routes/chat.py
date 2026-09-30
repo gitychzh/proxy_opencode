@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import time
-import uuid
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, Request
@@ -17,28 +16,23 @@ from ..auth.keystore import KeyStore
 from ..config import Settings
 from ..errors import openai_error
 from ..registry import ModelRegistry
-from ..sse_mask import mask_model_field
-from ..upstreams.fields import filter_payload
+from ..sse_mask import mask_json_model, mask_model_field
 from ..upstreams.openai_http import StreamRelay
 from ..upstreams.opencode_serve import (
     ServeCompletion,
-    ServeError,
-    WaitTimeoutError,
 )
 from ..upstreams.opencode_serve import (
     completion_to_chat_response as _serve_response,
 )
+from ._pipeline import (
+    dispatch,
+    is_error_relay,
+    new_call,
+    openai_error_factory,
+    parse_json_object,
+)
 
 logger = logging.getLogger("proxy_opencode.chat")
-
-
-def _log(
-    request: Request, request_id: str, model: str, client: str, **fields: Any
-) -> None:
-    logger.info(
-        "chat completion",
-        extra={"request_id": request_id, "model": model, "client": client, **fields},
-    )
 
 
 def make_router(
@@ -49,106 +43,64 @@ def make_router(
 
     @app_router.post("/v1/chat/completions")
     async def handler(request: Request, _: str = Depends(auth)) -> Any:
-        started = time.perf_counter()
-        request_id = uuid.uuid4().hex[:12]
-        client = request.client.host if request.client else "-"
-        try:
-            body = await request.json()
-        except Exception:
-            return openai_error(400, "Request body must be valid JSON.")
-        if not isinstance(body, dict):
-            return openai_error(400, "Request body must be a JSON object.")
-
-        payload = filter_payload(body, settings.reasoning_passthrough)
-        requested_model = str(payload.get("model") or "")
-        # Alias layer: any requested model resolves to the upstream model;
-        # the public id is what users see in every response below.
-        payload["model"] = registry.resolve(requested_model)
-        public_model = registry.public_id(requested_model)
-        model = str(payload["model"])
-        stream = bool(payload.get("stream"))
-
-        def log(status: int, usage: Any = None) -> None:
-            _log(
-                request,
-                request_id,
-                model,
-                client,
-                stream=stream,
-                has_tools=bool(payload.get("tools")),
-                status=status,
-                latency_ms=round((time.perf_counter() - started) * 1000, 1),
-                usage=usage,
+        body = await parse_json_object(request)
+        if body is None:
+            return openai_error(
+                400,
+                "Request body must be a valid JSON object.",
+                err_type="invalid_request_error",
             )
 
+        call = new_call(
+            request, body, settings, registry, log_message="chat completion"
+        )
         adapter = request.app.state.adapter
-        try:
-            result = await adapter.chat(payload)
-        except WaitTimeoutError as exc:
-            log(504)
-            return openai_error(
-                504, str(exc), err_type="timeout_error", code="upstream_timeout"
-            )
-        except ServeError as exc:
-            log(502)
-            return openai_error(502, str(exc))
-        except ConnectionError as exc:
-            log(502)
-            return openai_error(
-                502, str(exc), err_type="api_connection_error", code="upstream_unreachable"
-            )
-        except ValueError as exc:
-            log(400)
-            return openai_error(400, str(exc), err_type="invalid_request_error")
-        except Exception:
-            # Catch-all: keep the response contract and leave a full traceback
-            # in the log (message content is never logged).
-            log(500)
-            logger.exception(
-                "unhandled chat error",
-                extra={
-                    "request_id": request_id,
-                    "model": model,
-                    "client": request.client.host if request.client else "-",
-                },
-            )
-            return openai_error(500, "Internal gateway error.")
+        result = await dispatch(
+            adapter,
+            call,
+            openai_error_factory,
+            logger=logger,
+            unhandled_message="unhandled chat error",
+        )
+        if isinstance(result, JSONResponse):
+            return result
+
+        model = call.public_model or call.upstream_model
 
         if isinstance(result, StreamRelay):
             chunks_iter = result.chunks()
             if registry.enabled:
-                chunks_iter = mask_model_field(chunks_iter, public_model)
+                chunks_iter = mask_model_field(chunks_iter, call.public_model)
             return StreamingResponse(
                 _relay(
                     chunks_iter,
                     result.usage_holder,
-                    log,
-                    request_id=request_id,
-                    model=model,
-                    client=client,
+                    lambda status, usage=None: call.log(logger, status, usage),
+                    request_id=call.request_id,
+                    model=call.upstream_model,
+                    client=call.client,
                 ),
                 status_code=200,
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
-        if isinstance(result, dict) and "__status__" in result:  # error relay
-            log(int(result["__status__"]))
-            return JSONResponse(
-                status_code=int(result["__status__"]), content=result["content"]
-            )
+        if is_error_relay(result):  # relayed upstream error, original status
+            status = int(result["__status__"])
+            call.log(logger, status)
+            return JSONResponse(status_code=status, content=result["content"])
         if isinstance(result, dict):  # openai passthrough non-stream JSON
             if registry.enabled:
-                result["model"] = public_model
-            log(200, result.get("usage") if isinstance(result, dict) else None)
+                mask_json_model(result, call.public_model)
+            call.log(logger, 200, result.get("usage"))
             return JSONResponse(status_code=200, content=result)
         if isinstance(result, ServeCompletion):
-            response = _serve_response(public_model or model, result)
-            log(200, response.get("usage"))
-            if stream:
-                return _synthetic_stream(public_model or model, response)
+            response = _serve_response(model, result)
+            call.log(logger, 200, response.get("usage"))
+            if call.stream:
+                return _synthetic_stream(model, response)
             return JSONResponse(status_code=200, content=response)
 
-        log(502)
+        call.log(logger, 502)
         return openai_error(502, "Unexpected upstream result type.")
 
     return app_router
@@ -247,5 +199,3 @@ async def _relay(
                 "reason": reason,
             },
         )
-
-

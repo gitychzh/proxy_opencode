@@ -39,19 +39,26 @@ BREAKING 变更在正文写 `BREAKING CHANGE:` 说明，并升级 major 版本�
 
 - 风控绕过、免费额度滥用、客户端指纹伪造相关代码或文档
 - 任何凭证/密钥/Cookie/Session 入库（含测试 fixture 中的真实凭证）
+  ——**唯一例外**：`docs/ACCESS.md` 的明文节点凭证，经仓库所有者
+  2026-09-30 确认的私有仓库例外（见该文件首部声明）；其余任何位置仍禁止
 - 日志记录消息体、API key 或敏感请求头
 - 硬编码上游地址、模型名、key 到代码（配置只能来自环境变量）
 
 ## 如何跑测试
 
 ```bash
-pip install -e ".[test]"
+pip install -e ".[test,dev]"
 pytest tests/ -q
+pytest balancer/tests/ -q
+ruff check proxy_opencode tests balancer
+mypy proxy_opencode
 ```
 
-要求 Python 3.12.13（见 `docs/engineering-constraints.md`）。
-若本机装有 ruff/mypy，可执行 `ruff check proxy_opencode tests` 与 `mypy proxy_opencode`（配置已内置，未安装时跳过即可）。
+要求 Python 3.12（CI 用 3.12.13 验证，见 `docs/engineering-constraints.md`）。
+这四条与 CI 完全一致，且**都是强制的**：不要给门禁加“未安装就跳过”的守卫，
+那会让它静默失效。
 
 ## 版本与发版
 
-语义化版本（SemVer）。发版通过 `release/*` 分支进行：更新版本号与 CHANGELOG 后合入并打 tag（如 `v0.1.0`）。
+语义化版本（SemVer）。发版通过 `release/*` 分支进行：更新
+`pyproject.toml` 的 `version` 与 `CHANGELOG.md` 后合入并打 tag（如 `v0.1.0`）。

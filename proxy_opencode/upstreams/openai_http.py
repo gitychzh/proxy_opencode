@@ -7,8 +7,6 @@ UPSTREAM_API_KEY. Streaming responses are relayed byte-for-byte.
 from __future__ import annotations
 
 import json
-import time
-import uuid
 from typing import Any, AsyncIterator
 
 import httpx
@@ -113,7 +111,3 @@ def _raw_relay_body(status: int, body: bytes) -> dict[str, Any]:
             }
         },
     }
-
-
-def timestamps() -> tuple[int, str]:
-    return int(time.time()), f"chatcmpl-{uuid.uuid4().hex[:16]}"

@@ -25,16 +25,18 @@ from ..formats.anthropic_proto import (
     to_chat_payload,
 )
 from ..registry import ModelRegistry
-from ..upstreams.fields import filter_payload
 from ..upstreams.openai_http import StreamRelay
-from ..upstreams.opencode_serve import (
-    ServeCompletion,
-    ServeError,
-    WaitTimeoutError,
-    completion_to_chat_response,
+from ..upstreams.opencode_serve import ServeCompletion, completion_to_chat_response
+from ._pipeline import (
+    dispatch,
+    is_error_relay,
+    new_call,
+    parse_json_object,
 )
 
 logger = logging.getLogger("proxy_opencode.anthropic")
+
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
 def anthropic_error(status: int, err_type: str, message: str) -> JSONResponse:
@@ -42,6 +44,13 @@ def anthropic_error(status: int, err_type: str, message: str) -> JSONResponse:
         status_code=status,
         content={"type": "error", "error": {"type": err_type, "message": message}},
     )
+
+
+def _error_factory(
+    status: int, message: str, err_type: str, code: str | None
+) -> JSONResponse:
+    """ErrorFactory adapter: Anthropic envelope, `code` is not part of it."""
+    return anthropic_error(status, err_type, message)
 
 
 def _chat_body_sse(chat: dict[str, Any]) -> AsyncIterator[bytes]:
@@ -69,6 +78,14 @@ def _chat_body_sse(chat: dict[str, Any]) -> AsyncIterator[bytes]:
     return stream()
 
 
+def _upstream_error_message(content: Any) -> str:
+    if isinstance(content, dict):
+        err = content.get("error")
+        if isinstance(err, dict):
+            return str(err.get("message") or "")
+    return ""
+
+
 def make_router(
     settings: Settings, keystore: KeyStore, registry: ModelRegistry
 ) -> APIRouter:
@@ -77,18 +94,10 @@ def make_router(
 
     @router.post("/v1/messages")
     async def handler(request: Request, _: str = Depends(auth)) -> Any:
-        started = time.perf_counter()
-        request_id = uuid.uuid4().hex[:12]
-        client = request.client.host if request.client else "-"
-        try:
-            body = await request.json()
-        except Exception:
+        body = await parse_json_object(request)
+        if body is None:
             return anthropic_error(
-                400, "invalid_request_error", "Request body must be valid JSON."
-            )
-        if not isinstance(body, dict):
-            return anthropic_error(
-                400, "invalid_request_error", "Request body must be a JSON object."
+                400, "invalid_request_error", "Request body must be a valid JSON object."
             )
 
         try:
@@ -97,86 +106,56 @@ def make_router(
             return anthropic_error(
                 400, "invalid_request_error", "Malformed Messages request."
             )
-        requested_model = str(payload.get("model") or "")
-        payload["model"] = registry.resolve(requested_model)
-        public_model = registry.public_id(requested_model)
-        payload = filter_payload(payload, settings.reasoning_passthrough)
-        stream = bool(payload.get("stream"))
 
-        def log(status: int, usage: Any = None) -> None:
-            logger.info(
-                "anthropic messages completion",
-                extra={
-                    "request_id": request_id,
-                    "model": str(payload["model"]),
-                    "client": client,
-                    "stream": stream,
-                    "has_tools": bool(payload.get("tools")),
-                    "status": status,
-                    "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-                    "usage": usage,
-                },
-            )
-
+        call = new_call(
+            request,
+            payload,
+            settings,
+            registry,
+            log_message="anthropic messages completion",
+        )
         adapter = request.app.state.adapter
-        try:
-            result = await adapter.chat(payload)
-        except WaitTimeoutError as exc:
-            log(504)
-            return anthropic_error(504, "timeout_error", str(exc))
-        except ServeError as exc:
-            log(502)
-            return anthropic_error(502, "api_error", str(exc))
-        except ConnectionError as exc:
-            log(502)
-            return anthropic_error(502, "api_connection_error", str(exc))
-        except ValueError as exc:
-            log(400)
-            return anthropic_error(400, "invalid_request_error", str(exc))
-        except Exception:
-            log(500)
-            logger.exception(
-                "unhandled anthropic error", extra={"request_id": request_id}
-            )
-            return anthropic_error(500, "api_error", "Internal gateway error.")
+        result = await dispatch(
+            adapter,
+            call,
+            _error_factory,
+            logger=logger,
+            unhandled_message="unhandled anthropic error",
+        )
+        if isinstance(result, JSONResponse):
+            return result
 
         if isinstance(result, StreamRelay):
-            chunks = result.chunks()
-            log(200)
+            call.log(logger, 200)
             return StreamingResponse(
-                stream_anthropic_events(chunks, public_model),
+                stream_anthropic_events(result.chunks(), call.public_model),
                 status_code=200,
                 media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                headers=_SSE_HEADERS,
             )
-        if isinstance(result, dict) and "__status__" in result:
-            log(int(result["__status__"]))
-            content = result["content"]
-            # Relay upstream errors in Anthropic envelope.
-            message = ""
-            if isinstance(content, dict):
-                err = content.get("error")
-                if isinstance(err, dict):
-                    message = str(err.get("message") or "")
-            return anthropic_error(
-                int(result["__status__"]), "api_error", message or "Upstream error."
-            )
+        if is_error_relay(result):
+            status = int(result["__status__"])
+            call.log(logger, status)
+            # Relay upstream errors in the Anthropic envelope.
+            message = _upstream_error_message(result["content"])
+            return anthropic_error(status, "api_error", message or "Upstream error.")
         if isinstance(result, ServeCompletion):
-            result = completion_to_chat_response(str(payload["model"]), result)
-            log(200, result.get("usage"))
+            result = completion_to_chat_response(call.upstream_model, result)
         if isinstance(result, dict):
-            if stream:
+            # Exactly one completion record per request, carrying usage.
+            if call.stream:
+                call.log(logger, 200, result.get("usage"))
                 return StreamingResponse(
-                    stream_anthropic_events(_chat_body_sse(result), public_model),
+                    stream_anthropic_events(_chat_body_sse(result), call.public_model),
                     status_code=200,
                     media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                    headers=_SSE_HEADERS,
                 )
-            body_out = chat_to_anthropic_body(result, public_model)
-            log(200)
+            body_out = chat_to_anthropic_body(result, call.public_model)
+            call.log(logger, 200, result.get("usage"))
             return JSONResponse(status_code=200, content=body_out)
 
-        log(502)
+        call.log(logger, 502)
         return anthropic_error(502, "api_error", "Unexpected upstream result type.")
 
     return router

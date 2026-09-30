@@ -143,12 +143,20 @@ class EdgeKeyStore:
     def _load(self) -> None:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            items = data.get("keys") or []
-            self._records = [r for r in items if isinstance(r, dict)]
         except FileNotFoundError:
-            pass
+            return
         except (OSError, ValueError):
             logger.warning("edge key store unreadable; starting empty: %s", self.path)
+            return
+        if not isinstance(data, dict):
+            # Foreign/corrupt file (e.g. a JSON array): never crash startup.
+            logger.warning("edge key store has unexpected shape (%s); starting empty: %s",
+                           type(data).__name__, self.path)
+            return
+        items = data.get("keys")
+        if not isinstance(items, list):
+            return
+        self._records = [r for r in items if isinstance(r, dict)]
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -496,138 +504,99 @@ def create_app(pool: Pool) -> Any:
             await send({"type": "http.response.body",
                         "body": json.dumps(payload, ensure_ascii=False).encode()})
 
-    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope["type"] == "lifespan":
-            while True:
-                message = await receive()
-                if message["type"] == "lifespan.startup":
-                    scope.setdefault("state", {})["_health"] = asyncio.create_task(
-                        health_loop(pool, client))
-                    await send({"type": "lifespan.startup.complete"})
-                elif message["type"] == "lifespan.shutdown":
-                    task = scope.get("state", {}).get("_health")
-                    if task:
-                        task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await task
-                    await client.aclose()
-                    await send({"type": "lifespan.shutdown.complete"})
-                    return
-            return
-        if scope["type"] != "http":
-            return
-
-        path = scope.get("path", "/")
-        method = scope.get("method", "GET")
-        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
-        started = time.perf_counter()
-
-        if path in ("/healthz", "/__lb_health"):
-            snap = pool.snapshot()
-            any_ok = any(u["healthy"] and not u["quota_exhausted"] for u in snap) \
-                or any(u["healthy"] for u in snap)
-            payload = json.dumps({"healthy": any_ok, "upstreams": snap},
-                                 ensure_ascii=False).encode()
-            await send({"type": "http.response.start",
-                        "status": 200 if any_ok else 503,
-                        "headers": [(b"content-type", b"application/json")]})
-            await send({"type": "http.response.body", "body": payload})
-            return
-
-        token = client_bearer(headers)
-        kind = classify(token)
-        qs_key = ""
-        if path.startswith("/admin"):
-            qs = parse_qs(scope.get("query_string", b"").decode("latin-1"))
-            qs_key = next(iter(qs.get("key", []) or []), "")
-            if kind == "none" and qs_key:
-                kind = classify(qs_key)
-
-        # /admin/keys management: admin keys only.
-        if path == "/admin/keys" or path.startswith("/admin/keys/"):
-            if kind != "admin":
-                logger.warning("lb admin-keys access denied client=%s",
-                               (scope.get("client") or ("-",))[0])
-                await _auth_401(send, " (admin key required)")
-                return
-            if method == "POST":
-                try:
-                    raw = json.loads(body_bytes) if (body_bytes := await read_body(receive)) else {}
-                except ValueError:
-                    raw = {}
-                if not isinstance(raw, dict):
-                    raw = {}
-                try:
-                    ttl = float(raw.get("ttl_hours", KEY_DEFAULT_TTL_HOURS))
-                except (TypeError, ValueError):
-                    ttl = -1.0
-                if ttl < 0:
-                    await _json(send, 400, {"error": {
-                        "message": "ttl_hours must be a number (0 = permanent).",
-                        "type": "invalid_request_error"}})
-                    return
-                rec = keystore.create(name=str(raw.get("name") or "")[:64], ttl_hours=ttl)
-                await _json(send, 200, {
-                    "id": rec["id"], "key": rec["key"], "name": rec["name"],
-                    "created_at": rec["created_at"], "expires_at": rec["expires_at"],
-                    "ttl_hours": ttl if ttl > 0 else None})
-                return
-            if method == "GET":
-                await _json(send, 200, {"keys": keystore.list_public()})
-                return
-            if method == "DELETE":
-                key_id = path.split("/admin/keys/", 1)[1].strip("/")
-                if keystore.revoke(key_id):
-                    await _json(send, 200, {"revoked": key_id})
-                else:
-                    await _json(send, 404, {"error": {
-                        "message": f"Key id {key_id!r} not found (or already revoked).",
-                        "type": "invalid_request_error"}})
-                return
-
-        if not LB_ADMIN_KEYS and not LB_STATIC_KEYS:
-            await send({"type": "http.response.start", "status": 503,
-                        "headers": [(b"content-type", b"application/json")]})
-            await send({"type": "http.response.body", "body": json.dumps({
-                "error": {"message": "ZEN_LB_ADMIN_KEYS not set; balancer is locked",
-                          "type": "configuration_error"}}).encode()})
-            return
-
-        authorized = kind in ("admin", "static", "dynamic")
-        if not authorized:
-            logger.warning("lb auth rejected %s %s client=%s kind=%s", method, path,
-                           (scope.get("client") or ("-",))[0], kind)
-            await _auth_401(send)
-            return
-
-        if path == "/admin":
-            snap = pool.snapshot()
-            body = admin_page(snap).encode()
+    async def _html(send: Any, body: bytes) -> None:
+        with contextlib.suppress(Exception):
             await send({"type": "http.response.start", "status": 200,
                         "headers": [(b"content-type", b"text/html; charset=utf-8")]})
             await send({"type": "http.response.body", "body": body})
-            return
-        if path == "/admin/json":
-            snap = pool.snapshot()
-            payload = json.dumps({"lb": True, "now": time.time(),
-                                  "upstreams": snap}, ensure_ascii=False).encode()
-            await send({"type": "http.response.start", "status": 200,
-                        "headers": [(b"content-type", b"application/json")]})
-            await send({"type": "http.response.body", "body": payload})
-            return
 
-        rid = headers.get("x-request-id") or uuid.uuid4().hex[:16]
+    async def _handle_admin_keys(
+        method: str, path: str, kind: str, peer: str, receive: Any, send: Any
+    ) -> bool:
+        """Handle /admin/keys*; True when the request was fully answered."""
+        if not (path == "/admin/keys" or path.startswith("/admin/keys/")):
+            return False
+        if kind != "admin":
+            logger.warning("lb admin-keys access denied client=%s", peer)
+            await _auth_401(send, " (admin key required)")
+            return True
+        if method == "POST":
+            raw_bytes = await read_body(receive)
+            try:
+                raw = json.loads(raw_bytes) if raw_bytes else {}
+            except ValueError:
+                await _json(send, 400, {"error": {
+                    "message": "Request body must be valid JSON.",
+                    "type": "invalid_request_error"}})
+                return True
+            if not isinstance(raw, dict):
+                raw = {}
+            try:
+                ttl = float(raw.get("ttl_hours", KEY_DEFAULT_TTL_HOURS))
+            except (TypeError, ValueError):
+                ttl = -1.0
+            if ttl < 0:
+                await _json(send, 400, {"error": {
+                    "message": "ttl_hours must be a number (0 = permanent).",
+                    "type": "invalid_request_error"}})
+                return True
+            rec = keystore.create(name=str(raw.get("name") or "")[:64], ttl_hours=ttl)
+            await _json(send, 200, {
+                "id": rec["id"], "key": rec["key"], "name": rec["name"],
+                "created_at": rec["created_at"], "expires_at": rec["expires_at"],
+                "ttl_hours": ttl if ttl > 0 else None})
+            return True
+        if method == "GET":
+            await _json(send, 200, {"keys": keystore.list_public()})
+            return True
+        if method == "DELETE":
+            key_id = path.split("/admin/keys/", 1)[1].strip("/")
+            if keystore.revoke(key_id):
+                await _json(send, 200, {"revoked": key_id})
+            else:
+                await _json(send, 404, {"error": {
+                    "message": f"Key id {key_id!r} not found (or already revoked).",
+                    "type": "invalid_request_error"}})
+            return True
+        # Any other verb must not silently fall through into the proxy path.
+        await _json(send, 405, {"error": {
+            "message": f"{method} is not allowed on {path}.",
+            "type": "invalid_request_error"}})
+        return True
+
+    async def _handle_admin_views(path: str, send: Any) -> bool:
+        """Handle the read-only /admin dashboard endpoints."""
+        if path == "/admin":
+            await _html(send, admin_page(pool.snapshot()).encode())
+            return True
+        if path == "/admin/json":
+            await _json(send, 200, {"lb": True, "now": time.time(),
+                                    "upstreams": pool.snapshot()})
+            return True
+        return False
+
+    async def _proxy(
+        method: str, path: str, rid: str, scope: dict[str, Any],
+        receive: Any, send: Any,
+    ) -> None:
+        """Forward one request to a bucket, with failover and quota cordon."""
         body = await read_body(receive)
         base_headers = forwardable(scope["headers"]) + [(b"x-request-id", rid.encode())]
+        candidates = pool.candidates()
+        # Only skip an overloaded bucket when a spare one actually exists;
+        # otherwise (every bucket saturated) we must still try, or a burst
+        # would be answered with an invented 502 instead of queueing upstream.
+        has_spare = any(u.inflight < MAX_INFLIGHT_PER_UPSTREAM for u in candidates)
         tried = 0
         last_error = "no upstream attempted"
         quota_429_body = b""  # 全部桶都额度耗尽时，把真实 429 透传给客户端
 
-        for up in pool.candidates():
+        for up in candidates:
             if tried >= len(pool.upstreams):
                 break
-            if up.inflight >= MAX_INFLIGHT_PER_UPSTREAM and len(pool.upstreams) > 1:
-                logger.warning("skipping saturated upstream %s inflight=%d", up.name, up.inflight)
+            if has_spare and up.inflight >= MAX_INFLIGHT_PER_UPSTREAM:
+                logger.warning("skipping saturated upstream %s inflight=%d",
+                               up.name, up.inflight)
                 continue
             tried += 1
             await pool.acquire(up)
@@ -668,7 +637,8 @@ def create_app(pool: Pool) -> Any:
                     await resp.aclose()
                     last_error = (f"{up.name} status={resp.status_code} "
                                   f"ttfb={ttfb_ms:.0f}ms body={err[:200]!r}")
-                    await pool.release(up, False, (time.perf_counter() - t0) * 1000, last_error)
+                    await pool.release(up, False, (time.perf_counter() - t0) * 1000,
+                                       last_error)
                     logger.warning("lb retryable %s from %s (ttfb=%.0fms)",
                                    resp.status_code, up.name, ttfb_ms)
                     continue
@@ -728,8 +698,76 @@ def create_app(pool: Pool) -> Any:
                 "error": {"message": f"All gateway upstreams are unavailable: {last_error}",
                           "type": "api_connection_error",
                           "code": "upstream_unreachable"}}).encode()})
-        logger.info("rid=%s lb %s %s FAILED %.0fms (%s)", rid, method, path,
-                    (time.perf_counter() - started) * 1000, last_error)
+
+    def _peer(scope: dict[str, Any]) -> str:
+        return str((scope.get("client") or ("-",))[0])
+
+    async def app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] == "lifespan":
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    scope.setdefault("state", {})["_health"] = asyncio.create_task(
+                        health_loop(pool, client))
+                    await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    task = scope.get("state", {}).get("_health")
+                    if task:
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+                    await client.aclose()
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+            return
+        if scope["type"] != "http":
+            return
+
+        path = scope.get("path", "/")
+        method = scope.get("method", "GET")
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope["headers"]}
+
+        if path in ("/healthz", "/__lb_health"):
+            snap = pool.snapshot()
+            any_ok = any(u["healthy"] for u in snap)
+            payload = json.dumps({"healthy": any_ok, "upstreams": snap},
+                                 ensure_ascii=False).encode()
+            await send({"type": "http.response.start",
+                        "status": 200 if any_ok else 503,
+                        "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body", "body": payload})
+            return
+
+        token = client_bearer(headers)
+        kind = classify(token)
+        if path.startswith("/admin"):
+            qs = parse_qs(scope.get("query_string", b"").decode("latin-1"))
+            qs_key = next(iter(qs.get("key", []) or []), "")
+            if kind == "none" and qs_key:
+                kind = classify(qs_key)
+
+        peer = _peer(scope)
+        if await _handle_admin_keys(method, path, kind, peer, receive, send):
+            return
+
+        if not LB_ADMIN_KEYS and not LB_STATIC_KEYS:
+            await _json(send, 503, {
+                "error": {"message": "ZEN_LB_ADMIN_KEYS not set; balancer is locked",
+                          "type": "configuration_error"}})
+            return
+
+        if kind not in ("admin", "static", "dynamic"):
+            logger.warning("lb auth rejected %s %s client=%s kind=%s",
+                           method, path, peer, kind)
+            await _auth_401(send)
+            return
+
+        if await _handle_admin_views(path, send):
+            return
+
+        rid = headers.get("x-request-id") or uuid.uuid4().hex[:16]
+        await _proxy(method, path, rid, scope, receive, send)
 
     return app
 

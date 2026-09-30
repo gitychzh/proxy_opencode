@@ -427,3 +427,57 @@ def test_edge_keystore_default_ttl_and_permanent(tmp_path):
     ks2 = lb.EdgeKeyStore(tmp_path / "keys.json", default_ttl_hours=24)
     assert ks2.validate(rec["key"]) is not None
     assert ks2.validate(perm["key"]) is not None
+
+
+def test_edge_keystore_survives_foreign_json(tmp_path):
+    """A non-object JSON file must not crash the LB at startup."""
+    path = tmp_path / "keys.json"
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+    ks = lb.EdgeKeyStore(path)
+    assert ks.list_public() == []
+
+
+# ------------------------------------------------- saturation + admin verbs
+
+
+@pytest.mark.asyncio
+async def test_all_buckets_saturated_still_forwards(monkeypatch):
+    """Regression: when every bucket was at MAX_INFLIGHT the request was
+    answered with an invented 502 instead of being attempted."""
+    monkeypatch.setattr(lb, "MAX_INFLIGHT_PER_UPSTREAM", 0)
+    resp = await call(lb.create_app(two_upstream_pool()))
+    assert resp.status_code == 200
+    assert SEEN, "a fully saturated pool must still be tried"
+
+
+@pytest.mark.asyncio
+async def test_saturated_bucket_skipped_when_a_spare_exists(monkeypatch):
+    monkeypatch.setattr(lb, "MAX_INFLIGHT_PER_UPSTREAM", 2)
+    pool = two_upstream_pool()
+    pool.upstreams[0].inflight = 5  # bucket "a" is overloaded
+    resp = await call(lb.create_app(pool))
+    assert resp.status_code == 200
+    assert all(name == "b" for name, _, _ in SEEN)
+
+
+@pytest.mark.asyncio
+async def test_admin_keys_unsupported_method_is_405():
+    app = lb.create_app(two_upstream_pool())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://lb") as c:
+        r = await c.put("/admin/keys",
+                        headers={"Authorization": "Bearer api_ychzh22372222"})
+    assert r.status_code == 405
+    assert SEEN == [], "an unsupported admin verb must never reach a bucket"
+
+
+@pytest.mark.asyncio
+async def test_admin_keys_invalid_json_is_400():
+    app = lb.create_app(two_upstream_pool())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://lb") as c:
+        r = await c.post("/admin/keys", content=b"{not json",
+                         headers={"Authorization": "Bearer api_ychzh22372222",
+                                  "content-type": "application/json"})
+    assert r.status_code == 400
+

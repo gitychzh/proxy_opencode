@@ -272,7 +272,8 @@ class ServeAdapter:
                         result.tool_calls = parsed
                         result.text = ""
                         break
-            assert result is not None
+            if result is None:  # pragma: no cover - loop always runs once
+                raise ServeError("opencode serve produced no assistant turn")
         finally:
             if self._settings.opencode_serve_ephemeral_sessions:
                 try:
@@ -313,7 +314,7 @@ class ServeAdapter:
                 internal_tools.append(part)
 
         tokens = assistant.get("tokens") or {}
-        usage = {
+        usage: dict[str, Any] = {
             "prompt_tokens": int(tokens.get("input") or 0)
             + int((tokens.get("cache") or {}).get("read") or 0),
             "completion_tokens": int(tokens.get("output") or 0),

@@ -69,9 +69,8 @@ def _input_items_to_messages(items: list[Any]) -> list[dict[str, Any]]:
                         {"role": "tool", "tool_call_id": tcid, "content": text}
                     )
                 else:
-                    messages.append(
-                        {"role": "user", "content": f"[tool result] {text}" if text else "[tool result]"}
-                    )
+                    fallback = f"[tool result] {text}" if text else "[tool result]"
+                    messages.append({"role": "user", "content": fallback})
                 continue
             messages.append({"role": role, "content": text})
         elif itype == "function_call":
@@ -161,11 +160,15 @@ def _usage_block(usage: dict[str, Any] | None) -> dict[str, Any]:
         return {}
     prompt = int(usage.get("prompt_tokens") or 0)
     completion = int(usage.get("completion_tokens") or 0)
+    prompt_details = usage.get("prompt_tokens_details") or {}
+    completion_details = usage.get("completion_tokens_details") or {}
+    cached = int(prompt_details.get("cached_tokens") or 0)
+    reasoning = int(completion_details.get("reasoning_tokens") or 0)
     return {
         "input_tokens": prompt,
-        "input_tokens_details": {"cached_tokens": 0},
+        "input_tokens_details": {"cached_tokens": cached},
         "output_tokens": completion,
-        "output_tokens_details": {"reasoning_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": reasoning},
         "total_tokens": int(usage.get("total_tokens") or (prompt + completion)),
     }
 
@@ -246,13 +249,21 @@ def chat_to_responses_body(
 
 
 class _StreamState:
+    """Accumulates one streamed chat completion into Responses output items.
+
+    Every emitted item (the assistant message and each function call) is
+    assigned a unique, monotonically increasing `output_index` from a single
+    counter, so the streamed `output_item.added/done` indices always agree
+    with the item order of the final `response.completed` envelope.
+    """
+
     def __init__(self) -> None:
         self.response_id = _new_id("resp")
         self.created_at = int(time.time())
         self.seq = 0
         self.msg_id = _new_id("msg")
         self.msg_open = False
-        self.msg_index = 0
+        self.msg_index: int | None = None
         self.text_buf = ""
         self.tool_calls: dict[int, dict[str, Any]] = {}
         self.tool_announced: set[int] = set()
@@ -264,23 +275,39 @@ class _StreamState:
         self.seq += 1
         return self.seq
 
+    def alloc_item_index(self) -> int:
+        """Reserve the next unique output index for an item."""
+        index = self.next_item_index
+        self.next_item_index += 1
+        return index
+
     def final_output(self) -> list[dict[str, Any]]:
-        output: list[dict[str, Any]] = []
+        """Final `output` array, ordered by the indices used while streaming."""
+        items: list[tuple[int, dict[str, Any]]] = []
         if self.text_buf or not self.tool_calls:
-            output.append(_message_item(self.msg_id, self.text_buf))
+            items.append(
+                (
+                    self.msg_index if self.msg_index is not None else 0,
+                    _message_item(self.msg_id, self.text_buf),
+                )
+            )
         for idx in sorted(self.tool_calls):
             tc = self.tool_calls[idx]
-            output.append(
-                {
-                    "type": "function_call",
-                    "id": _new_id("fc"),
-                    "call_id": tc["id"],
-                    "name": tc["name"],
-                    "arguments": tc["arguments"],
-                    "status": "completed",
-                }
+            items.append(
+                (
+                    tc["item_index"],
+                    {
+                        "type": "function_call",
+                        "id": tc["item_id"],
+                        "call_id": tc["id"],
+                        "name": tc["name"],
+                        "arguments": tc["arguments"],
+                        "status": "completed",
+                    },
+                )
             )
-        return output
+        items.sort(key=lambda pair: pair[0])
+        return [item for _index, item in items]
 
 
 def _sse_event(name: str, data: dict[str, Any]) -> bytes:
@@ -318,6 +345,7 @@ async def stream_responses_events(
             if text:
                 if not st.msg_open:
                     st.msg_open = True
+                    st.msg_index = st.alloc_item_index()
                     item = {
                         "type": "message",
                         "id": st.msg_id,
@@ -378,8 +406,7 @@ async def stream_responses_events(
                     slot["arguments"] += fn["arguments"]
                 if idx not in st.tool_announced and (slot["id"] or slot["name"]):
                     st.tool_announced.add(idx)
-                    slot["item_index"] = st.next_item_index
-                    st.next_item_index += 1
+                    slot["item_index"] = st.alloc_item_index()
                     yield event(
                         "response.output_item.added",
                         {
@@ -392,6 +419,17 @@ async def stream_responses_events(
                                 "arguments": "",
                                 "status": "in_progress",
                             },
+                        },
+                    )
+                # Announce the argument fragment AFTER the item exists, so
+                # clients never see a delta for an unknown output_index.
+                if fn.get("arguments") and idx in st.tool_announced:
+                    yield event(
+                        "response.function_call_arguments.delta",
+                        {
+                            "item_id": slot["item_id"],
+                            "output_index": slot["item_index"],
+                            "delta": str(fn["arguments"]),
                         },
                     )
 
@@ -426,6 +464,14 @@ async def stream_responses_events(
     # Close function-call items.
     for idx in sorted(st.tool_calls):
         slot = st.tool_calls[idx]
+        yield event(
+            "response.function_call_arguments.done",
+            {
+                "item_id": slot["item_id"],
+                "output_index": slot["item_index"],
+                "arguments": slot["arguments"],
+            },
+        )
         yield event(
             "response.output_item.done",
             {
