@@ -242,3 +242,35 @@ owin10 的 hermes / claude code 目前都指向公网入口，尚未启用直连
    需要时把对应 `[plugins."..."]` 的 `enabled` 改为 `false` 即可。
 
 **合计效果（claude code 端到端）**：上行请求 21.1k → 8.9k tok，**降幅 ~57%**。
+
+### 9.7 0.6.2 部署记录（2026-09-30）
+
+四桶 + ECS LB 已全部滚动升级到 **0.6.2**，逐点验证通过。
+
+| 节点 | 目录 | 重启方式 | 结果 |
+| --- | --- | --- | --- |
+| win10-local | `D:\wb_ps\proxy_opencode\repo` | 自愈循环（kill python 进程即自动拉起） | 0.6.2 ✓ |
+| owin10 | `C:\Users\owin10\proxy_opencode` | `schtasks /run /tn ProxyOpencodeBoot` | 0.6.2 ✓ |
+| ubuntu26 | `~/proxy_opencode` | `sudo systemctl restart proxy_opencode` | 0.6.2 ✓ |
+| phone115 | `~/repo` | 自愈循环（kill python 进程） | 0.6.2 ✓ |
+| ECS LB | `/opt/proxy_opencode/balancer/lb.py` | `systemctl restart zen-lb` | ✓ |
+
+**部署要点（下次照做）**：
+
+1. owin10 / ubuntu26 / phone115 的部署目录**不是 git 仓库**，只能同步文件：
+   本地 `tar czf pkg.tgz --exclude=__pycache__ proxy_opencode` → scp → 远端
+   `mv proxy_opencode proxy_opencode.bak_<日期> && tar xzf pkg.tgz`。
+2. **必须同步修正 venv 里 dist-info 的 METADATA `Version:`**，否则 healthz
+   仍报旧版本号（`__version__` 取自 `importlib.metadata`，不是源码）：
+   `sed -i "s/^Version: .*/Version: 0.6.2/" <venv>/lib/python3*/site-packages/proxy_opencode-*.dist-info/METADATA`
+3. **owin10 的 `taskkill /F` 之后自愈循环不会自动拉起**（实测），需
+   `schtasks /run /tn ProxyOpencodeBoot` 补一手；其余三处 kill 后自动恢复。
+4. 备份产物：`proxy_opencode.bak_0620`（三桶）、`lb.py.bak_0620`（ECS）。
+
+**部署后实测（0.6.2）**：
+
+- 四桶 healthz 全部 `version=0.6.2`；LB 四桶 `healthy=true`、
+  `quota_exhausted=false`（win10-local 的误熔断随重启清除）。
+- 公网入口简单对话 **`prompt_tokens` 2,323 → 476（-79%）**。
+- 三客户端回归：hermes ✅、claude code 工具链 ✅（落盘核验）、
+  codex ✅ 且 `tokens used` **6,119 → 4,081（-33%）**。
