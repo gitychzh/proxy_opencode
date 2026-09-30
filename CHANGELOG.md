@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.6.1] - 2026-09-30
+
+### Changed
+
+- **移除网关限流**：删除每 key 60 RPM 固定窗口限速器（`ratelimit.py` 整个
+  模块、auth 层 429 分支、`REQUESTS_PER_MINUTE` 配置项）。Zen 上游自带
+  调度与配额策略，自建层限流只会惩罚 agent 并发扇出；客户端自行排队。
+  LB 侧 `MAX_INFLIGHT`（64）饱和保护保留——它是"跳过过载桶"而非排队。
+- **Zen 免费层指纹重校准（提速）**：2026-09-30 活体 ablation 实测，门禁
+  **不再校验系统提示词内容**（一句 tiny prompt 甚至无 system 消息均 200），
+  仅强制内置工具 schema（无 tools 403；1 个工具 403；`{bash, read}` 两个
+  即 200）。新增两个环境变量：
+  `ZEN_MARKER_MODE`：`bridge`（默认，仅 ~70 token 工具提示）/ `full`
+  （旧版完整 opencode prompt + bridge，~7.8k tokens，可按桶回退）/
+  `none`（完全不注入）；
+  `ZEN_TOOLS_MODE`：`minimal`（默认，仅 bash+read 两个 schema，~1k
+  tokens）/ `all`（完整 11 工具 schema，~6k tokens，按桶回退用）。
+  默认组合下每个请求上游 prefill 输入从 ~7.8k 降至 ~1k tokens。
+
 ## [0.6.0] - 2026-09-30
 
 ### Added

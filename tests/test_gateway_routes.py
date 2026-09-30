@@ -1,4 +1,9 @@
-"""HTTP-layer tests for routes: auth, rate limit, chat, models, streaming."""
+"""HTTP-layer tests for routes: auth, chat, models, streaming.
+
+Rate limiting was removed on 2026-09-30 (v0.6.1): the Zen upstream applies
+its own scheduling, and a self-hosted per-key RPM limiter only penalised
+agent fan-out. test_no_rate_limit_burst guards the removal.
+"""
 
 from __future__ import annotations
 
@@ -68,16 +73,18 @@ async def test_auth_required():
 
 
 @pytest.mark.asyncio
-async def test_rate_limit():
-    app, _ = make_app(requests_per_minute=1)
+async def test_no_rate_limit_burst():
+    """v0.6.1 removed the per-key RPM limiter: rapid bursts must never 429."""
+    app, _ = make_app()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         body = {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "hi"}]}
-        r1 = await client.post("/v1/chat/completions", json=body, headers=GW_HEADERS)
-        r2 = await client.post("/v1/chat/completions", json=body, headers=GW_HEADERS)
-    assert r1.status_code == 200
-    assert r2.status_code == 429
+        codes = [
+            (await client.post("/v1/chat/completions", json=body, headers=GW_HEADERS)).status_code
+            for _ in range(5)
+        ]
+    assert codes == [200] * 5
 
 
 @pytest.mark.asyncio

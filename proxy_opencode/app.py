@@ -6,7 +6,6 @@ All behavior lives in dedicated modules:
   registry.py          public-model alias layer (model masking)
   sse_mask.py          stream rewriting (scrub upstream model names)
   errors.py            OpenAI-style error body helper
-  ratelimit.py         fixed-window limiter
   upstreams/           per-mode adapters (protocol, openai_http, opencode_serve)
   routes/              thin HTTP handlers (chat, models, responses, anthropic, admin)
   formats/             protocol converters (OpenAI Responses, Anthropic Messages)
@@ -24,7 +23,6 @@ from . import __version__
 from .auth.keystore import KeyStore
 from .config import Settings, load_settings
 from .errors import GatewayHttpError
-from .ratelimit import RateLimiter
 from .registry import ModelRegistry
 from .routes import admin as admin_routes
 from .routes import anthropic_api as anthropic_routes
@@ -48,7 +46,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="proxy_opencode", version=__version__, lifespan=lifespan)
     app.state.settings = settings
-    app.state.ratelimiter = RateLimiter(settings.requests_per_minute)
     app.state.adapter = build_adapter(settings)
     app.state.keystore = KeyStore(settings.key_store_path, settings.key_default_ttl_hours)
     app.state.registry = ModelRegistry(settings)

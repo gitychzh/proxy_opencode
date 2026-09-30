@@ -80,6 +80,27 @@ _BRIDGE_NOTE = (
     "message."
 )
 
+# Standalone tiny system note for marker_mode="bridge" (~70 tokens): the
+# builtin tool schemas are still injected (gate requirement) but the big
+# opencode default prompt is not, so the note alone steers the model away
+# from calling them. Verified against the live gate on 2026-09-30 (the gate
+# no longer inspects the system prompt; only the tool schemas fingerprint).
+_BRIDGE_NOTE_STANDALONE = (
+    "You are serving an OpenAI-compatible API client. Answer the client's "
+    "latest message directly, using ONLY the client-supplied tools (if any). "
+    "NEVER call the opencode built-in tools (bash, read, edit, glob, grep, "
+    "write, list, task, todowrite, webfetch, websearch, skill) - they are "
+    "unavailable in this session; calling them fails. Reply in the language "
+    "of the client's latest message."
+)
+
+# Minimal builtin schema set that still satisfies the gate (live ablation
+# 2026-09-30: 1 tool -> 403, {bash, read} -> 200, full 11 -> 200). Keeps the
+# mandatory fingerprint at ~1k prompt tokens instead of ~6k. ZEN_TOOLS_MODE
+# =all restores the full schema list (per-bucket fallback if the gate
+# tightens again).
+_MINIMAL_TOOL_NAMES = ("bash", "read")
+
 
 def _default_prompt() -> str:
     return _ASSET_PROMPT.read_text(encoding="utf-8")
@@ -279,7 +300,12 @@ class ZenDirectAdapter:
         messages = _clean_messages(body.get("messages") or [])
         client_tools = [t for t in (body.get("tools") or []) if isinstance(t, dict)]
         if self._auth_free:
-            messages = self._inject_marker(messages)
+            mode = self._settings.zen_marker_mode
+            if mode == "full":
+                messages = self._inject_marker(messages)
+            elif mode == "bridge":
+                messages = self._inject_bridge(messages)
+            # "none": leave the client's messages untouched
             body["tools"] = self._merge_tools(client_tools)
             if "tool_choice" not in body and body["tools"]:
                 body["tool_choice"] = "auto"
@@ -303,14 +329,32 @@ class ZenDirectAdapter:
         }
         return [marker, *messages]
 
+    @staticmethod
+    def _inject_bridge(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Prepend only the tiny tool-steering note (no opencode prompt)."""
+        marker: dict[str, Any] = {
+            "role": "system",
+            "content": _BRIDGE_NOTE_STANDALONE,
+        }
+        return [marker, *messages]
+
     def _merge_tools(self, client_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Builtin schemas first (required by the gate), client tools after.
 
         Name collisions (client tool named like a builtin) resolve in favour
         of the client tool; the builtin with the same name is dropped.
+        ZEN_TOOLS_MODE=minimal (default) injects only {bash, read}; "all"
+        restores the full captured schema list.
         """
         client_names = _tool_names(client_tools)
-        merged = [t for t in self._builtin_tools if not (_tool_names([t]) & client_names)]
+        if self._settings.zen_tools_mode == "minimal":
+            builtins = [
+                t for t in self._builtin_tools
+                if _tool_names([t]) & set(_MINIMAL_TOOL_NAMES)
+            ]
+        else:
+            builtins = list(self._builtin_tools)
+        merged = [t for t in builtins if not (_tool_names([t]) & client_names)]
         return [*merged, *client_tools]
 
 

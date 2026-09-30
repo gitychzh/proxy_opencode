@@ -78,7 +78,8 @@ async def test_headers_use_api_key_when_configured() -> None:
 
 
 @pytest.mark.asyncio
-async def test_body_injects_marker_and_merges_builtin_tools() -> None:
+async def test_body_bridge_note_by_default_and_merges_builtin_tools() -> None:
+    """Default marker mode is "bridge": tiny steering note, no 7.8k prompt."""
     adapter = ZenDirectAdapter(make_settings())
     body = adapter._build_body(
         {
@@ -92,13 +93,57 @@ async def test_body_injects_marker_and_merges_builtin_tools() -> None:
     assert body["temperature"] == 0.5
     msgs = body["messages"]
     assert msgs[0]["role"] == "system"
+    assert "OpenAI-compatible API client" in msgs[0]["content"]
+    assert "NEVER call the opencode built-in tools" in msgs[0]["content"]
+    # the fat opencode default prompt must NOT be injected
+    assert "interactive CLI tool" not in msgs[0]["content"]
+    assert msgs[1] == {"role": "user", "content": "hi"}
+    # free tier gate: minimal builtin schemas {bash, read} must be present
+    names = {t["function"]["name"] for t in body["tools"]}
+    assert {"bash", "read"} <= names
+    assert "edit" not in names  # ZEN_TOOLS_MODE=minimal is the default
+    assert body["tool_choice"] == "auto"
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_body_tools_mode_all_restores_full_builtin_list() -> None:
+    adapter = ZenDirectAdapter(make_settings(zen_tools_mode="all"))
+    body = adapter._build_body(
+        {"model": "big-pickle", "messages": [{"role": "user", "content": "hi"}]},
+        "big-pickle",
+    )
+    names = {t["function"]["name"] for t in body["tools"]}
+    assert {"bash", "read", "edit", "glob", "grep"} <= names
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_body_full_mode_injects_opencode_prompt() -> None:
+    adapter = ZenDirectAdapter(make_settings(zen_marker_mode="full"))
+    body = adapter._build_body(
+        {"model": "big-pickle", "messages": [{"role": "user", "content": "hi"}]},
+        "big-pickle",
+    )
+    msgs = body["messages"]
+    assert msgs[0]["role"] == "system"
     assert msgs[0]["content"].startswith("You are opencode, an interactive CLI tool")
     assert "NEVER call the opencode built-in tools" in msgs[0]["content"]
     assert msgs[1] == {"role": "user", "content": "hi"}
-    # free tier gate: builtin tool schemas must be present
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_body_none_mode_leaves_messages_untouched() -> None:
+    adapter = ZenDirectAdapter(make_settings(zen_marker_mode="none"))
+    body = adapter._build_body(
+        {"model": "big-pickle", "messages": [{"role": "user", "content": "hi"}]},
+        "big-pickle",
+    )
+    assert body["messages"] == [{"role": "user", "content": "hi"}]
+    # gate requirement stands regardless of marker mode
     names = {t["function"]["name"] for t in body["tools"]}
-    assert {"bash", "read", "edit", "glob", "grep"} <= names
-    assert body["tool_choice"] == "auto"
+    assert {"bash", "read"} <= names
     await adapter.aclose()
 
 

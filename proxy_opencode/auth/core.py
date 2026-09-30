@@ -59,27 +59,6 @@ def _reject(reason: str, request: Request, error_style: str = "openai") -> Gatew
     return GatewayHttpError(JSONResponse(status_code=401, content=body))
 
 
-def _rate_limited(error_style: str = "openai") -> GatewayHttpError:
-    if error_style == "anthropic":
-        body = {
-            "type": "error",
-            "error": {
-                "type": "rate_limit_error",
-                "message": "Rate limit exceeded for this API key.",
-            },
-        }
-    else:
-        body = {
-            "error": {
-                "message": "Rate limit exceeded for this gateway API key.",
-                "type": "rate_limit_error",
-                "param": None,
-                "code": "rate_limit_exceeded",
-            }
-        }
-    return GatewayHttpError(JSONResponse(status_code=429, content=body))
-
-
 def classify_key(
     token: str, settings, keystore: KeyStore | None
 ) -> tuple[str, bool]:
@@ -103,10 +82,13 @@ def classify_key(
 def build_auth_dependency(
     settings, keystore: KeyStore, error_style: str = "openai"
 ):
-    """Return a FastAPI dependency enforcing gateway key + rate limit.
+    """Return a FastAPI dependency enforcing the gateway key.
 
     error_style: "openai" (default) or "anthropic" — controls the error
-    envelope used for 401/429 so each protocol route speaks its own dialect.
+    envelope used for 401 so each protocol route speaks its own dialect.
+    Concurrency/rate limiting is deliberately NOT enforced here: the Zen
+    upstream applies its own scheduling, and self-hosted queuing only
+    penalises agent fan-out (2026-09-30 decision).
     """
 
     async def require_gateway_key(request: Request) -> str:
@@ -127,12 +109,6 @@ def build_auth_dependency(
             raise _reject(
                 "expired_key" if expired else "invalid_key", request, error_style
             )
-        if not request.app.state.ratelimiter.allow(token):
-            logger.warning(
-                "gateway rate limited",
-                extra={"client": _client(request), "reason": "rate_limited"},
-            )
-            raise _rate_limited(error_style)
         return token
 
     return require_gateway_key
