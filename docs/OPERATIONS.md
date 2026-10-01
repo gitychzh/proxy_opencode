@@ -49,17 +49,28 @@ rid=<id> lb POST /v1/chat/completions -> win10-local status=200 attempt=1 ttfb=4
 
 429/502/超时日志同样带 `ttfb=`/`elapsed=`，配额熔断行有 `cordoned for quota`。
 
-## 2. ECS（SWAS 吉隆坡）
+## 2. ECS（杭州活动机，2026-10-02 迁移完成）
+
+> 吉隆坡 SWAS（47.250.130.52，到期 2027-09-25）自 2026-10-02 起退出边缘角色，
+> cloudflared 已 stop+disable；caddy/xray/ss/derper 空转待退订。
 
 ```bash
-ssh root@<ECS_IP>                       # 密钥对免密（详见本地凭证文档）
-systemctl status|restart zen-lb         # Edge LB
+ssh root@115.29.231.25                  # 杭州新机（公钥免密）；详见本地凭证文档
+systemctl status|restart zen-lb         # Edge LB :7892
 systemctl status|restart cloudflared-tunnel
 vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-lb
 ```
 
 - LB 配置经 EnvironmentFile 注入：`ZEN_LB_HOST/PORT/API_KEY/UPSTREAMS`
 - 旧 Docker 版 LB 已删除，统一 systemd 管理
+- 迁移坑（2026-10-02 实战）：
+  - **cloudflared 必须 `protocol: http2`**（/etc/cloudflared/config.yml）：QUIC 出境绕
+    LAX 丢包严重（models 成功率 7/10），http2 后 12/12 全通
+  - **systemd-resolved 显式配 DNS**（`/etc/systemd/resolved.conf.d/migrate.conf`，
+    223.5.5.5 + 1.1.1.1）：阿里默认解析不了 `_v2-origintunneld._tcp.argotunnel.com` SRV
+  - caddy 报 217/USER = 缺 caddy 系统用户，`useradd --system --home /var/lib/caddy --create-home --shell /usr/sbin/nologin caddy`
+  - 安全组：22/443/80/8443/8388/8442 tcp + 3478/41641 udp（AuthorizeSecurityGroup API）
+  - zen-lb keys.json 实际路径：`/opt/proxy_opencode/balancer/keys.json`
 
 ## 3. 各桶运维
 
@@ -131,6 +142,11 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
 
 ## 8. 版本历史
 
+- **边缘迁移**（2026-10-02）：KL SWAS → 杭州活动机（99元/年）。7 服务全量迁移并
+  逐个调试：zen-lb/cloudflared/caddy/xray/shadowsocks/derper(重签证书+derpMap
+  就地更新)/tailscale（auth key 经 GitHub SSO 生成，节点 hangzhou-ecs=100.81.214.95，
+  四桶全 direct 42-72ms）。域名 llm./zen. 均已切杭州，E2E 公网推理 200。
+  阿里云主账号 AK/CF Global API Key 明文见 ACCESS.md §6。
 - **0.6.2**（2026-09-30）：系统性缺陷排查与工程化重构。修复 Responses 流式
   `output_index` 冲突与缺函数参数增量事件、Anthropic 空 assistant 轮次导致
   上游 400、SSE 事件体缺 `type`、keystore 异形 JSON 致**启动崩溃**、LB 全桶

@@ -127,11 +127,23 @@ adb connect 100.87.219.115:43357 && adb -s 100.87.219.115:43357 shell "su -c 'ne
 | 管理员 key | `api_ychzh22372222` | 用户→LB，永久，可对话+管理动态 key |
 | 桶间 key | `api_local22372222` | LB→四桶统一认证 |
 | LB 静态 key（兼容） | `gw-lb-rYPuNWGjPMo1WB_kqENRC5sh` | 旧版已并入 LB 静态 key，仍有效 |
-| 动态 key | `POST /admin/keys` 签发 | 默认 24h，keystore 在 ECS `/opt/proxy_opencode/keys.json`（**勿删**），跨桶通用 |
+| 动态 key | `POST /admin/keys` 签发 | 默认 24h，keystore 在杭州 ECS `/opt/proxy_opencode/balancer/keys.json`（**勿删**），跨桶通用 |
 | owin10 SSH 密码 | `223722` | 备用（免密优先） |
-| ECS root 密码 | `GwFix2026xX` | 救援 VNC 用（SSH 免密优先） |
-| Cloudflare Token | `cfut_c8g39tyA6mjI2ETYfFMiRUR6SM0cmn3bOHINMndJb9b87b02` | 全权（Tunnel/DNS/防火墙），免登录直操作 |
-| ECS SSH | `ssh -p 2222 root@47.250.130.52`（备用 22） | 密钥对 `gw-edge-2026` 绑定实例 |
+| 阿里云主账号 AK | ID `LTAI5t9LNM3tj8y6USLdiq11` / Secret `4n2a3LBwKhiJN1nr8s2t3OZWfwjLsp` | 全权 API（RunCommand/安全组/RAM 等），签名样例见仓库外 `scripts_local/aliyun_setup_ecs.py` |
+| 阿里云登录 | nick6730986768（UID 1983070104853754） | 控制台 cookie 明文在仓库外 `aliyun.md` |
+| Cloudflare | Global API Key `cfk_If85oo2i2sJCxbJT66encnVvwQUdBlmgJHIKLO9u9bd3191c` + 邮箱 `93921526@163.com` | 账户级全权，走 `X-Auth-Email`+`X-Auth-Key` 头（GitHub SSO 登录，旧 cfut_ token 已失效删除） |
+| 杭州 ECS root 密码 | `HzEcs2026Rk9mQx` | SSH 免密优先（本机 id_ed25519 已注入） |
+| 吉隆坡 SWAS root 密码 | `GwFix2026xX` | SWAS 救援 VNC 用（SSH 免密优先） |
+| 杭州 ECS SSH | `ssh root@115.29.231.25` | Ubuntu 24.04.5，公钥已注入 |
+| 吉隆坡 SWAS SSH | `ssh -p 2222 root@47.250.130.52`（备用 22） | 密钥对 `gw-edge-2026`；Tailscale `ssh root@100.90.84.65`；**2026-10-02 起边缘角色已迁杭州，待退订** |
+
+### 杭州新 ECS（i-bp1bzxumftqasjq6nid5 · 99元/年 · 到期 2027-10-01）
+
+- 公网 `115.29.231.25`（安全组：22/443/80/8443/8388/8442 tcp + 3478/41641 udp）
+- Ubuntu 24.04.5，2C2G，Tailscale `hangzhou-ecs` = **100.81.214.95**（四桶全 direct：owin10 42ms / phone 72ms）
+- 服务：zen-lb(:7892) / cloudflared-tunnel(zen-gw, **必须 http2**) / caddy(:443,:80) / xray(:8443) / shadowsocks(:8388) / derper(:8442+STUN:3478) / tailscaled
+- derper 证书指纹：`sha256-raw:883ec3b90aaa75d463c0ee4db639064a57639014aeb531e650d963a55420dbaf`（Tailscale ACL derpMap region 901 已指向）
+- cloudflared DNS 坑：systemd-resolved 显式配 `223.5.5.5 + 1.1.1.1`（`/etc/systemd/resolved.conf.d/migrate.conf`），否则 argotunnel SRV 解析失败
 
 ## 7. Hermes 接入模板（各 Windows 桶通用）
 
