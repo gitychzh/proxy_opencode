@@ -387,8 +387,9 @@ async def test_responses_endpoint_streams_masked_events(tmp_path):
     assert resp.status_code == 200
     assert "response.completed" in resp.text
     assert "big-pickle" not in resp.text
-    # The adapter must have received the upstream model id.
-    assert app.state.adapter.last_payload["model"] == "opencode/big-pickle"
+    # The adapter must have received the upstream model id (bare id since the
+    # 2026-10-02 zen catalogue drift — see config.py).
+    assert app.state.adapter.last_payload["model"] == "big-pickle"
 
 
 @pytest.mark.asyncio

@@ -41,6 +41,10 @@ def make_router(
             result = await adapter.list_models()
         except (ConnectionError, httpx.HTTPError):
             return openai_error(502, "Cannot reach upstream models endpoint.")
+        except Exception:
+            # An unexpected adapter failure must degrade to a 502 envelope,
+            # never a bare 500 with a traceback-shaped body.
+            return openai_error(502, "Upstream models endpoint failed.")
         if isinstance(result, httpx.Response):
             try:
                 content = result.json()

@@ -105,7 +105,8 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
   - `POST /v1/messages`——Anthropic Messages 格式（**claude code** 直连，
     `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`），`x-api-key` 或 Bearer
 - **API key 有效期**（0.6.0 起）：
-  - 管理员 key：`api_ychzh22372222`（`ADMIN_API_KEYS`，**永久**，可管理 key）
+  - 管理员 key：由 `ADMIN_API_KEYS` 环境变量注入（**永久**，可管理 key）；
+    仓库内置默认值只是本地占位 `dev-admin-key`，**生产必须覆盖**
   - 存量 `GATEWAY_API_KEYS` 静态 key：永久（四桶配置向后兼容）
   - 新签发 key：默认 **24 小时**；`POST /admin/keys` 可自定义 TTL（0=永久）
   - 管理：`POST/GET/DELETE /admin/keys`（仅管理员 key；列表脱敏）

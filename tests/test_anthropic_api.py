@@ -267,6 +267,119 @@ async def test_stream_anthropic_tool_use_block():
 
 
 @pytest.mark.asyncio
+async def test_stream_anthropic_tool_name_arriving_late():
+    """Regression: a name streamed after the first delta used to be lost.
+
+    content_block_start is the only place a tool name may be published, so
+    the block must open lazily — after the name has accumulated — rather
+    than immediately with an empty name.
+    """
+    chunks = _sse_bytes(
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [{"index": 0, "id": "call_9", "function": {}}]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"index": 0, "function": {"name": "get_"}}
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"index": 0, "function": {"name": "weather"}}
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"index": 0, "function": {"arguments": "{\"c\":\"sf\"}"}}
+                            ]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ]
+    )
+    events = await _collect_events(chunks)
+    starts = [d for n, d in events if n == "content_block_start"]
+    assert len(starts) == 1, "the tool block must open exactly once"
+    assert starts[0]["content_block"]["name"] == "get_weather", (
+        "the published name must be the fully accumulated one"
+    )
+    deltas = [d["delta"]["partial_json"] for n, d in events if n == "content_block_delta"]
+    assert "".join(deltas) == "{\"c\":\"sf\"}"
+    # start must precede its delta and the delta must precede the stop
+    names = [n for n, _ in events]
+    assert names.index("content_block_start") < names.index("content_block_delta")
+    assert names.index("content_block_delta") < names.index("content_block_stop")
+
+
+@pytest.mark.asyncio
+async def test_stream_anthropic_two_tool_calls_get_distinct_blocks():
+    chunks = _sse_bytes(
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_a",
+                                    "function": {"name": "fa", "arguments": "{\"x\":1}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 1,
+                                    "id": "call_b",
+                                    "function": {"name": "fb", "arguments": "{\"y\":2}"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ]
+    )
+    events = await _collect_events(chunks)
+    starts = [d for n, d in events if n == "content_block_start"]
+    assert [s["content_block"]["name"] for s in starts] == ["fa", "fb"]
+    indexes = [s["index"] for s in starts]
+    assert indexes[0] != indexes[1], "each tool gets its own block index"
+
+
+@pytest.mark.asyncio
 async def test_content_block_stop_carries_only_index():
     """The Anthropic spec puts just type+index on content_block_stop."""
     chunks = _sse_bytes(
@@ -366,3 +479,29 @@ async def test_serve_completion_is_logged_exactly_once(tmp_path, caplog):
     ]
     assert len(completions) == 1
 
+
+
+@pytest.mark.asyncio
+async def test_stream_message_delta_carries_input_tokens():
+    """message_start can only announce 0 input tokens (usage is not known
+    yet), so the terminal message_delta must report the real counters —
+    otherwise a client's context accounting sees input_tokens=0 forever."""
+    chunks = _sse_bytes(
+        [
+            {"choices": [{"delta": {"content": "hi"}, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 1234,
+                    "completion_tokens": 7,
+                    "prompt_tokens_details": {"cached_tokens": 1000},
+                },
+            },
+        ]
+    )
+    events = await _collect_events(chunks)
+    delta_ev = [d for n, d in events if n == "message_delta"][0]
+    assert delta_ev["usage"]["output_tokens"] == 7
+    assert delta_ev["usage"]["input_tokens"] == 1234
+    assert delta_ev["usage"]["cache_read_input_tokens"] == 1000

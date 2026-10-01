@@ -52,9 +52,16 @@ def test_nonloopback_bind_requires_api_keys(monkeypatch):
     with pytest.raises(ValueError, match="GATEWAY_API_KEYS"):
         config.load_settings()
     monkeypatch.setenv("GATEWAY_API_KEYS", "k1,k2")
+    # The admin default is a *published* placeholder (public repo), so it must
+    # not be allowed to guard a network-exposed gateway either.
+    monkeypatch.delenv("ADMIN_API_KEYS", raising=False)
+    with pytest.raises(ValueError, match="ADMIN_API_KEYS"):
+        config.load_settings()
+    monkeypatch.setenv("ADMIN_API_KEYS", "adm1")
     s = config.load_settings()
     assert s.host == "0.0.0.0"
     assert not s.dev_open
+    assert s.admin_api_keys == ["adm1"]
 
 
 def test_loopback_bind_allows_dev_open(monkeypatch):
@@ -103,3 +110,29 @@ def test_upstream_trust_env_defaults_off(monkeypatch):
     assert config.load_settings().upstream_trust_env is False
     monkeypatch.setenv("UPSTREAM_TRUST_ENV", "1")
     assert config.load_settings().upstream_trust_env is True
+
+
+def test_admin_default_is_a_placeholder():
+    """This repo is PUBLIC: the built-in admin key must be an obvious fake.
+
+    A real value here would be a published credential that authenticates
+    against every gateway that did not override ADMIN_API_KEYS.
+    """
+    assert config.DEFAULT_ADMIN_API_KEYS == ("dev-admin-key",)
+
+
+def test_empty_bool_env_falls_back_to_default(monkeypatch):
+    """`set MASK_MODELS=` (empty) used to disable masking silently, which
+    leaked upstream model names. Empty now means "unset"."""
+    monkeypatch.setenv("MASK_MODELS", "")
+    assert config.load_settings().mask_models is True
+    monkeypatch.setenv("MASK_MODELS", "false")
+    assert config.load_settings().mask_models is False
+
+
+def test_builtin_public_models_use_env_parsing():
+    """The dataclass default must split identically to PUBLIC_MODELS."""
+    s = config.Settings()
+    assert s.public_models == config._parse_public_models(
+        ",".join(config.DEFAULT_PUBLIC_MODELS)
+    )

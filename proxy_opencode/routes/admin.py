@@ -10,6 +10,7 @@ never have to parse a 200 body to discover that its request failed.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -44,9 +45,16 @@ def make_router(settings: Settings, keystore: KeyStore) -> APIRouter:
                 "ttl_hours must be a number (0 = permanent).",
                 err_type="invalid_request_error",
             )
-        if ttl < 0:
+        # NaN compares False against every bound, so `ttl < 0` alone would let
+        # `{"ttl_hours": NaN}` slip through to the keystore — where
+        # `effective_ttl > 0` is also False and the key mints as *permanent*,
+        # silently defeating the default 24h expiry. Infinity overflows
+        # `timedelta(hours=...)` into a 500. Both are rejected outright.
+        if not math.isfinite(ttl) or ttl < 0:
             return openai_error(
-                400, "ttl_hours must be >= 0 (0 = permanent).", err_type="invalid_request_error"
+                400,
+                "ttl_hours must be a finite number >= 0 (0 = permanent).",
+                err_type="invalid_request_error",
             )
         record = keystore.create(name=name, ttl_hours=ttl)
         return {

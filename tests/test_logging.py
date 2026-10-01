@@ -105,7 +105,7 @@ async def test_auth_rejection_is_logged_without_token(caplog):
     from tests.test_gateway_routes import make_app
 
     app, _ = make_app()
-    with caplog.at_level(logging.WARNING, logger="proxy_opencode.security"):
+    with caplog.at_level(logging.WARNING, logger="proxy_opencode.auth"):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
@@ -158,10 +158,10 @@ class FakeStreamRelay:
 
 
 async def _collect_relay(relay):
-    from proxy_opencode.routes.chat import _relay
+    from proxy_opencode.routes._pipeline import relay_stream
 
     out = []
-    async for chunk in _relay(
+    async for chunk in relay_stream(
         relay.chunks(), relay.usage_holder, lambda status, usage=None: None,
         request_id="req1", model="m", client="127.0.0.1",
     ):
@@ -171,7 +171,7 @@ async def _collect_relay(relay):
 
 @pytest.mark.asyncio
 async def test_stream_relay_logs_completed(caplog):
-    with caplog.at_level(logging.INFO, logger="proxy_opencode.chat"):
+    with caplog.at_level(logging.INFO, logger="proxy_opencode.pipeline"):
         out = await _collect_relay(FakeStreamRelay())
     assert out == [b"a", b"b"]
     ended = [r for r in caplog.records if r.getMessage() == "stream ended"]
@@ -186,7 +186,7 @@ async def test_stream_relay_logs_completed(caplog):
 async def test_stream_relay_logs_upstream_midstream_failure(caplog):
     import httpx
 
-    with caplog.at_level(logging.INFO, logger="proxy_opencode.chat"):
+    with caplog.at_level(logging.INFO, logger="proxy_opencode.pipeline"):
         with pytest.raises(httpx.ReadError):
             await _collect_relay(FakeStreamRelay(exc=httpx.ReadError("mid-stream")))
     reasons = [r.reason for r in caplog.records if hasattr(r, "reason")]
@@ -201,13 +201,13 @@ async def test_stream_relay_logs_upstream_midstream_failure(caplog):
 
 @pytest.mark.asyncio
 async def test_stream_relay_logs_client_disconnect(caplog):
-    from proxy_opencode.routes.chat import _relay
+    from proxy_opencode.routes._pipeline import relay_stream
 
-    gen = _relay(
+    gen = relay_stream(
         FakeStreamRelay().chunks(), {}, lambda status, usage=None: None,
         request_id="req1", model="m", client="127.0.0.1",
     )
-    with caplog.at_level(logging.INFO, logger="proxy_opencode.chat"):
+    with caplog.at_level(logging.INFO, logger="proxy_opencode.pipeline"):
         await gen.__anext__()  # consume one chunk
         await gen.aclose()  # simulate client disconnect
     ended = [r for r in caplog.records if r.getMessage() == "stream ended"]

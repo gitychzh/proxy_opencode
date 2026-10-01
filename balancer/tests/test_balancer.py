@@ -12,13 +12,19 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import time
+from typing import Any, Awaitable, Callable, MutableMapping
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ["ZEN_LB_API_KEY"] = "lb-secret"
 os.environ["ZEN_LB_HEALTH_INTERVAL"] = "3600"
+# lb ships NO default admin key (a baked-in key in a public repo would be a
+# published credential, and it silently defeated the fail-closed design), so
+# the tests must configure one explicitly — exactly like a real deployment.
+os.environ["ZEN_LB_ADMIN_KEYS"] = "dev-admin-key"
 
 import httpx  # noqa: E402
 import pytest  # noqa: E402
@@ -30,7 +36,16 @@ import lb  # noqa: E402  # isort:skip
 
 SEEN: list[tuple[str, str, str]] = []
 RID_SEEN: list[str] = []
-ROUTES: dict[str, object] = {}
+# ASGI apps, mounted into httpx.ASGITransport by RoutedTransport below.
+ASGIApp = Callable[
+    [
+        MutableMapping[str, Any],
+        Callable[[], Awaitable[MutableMapping[str, Any]]],
+        Callable[[MutableMapping[str, Any]], Awaitable[None]],
+    ],
+    Awaitable[None],
+]
+ROUTES: dict[str, ASGIApp] = {}
 DEAD: set[str] = set()
 SLOW: dict[str, float] = {}
 # 桶对请求回 429：QUOTA_429 模拟 Zen 免费层额度耗尽（FreeUsageLimitError），
@@ -391,14 +406,14 @@ async def test_admin_key_mints_dynamic_key_and_it_calls_chat(tmp_path, monkeypat
         denied = await c.post("/admin/keys", json={},
                               headers={"Authorization": "Bearer lb-secret"})
         minted = await c.post("/admin/keys", json={"name": "phone", "ttl_hours": 24},
-                              headers={"Authorization": "Bearer api_ychzh22372222"})
+                              headers={"Authorization": "Bearer dev-admin-key"})
         assert denied.status_code == 401  # static key cannot manage keys
         assert minted.status_code == 200
         new_key = minted.json()["key"]
         assert new_key.startswith("gw-") and minted.json()["expires_at"]
 
         listing = await c.get("/admin/keys",
-                              headers={"Authorization": "Bearer api_ychzh22372222"})
+                              headers={"Authorization": "Bearer dev-admin-key"})
         assert listing.status_code == 200 and new_key not in listing.text
 
         chat = await call(app, key=new_key)
@@ -412,9 +427,9 @@ async def test_revoked_dynamic_key_rejected(tmp_path, monkeypatch):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://lb") as c:
         minted = (await c.post("/admin/keys", json={"ttl_hours": 1},
-                               headers={"Authorization": "Bearer api_ychzh22372222"})).json()
+                               headers={"Authorization": "Bearer dev-admin-key"})).json()
         rid = (await c.delete(f"/admin/keys/{minted['id']}",
-                              headers={"Authorization": "Bearer api_ychzh22372222"}))
+                              headers={"Authorization": "Bearer dev-admin-key"}))
         assert rid.status_code == 200
         resp = await call(app, key=minted["key"])
     assert resp.status_code == 401
@@ -435,11 +450,11 @@ async def test_expired_dynamic_key_rejected(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_admin_key_can_call_chat_and_admin_page():
     app = lb.create_app(two_upstream_pool())
-    resp = await call(app, key="api_ychzh22372222")
+    resp = await call(app, key="dev-admin-key")
     assert resp.status_code == 200
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://lb") as c:
-        page = await c.get("/admin", headers={"Authorization": "Bearer api_ychzh22372222"})
+        page = await c.get("/admin", headers={"Authorization": "Bearer dev-admin-key"})
     assert page.status_code == 200
 
 
@@ -492,7 +507,7 @@ async def test_admin_keys_unsupported_method_is_405():
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://lb") as c:
         r = await c.put("/admin/keys",
-                        headers={"Authorization": "Bearer api_ychzh22372222"})
+                        headers={"Authorization": "Bearer dev-admin-key"})
     assert r.status_code == 405
     assert SEEN == [], "an unsupported admin verb must never reach a bucket"
 
@@ -503,7 +518,93 @@ async def test_admin_keys_invalid_json_is_400():
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://lb") as c:
         r = await c.post("/admin/keys", content=b"{not json",
-                         headers={"Authorization": "Bearer api_ychzh22372222",
+                         headers={"Authorization": "Bearer dev-admin-key",
                                   "content-type": "application/json"})
     assert r.status_code == 400
 
+
+
+# ------------------------------------------------- fail-closed + disconnect
+
+
+@pytest.mark.asyncio
+async def test_lb_fails_closed_without_any_keys(monkeypatch):
+    """No admin/static key configured -> 503, never an open proxy.
+
+    lb ships no default admin key (a baked-in key in a PUBLIC repo is a
+    published credential). This test pins the fail-closed path that the
+    default used to make unreachable.
+    """
+    monkeypatch.setattr(lb, "LB_ADMIN_KEYS", [])
+    monkeypatch.setattr(lb, "LB_STATIC_KEYS", [])
+    resp = await call(lb.create_app(two_upstream_pool()))
+    assert resp.status_code == 503
+    assert resp.json()["error"]["type"] == "configuration_error"
+    assert SEEN == [], "a keyless LB must not forward anything"
+
+
+@pytest.mark.asyncio
+async def test_client_disconnect_does_not_cordon_bucket():
+    """A downstream hang-up is not an upstream failure.
+
+    Regression: the send loop counted a client disconnect as an upstream
+    error, so three aborted streams tripped HEALTH_FAIL_THRESHOLD and marked a
+    perfectly healthy bucket unhealthy.
+    """
+    pool = two_upstream_pool()
+    app = lb.create_app(pool)
+
+    scope = {
+        "type": "http", "method": "POST", "path": "/v1/chat/completions",
+        "headers": [(b"authorization", b"Bearer lb-secret"),
+                    (b"content-type", b"application/json")],
+        "query_string": b"", "client": ("127.0.0.1", 4321),
+    }
+    pending = json.dumps({"model": "m", "messages": []}).encode()
+
+    async def receive():
+        nonlocal pending
+        if pending:
+            body, pending = pending, b""
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    body_sends = 0
+
+    async def send(message):
+        nonlocal body_sends
+        if message["type"] == "http.response.body":
+            body_sends += 1
+            if body_sends >= 2:  # client vanished mid-stream
+                raise ConnectionResetError("client went away")
+
+    await app(scope, receive, send)
+
+    assert SEEN, "the request did reach a bucket"
+    for up in pool.upstreams:
+        assert up.healthy, "a client disconnect must not mark a bucket down"
+        assert up.consecutive_failures == 0
+        assert up.total_failures == 0
+
+
+def test_no_baked_in_default_keys():
+    """lb must not ship a default admin/static key.
+
+    This repo is PUBLIC, so a default key would be a published credential; it
+    would also make the fail-closed guards dead code. Verified in a clean
+    interpreter with every ZEN_LB_* variable removed.
+    """
+    balancer_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = {k: v for k, v in os.environ.items() if not k.startswith("ZEN_LB_")}
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, sys.argv[1]); import lb;"
+         "print(len(lb.LB_ADMIN_KEYS), len(lb.LB_STATIC_KEYS))",
+         balancer_dir],
+        capture_output=True, text=True, env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "0 0", (
+        f"lb must be fail-closed with no ZEN_LB_* configured, "
+        f"got {proc.stdout.strip()!r}"
+    )

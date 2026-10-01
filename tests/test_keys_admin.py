@@ -13,7 +13,7 @@ from proxy_opencode.auth.keystore import KeyStore
 from proxy_opencode.config import Settings
 from tests.test_gateway_routes import GW_HEADERS, FakeAdapter
 
-ADMIN_HEADERS = {"Authorization": "Bearer api_ychzh22372222"}
+ADMIN_HEADERS = {"Authorization": "Bearer dev-admin-key"}
 
 
 def make_store(tmp_path, records=None) -> KeyStore:
@@ -25,7 +25,7 @@ def make_app(tmp_path, **overrides):
     base = dict(
         upstream_mode="opencode-serve",
         gateway_api_keys=["gw-key"],
-        admin_api_keys=["api_ychzh22372222"],
+        admin_api_keys=["dev-admin-key"],
         key_store_path=str(tmp_path / "keys.json"),
         opencode_server_password="pw",
     )
@@ -54,6 +54,16 @@ def test_create_permanent_and_custom_ttl(tmp_path):
     assert perm.expires_at is None
     short = store.create(ttl_hours=1)
     assert short.expiry() - datetime.now(timezone.utc) <= timedelta(hours=1)
+
+
+def test_create_with_nan_ttl_does_not_mint_permanent(tmp_path):
+    """Defence in depth: NaN must fall back to the default TTL, never to
+    "permanent" (NaN compares False against every numeric bound)."""
+    store = make_store(tmp_path)
+    rec = store.create(ttl_hours=float("nan"))
+    assert rec.expires_at is not None
+    delta = rec.expiry() - datetime.now(timezone.utc)
+    assert delta <= timedelta(hours=24)
 
 
 def test_expired_key_not_valid(tmp_path):
@@ -233,6 +243,47 @@ async def test_admin_bad_ttl_returns_400_not_200(tmp_path):
             r = await client.post("/admin/keys", json=bad, headers=ADMIN_HEADERS)
             assert r.status_code == 400, bad
             assert r.json()["error"]["type"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_admin_nan_ttl_rejected(tmp_path):
+    """Regression: NaN slips every numeric bound and minted a PERMANENT key.
+
+    `float("nan") < 0` and `> 0` are both False, so the old `ttl < 0` check
+    passed it to the keystore where `effective_ttl > 0` was also False ->
+    `expires_at=None` -> a key that never expires. httpx refuses to serialise
+    non-finite floats, so the raw bodies carry the JSON literals directly.
+    """
+    app = make_app(tmp_path)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        r = await client.post(
+            "/admin/keys",
+            content=b'{"ttl_hours": NaN}',
+            headers={**ADMIN_HEADERS, "content-type": "application/json"},
+        )
+        assert r.status_code == 400
+    # And nothing permanent was minted behind the gateway's back.
+    records = app.state.keystore.list()
+    assert all(rec.expires_at is not None for rec in records)
+
+
+@pytest.mark.asyncio
+async def test_admin_infinite_ttl_rejected_400_not_500(tmp_path):
+    """Regression: `timedelta(hours=inf)` raised OverflowError -> HTTP 500."""
+    app = make_app(tmp_path)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        for bad in (b'{"ttl_hours": Infinity}', b'{"ttl_hours": -Infinity}',
+                    b'{"ttl_hours": 1e309}'):
+            r = await client.post(
+                "/admin/keys",
+                content=bad,
+                headers={**ADMIN_HEADERS, "content-type": "application/json"},
+            )
+            assert r.status_code == 400, bad
 
 
 @pytest.mark.asyncio

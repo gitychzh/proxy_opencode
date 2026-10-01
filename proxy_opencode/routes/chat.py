@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import time
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, Request
@@ -30,6 +28,7 @@ from ._pipeline import (
     new_call,
     openai_error_factory,
     parse_json_object,
+    relay_stream,
 )
 
 logger = logging.getLogger("proxy_opencode.chat")
@@ -72,7 +71,7 @@ def make_router(
             if registry.enabled:
                 chunks_iter = mask_model_field(chunks_iter, call.public_model)
             return StreamingResponse(
-                _relay(
+                relay_stream(
                     chunks_iter,
                     result.usage_holder,
                     lambda status, usage=None: call.log(logger, status, usage),
@@ -87,7 +86,12 @@ def make_router(
         if is_error_relay(result):  # relayed upstream error, original status
             status = int(result["__status__"])
             call.log(logger, status)
-            return JSONResponse(status_code=status, content=result["content"])
+            # The upstream error body must pass the same masking as a success
+            # body: a 4xx/5xx payload can still name the upstream model.
+            content = result["content"]
+            if registry.enabled and isinstance(content, dict):
+                content = mask_json_model(content, call.public_model)
+            return JSONResponse(status_code=status, content=content)
         if isinstance(result, dict):  # openai passthrough non-stream JSON
             if registry.enabled:
                 mask_json_model(result, call.public_model)
@@ -141,61 +145,3 @@ def _synthetic_stream(model: str, response: dict[str, Any]) -> StreamingResponse
             "X-Opencode-Serve-Synthetic-Stream": "true",
         },
     )
-
-
-async def _relay(
-    chunks: AsyncIterator[bytes],
-    usage_holder: dict[str, Any],
-    log: Any,
-    *,
-    request_id: str,
-    model: str,
-    client: str,
-) -> AsyncIterator[bytes]:
-    """Relay upstream SSE bytes to the client with stream lifecycle logging.
-
-    Every stream terminates with a "stream ended" record — including the
-    abnormal ends (client disconnect, upstream mid-stream failure) that
-    would otherwise vanish silently from the logs.
-    """
-    started = time.perf_counter()
-    chunks_count = 0
-    ttfb_ms: float | None = None
-    reason = "completed"
-    try:
-        async for chunk in chunks:
-            if ttfb_ms is None:
-                ttfb_ms = round((time.perf_counter() - started) * 1000, 1)
-            chunks_count += 1
-            yield chunk
-        log(200, usage_holder.get("usage"))
-    except (asyncio.CancelledError, GeneratorExit):
-        reason = "client_disconnected"
-        raise
-    except Exception as exc:
-        reason = f"relay_error:{type(exc).__name__}"
-        logger.exception(
-            "stream relay failed",
-            extra={
-                "request_id": request_id,
-                "model": model,
-                "client": client,
-                "chunks": chunks_count,
-                "reason": reason,
-                "error_detail": str(exc)[:200],
-            },
-        )
-        raise
-    finally:
-        logger.info(
-            "stream ended",
-            extra={
-                "request_id": request_id,
-                "model": model,
-                "client": client,
-                "chunks": chunks_count,
-                "ttfb_ms": ttfb_ms,
-                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
-                "reason": reason,
-            },
-        )

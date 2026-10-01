@@ -26,6 +26,7 @@ from ..formats.responses_proto import (
     to_chat_payload,
 )
 from ..registry import ModelRegistry
+from ..sse_mask import mask_json_model
 from ..upstreams.openai_http import StreamRelay
 from ..upstreams.opencode_serve import ServeCompletion, completion_to_chat_response
 from ._pipeline import (
@@ -34,6 +35,7 @@ from ._pipeline import (
     new_call,
     openai_error_factory,
     parse_json_object,
+    relay_stream,
 )
 
 logger = logging.getLogger("proxy_opencode.responses")
@@ -75,9 +77,15 @@ def make_router(
             return result
 
         if isinstance(result, StreamRelay):
-            call.log(logger, 200)
             return StreamingResponse(
-                stream_responses_events(result.chunks(), call.public_model),
+                relay_stream(
+                    stream_responses_events(result.chunks(), call.public_model),
+                    result.usage_holder,
+                    lambda status, usage=None: call.log(logger, status, usage),
+                    request_id=call.request_id,
+                    model=call.upstream_model,
+                    client=call.client,
+                ),
                 status_code=200,
                 media_type="text/event-stream",
                 headers=_SSE_HEADERS,
@@ -85,7 +93,12 @@ def make_router(
         if is_error_relay(result):
             status = int(result["__status__"])
             call.log(logger, status)
-            return JSONResponse(status_code=status, content=result["content"])
+            # Same masking contract as the chat route: an upstream error body
+            # must not smuggle the upstream model identity to the client.
+            content = result["content"]
+            if registry.enabled and isinstance(content, dict):
+                content = mask_json_model(content, call.public_model)
+            return JSONResponse(status_code=status, content=content)
         if isinstance(result, ServeCompletion):
             result = completion_to_chat_response(call.upstream_model, result)
         if isinstance(result, dict):

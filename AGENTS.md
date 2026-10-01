@@ -105,6 +105,12 @@ SSE 透传，死桶自动跳过。配置模板见 `balancer/run.cmd.example`，�
   已用本机 opencode.db 真机「ID/时间戳」配对逐对验证。
 - 匿名免费层：无密钥时 models 目录中 cost>0 的模型不可用，免费模型
   （如 big-pickle）`allowAnonymous`。免费额度按出口 IP、按 UTC 日限流。
+- **模型 ID 已去前缀（2026-10-02 实测）**：Zen 目录（`GET /zen/v1/models`）
+  现返回裸 ID（`big-pickle`、`space-bunny-free` 等）；旧拼写
+  `opencode/big-pickle` 已失效（401 `ModelError`）。zen-direct 的默认映射
+  随之改为裸 ID（`DEFAULT_ZEN_MODELS` / `DEFAULT_PUBLIC_MODELS`）；
+  `opencode-serve` 模式仍用 opencode 内部 `provider/model` 命名空间，勿混。
+  以后怀疑漂移时先 `GET https://opencode.ai/zen/v1/models` 对账。
 - 桥接说明（`_BRIDGE_NOTE`）要求模型只用客户端工具——实测模型正确调用
   客户端自定义工具而不碰内置工具（hermes e2e：write-file/ls/read 全过）。
 

@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.6.3] - 2026-10-02
+
+第二轮系统性审计（安全 + 协议正确性 + 上游漂移）。所有修复均带回归测试；
+网关 159 → 165 项、LB 33 项、协议级 e2e 32 项全绿；ruff 与 mypy 干净。
+
+### Security — 公开仓库凭据清零（严重）
+
+- **真实凭据从仓库移除**：`docs/ACCESS.md` 曾包含云账号 AccessKey、
+  Cloudflare Global API Key、ECS/SWAS root 密码与本机密码；
+  `config.py` / `balancer/lb.py` 曾硬编码真实默认 admin key；CONTRIBUTING
+  的"私有仓库明文例外"前提不成立（仓库实为 PUBLIC）。全部改为占位符 +
+  "去仓库外 `scripts_local/secrets.env` 取"，新增 §9 凭据轮换清单。
+- **CI 守卫 `tests/test_no_secrets.py`**：结构性正则扫描全部 git 跟踪文件，
+  拦截 `LTAI…` / `cfk_…` / `api_<lower><digits>` / `gw-lb-…` / 私钥块等。
+- **默认凭据 fail-closed**：网关 `ADMIN_API_KEYS` 默认改为本地开发占位符
+  `dev-admin-key` 且非回环绑定时强制显式配置；LB `ZEN_LB_ADMIN_KEYS` 默认
+  改为**空**（原默认值使 fail-closed 守卫与 503 分支沦为死代码），
+  `ZEN_LB_API_KEY` 未设置时 LB 拒绝一切请求。
+- **恒定时间密钥比较**：静态 key 集合与动态 keystore 的比对全部改用
+  `hmac.compare_digest`。
+
+### Fixed — 逻辑与协议正确性
+
+- **`/admin/keys` 的 `ttl_hours: NaN` 铸出永久 key（严重）**：NaN 与任何
+  数值比较均为 False，绕过 `ttl < 0` 与 `effective_ttl > 0` 两道判断 →
+  `expires_at=None`。`Infinity` 则使 `timedelta(hours=inf)` 抛
+  `OverflowError` → 500。现统一要求有限数（`math.isfinite`），keystore 侧
+  非有限 TTL 回落默认 24h 兜底。
+- **上游模型 ID 去前缀漂移（2026-10-02 实测）**：Zen 目录改用裸 ID
+  （`big-pickle`），旧拼写 `opencode/big-pickle` 401 `ModelError`。
+  zen-direct 默认映射同步改为裸 ID；`opencode-serve`（本地 opencode 命名
+  空间）保持 `provider/model` 不变。
+- **Anthropic 流式 tool_use 块惰性开启**：`content_block_start` 是工具名
+  唯一可发布点，旧实现收到首个 delta 立即开块，晚到/分片的 `function.name`
+  只保留首段甚至为空，客户端拿到无名工具调用。现累积名字、在首个参数增量
+  到达时才开块，流结束兜底冲刷未开启槽位。
+- **流式 usage 抓取跨 chunk 失效**：`StreamRelay` 逐网络 chunk 做
+  `json.loads`，`data:` 行被 TCP 分片切开即静默丢弃。改为行缓冲扫描，
+  字节仍逐字透传。
+- **三协议统一流式生命周期日志**：`/v1/responses`、`/v1/messages` 的流式
+  分支此前在流开始前就记 200（latency 只到首字节、无 usage、中途失败无
+  日志）。`_relay` 上移为 `_pipeline.relay_stream`，三条路由共用；客户端
+  断连时显式 `aclose()` 内层生成器，及时释放上游连接。
+- **错误中继体过掩码**：上游 4xx/5xx 错误体原样回传可能夹带上游模型名，
+  现与成功体同样过 `mask_json_model`。
+- **SSE 泄漏名独立键形态**：`{"name":"Space Bunny"}`（无相邻逗号）此前
+  两种逗号锚定的正则都匹配不到，现兜底清空值。
+- **`GET /v1/models` 异常面收窄**：适配器意外异常不再裸 500，统一 502
+  信封。
+- **e2e 断言修正**：`preserves tool function names` 检查原先跑在未带
+  `tools` 的请求上（场景不成立恒失败），现改在带工具的流式请求上验证
+  `function.name` 存活且泄漏名被清。
+
+### Tests
+
+- 新增回归：NaN/Infinity TTL（路由层 + keystore 层）、Anthropic 工具名
+  晚到/分片累积、双工具调用独立块索引、泄漏名独立键、恒定时间比较下的
+  key 生命周期、LB 无 key fail-closed、客户端断连不计熔断、payload dump
+  关闭断言锚定真实目录、限流突发测试真并发化（asyncio.gather）、
+  caplog logger 名修正（`proxy_opencode.auth`）。
+
 ## [0.6.2] - 2026-09-30
 
 一轮系统性缺陷排查与工程化重构（逻辑 / 代码 / 部署 / 使用四面）。所有修复
@@ -183,7 +244,7 @@
 - **API key 有效期（`auth/` 包）**：新增动态 key 存储（JSON 原子写持久化），
   通过管理接口签发的 key 默认 **24 小时**有效（`KEY_DEFAULT_TTL_HOURS`），
   支持自定义 TTL 与 `ttl_hours: 0` 永久；到期/吊销立即失效并记审计日志。
-  `ADMIN_API_KEYS`（默认 `api_ychzh22372222`）永久有效；存量
+  `ADMIN_API_KEYS`（默认 `dev-admin-key` 本地占位）永久有效；存量
   `GATEWAY_API_KEYS` 静态 key 保持永久（四桶配置向后兼容）。
 - **管理接口**：`POST /admin/keys`（签发）、`GET /admin/keys`（列表，脱敏）、
   `DELETE /admin/keys/{id}`（吊销），仅管理员 key 可用。

@@ -15,25 +15,39 @@ UPSTREAM_MODES = ("openai", "opencode-serve", "zen-direct")
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
-# zen model ids are "provider/model", e.g. "opencode/big-pickle".
+# Model id namespaces differ per mode:
+#   - zen-direct talks to opencode.ai, whose catalogue switched to BARE ids
+#     on 2026-10-02 ("big-pickle"); the historical "opencode/big-pickle"
+#     spelling now answers 401 ModelError ("Model ... is not supported").
+#   - opencode-serve drives a local `opencode serve`, which still uses the
+#     opencode-internal "provider/model" ids.
 DEFAULT_SERVE_MODELS = ("opencode/big-pickle",)
-DEFAULT_ZEN_MODELS = ("opencode/big-pickle",)
+DEFAULT_ZEN_MODELS = ("big-pickle",)
 
 # Public-facing model catalogue. Entries are "id:display_name:upstream".
 # Users only ever see `id`; upstream is resolved server-side and scrubbed
 # from every response (JSON bodies and streamed SSE chunks alike).
-DEFAULT_PUBLIC_MODELS = ("ds41f_cus:DeepSeek V4.1 Flash:opencode/big-pickle",)
+# The default upstream must stay in sync with the live zen catalogue
+# (GET https://opencode.ai/zen/v1/models) — see the 2026-10-02 drift note
+# in CHANGELOG.md.
+DEFAULT_PUBLIC_MODELS = ("ds41f_cus:DeepSeek V4.1 Flash:big-pickle",)
 
 # Admin API keys: permanent, can manage the dynamic key store via /admin/*.
-DEFAULT_ADMIN_API_KEYS = ("api_ychzh22372222",)
+# This is a clearly-fake LOCAL DEV placeholder, never a real credential (see
+# SECURITY.md: no key may ever be committed). Production deployments MUST set
+# ADMIN_API_KEYS explicitly; otherwise anyone who reads this repo knows the
+# admin key of every gateway that kept the default.
+DEFAULT_ADMIN_API_KEYS = ("dev-admin-key",)
 
 
 def _default_public_models() -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
-    for part in DEFAULT_PUBLIC_MODELS:
-        mid, display, upstream = (p.strip() for p in part.split(":", 2))
-        out.append({"id": mid, "display_name": display, "upstream": upstream})
-    return out
+    """Dataclass default factory — same parsing rules as PUBLIC_MODELS.
+
+    Delegates to `_parse_public_models` so a built-in display name containing
+    a colon is split exactly like an env-supplied one (the old `split(":", 2)`
+    disagreed with the env path and silently moved the colon into `upstream`).
+    """
+    return _parse_public_models(",".join(DEFAULT_PUBLIC_MODELS))
 
 # Client fingerprint constants observed in a genuine opencode 1.18.32 capture
 # (mitm, 2026-09). Kept as defaults so the zen-direct adapter speaks the same
@@ -182,10 +196,16 @@ def _parse_public_models(value: str) -> list[dict[str, str]]:
 
 
 def _env_bool(name: str, default: bool) -> bool:
+    """Parse a boolean env var; unset OR empty means "use the default".
+
+    Treating an empty value as False was a footgun: `set MASK_MODELS=` in a
+    .cmd/.env file silently turned model masking off, leaking upstream model
+    names. Write an explicit `false`/`0`/`no` to disable a flag.
+    """
     raw = os.environ.get(name)
-    if raw is None:
+    if raw is None or not raw.strip():
         return default
-    return raw.strip().lower() in ("1", "true", "yes")
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def _validate_serve_url(url: str, password: str) -> None:
@@ -222,12 +242,25 @@ def load_settings() -> Settings:
         serve_models = list(DEFAULT_SERVE_MODELS)
     host = os.environ.get("HOST", "127.0.0.1").strip().lower()
     gateway_api_keys = _csv(os.environ.get("GATEWAY_API_KEYS", ""))
-    if host not in LOOPBACK_HOSTS and not gateway_api_keys:
-        raise ValueError(
-            f"Binding a non-loopback host ({host!r}) without GATEWAY_API_KEYS "
-            "would expose an unauthenticated OpenAI-compatible proxy to the "
-            "network; set GATEWAY_API_KEYS first"
-        )
+    admin_api_keys = _csv(os.environ.get("ADMIN_API_KEYS", ""))
+    if host not in LOOPBACK_HOSTS:
+        if not gateway_api_keys:
+            raise ValueError(
+                f"Binding a non-loopback host ({host!r}) without GATEWAY_API_KEYS "
+                "would expose an unauthenticated OpenAI-compatible proxy to the "
+                "network; set GATEWAY_API_KEYS first"
+            )
+        # The built-in admin default is a *published* local-dev placeholder
+        # (this repo is public), so it must never guard a network-exposed
+        # gateway: anyone could then mint API keys. Loopback keeps the
+        # convenience default; anything else must be configured explicitly.
+        if not admin_api_keys:
+            raise ValueError(
+                f"Binding a non-loopback host ({host!r}) without ADMIN_API_KEYS "
+                "would leave the built-in placeholder ('dev-admin-key') as the "
+                "admin key, and that value is public. Set ADMIN_API_KEYS "
+                "explicitly (or bind 127.0.0.1 for local development)."
+            )
     public_models = _parse_public_models(
         os.environ.get(
             "PUBLIC_MODELS", ",".join(DEFAULT_PUBLIC_MODELS)
@@ -254,8 +287,7 @@ def load_settings() -> Settings:
         ).rstrip("/"),
         upstream_api_key=os.environ.get("UPSTREAM_API_KEY", ""),
         gateway_api_keys=gateway_api_keys,
-        admin_api_keys=_csv(os.environ.get("ADMIN_API_KEYS", ""))
-        or list(DEFAULT_ADMIN_API_KEYS),
+        admin_api_keys=admin_api_keys or list(DEFAULT_ADMIN_API_KEYS),
         key_store_path=os.environ.get("KEY_STORE_PATH", "keys.json"),
         key_default_ttl_hours=float(os.environ.get("KEY_DEFAULT_TTL_HOURS", "24")),
         mask_models=_env_bool("MASK_MODELS", True),

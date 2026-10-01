@@ -32,6 +32,7 @@ from ._pipeline import (
     is_error_relay,
     new_call,
     parse_json_object,
+    relay_stream,
 )
 
 logger = logging.getLogger("proxy_opencode.anthropic")
@@ -126,9 +127,15 @@ def make_router(
             return result
 
         if isinstance(result, StreamRelay):
-            call.log(logger, 200)
             return StreamingResponse(
-                stream_anthropic_events(result.chunks(), call.public_model),
+                relay_stream(
+                    stream_anthropic_events(result.chunks(), call.public_model),
+                    result.usage_holder,
+                    lambda status, usage=None: call.log(logger, status, usage),
+                    request_id=call.request_id,
+                    model=call.upstream_model,
+                    client=call.client,
+                ),
                 status_code=200,
                 media_type="text/event-stream",
                 headers=_SSE_HEADERS,

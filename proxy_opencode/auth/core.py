@@ -8,6 +8,7 @@ Key classes, in evaluation order:
 
 from __future__ import annotations
 
+import hmac
 import logging
 
 from fastapi import Request
@@ -17,6 +18,17 @@ from ..errors import GatewayHttpError
 from .keystore import KeyStore
 
 logger = logging.getLogger("proxy_opencode.auth")
+
+
+def _key_in(token: str, keys) -> bool:
+    """Constant-time membership test for static key collections."""
+    for candidate in keys or []:
+        try:
+            if hmac.compare_digest(token, candidate):
+                return True
+        except TypeError:
+            continue
+    return False
 
 
 def _bearer_token(request: Request) -> str:
@@ -68,9 +80,9 @@ def classify_key(
     """
     if not token:
         return "none", False
-    if token in (settings.admin_api_keys or []):
+    if _key_in(token, settings.admin_api_keys):
         return "admin", True
-    if token in (settings.gateway_api_keys or []):
+    if _key_in(token, settings.gateway_api_keys):
         return "static", True
     if keystore is not None:
         record = keystore.validate(token)
@@ -119,7 +131,7 @@ def build_admin_dependency(settings):
 
     async def require_admin_key(request: Request) -> str:
         token = _bearer_token(request)
-        if not token or token not in (settings.admin_api_keys or []):
+        if not token or not _key_in(token, settings.admin_api_keys):
             raise _reject("admin_key_required", request)
         return token
 

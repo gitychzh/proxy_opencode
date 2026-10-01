@@ -13,13 +13,14 @@ error mapping was maintained three times.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, AsyncIterator, Callable
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -77,7 +78,13 @@ def _protocol_slug(path: str) -> str:
 
 
 def _dump_payload(directory: str, path: str, body: dict[str, Any]) -> None:
-    """Persist one raw client body for offline bloat auditing (best-effort)."""
+    """Persist one raw client body for offline bloat auditing (best-effort).
+
+    NOTE: this writes full request bodies (prompts included) to disk. It is
+    off unless PAYLOAD_DUMP_DIR is set, and it deliberately bypasses the
+    logging red line (nothing is written to the logs) — treat the dump
+    directory as sensitive and keep it off production buckets.
+    """
     try:
         dump_dir = Path(directory)
         dump_dir.mkdir(parents=True, exist_ok=True)
@@ -86,7 +93,10 @@ def _dump_payload(directory: str, path: str, body: dict[str, Any]) -> None:
         (dump_dir / name).write_text(
             json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        files = sorted(dump_dir.glob("*.json"))
+        # Prune oldest-first by mtime: the filename only carries HHMMSS, so
+        # sorting names would delete the wrong files as soon as the dump
+        # directory spans more than one day.
+        files = sorted(dump_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
         for old in files[: max(0, len(files) - _DUMP_KEEP)]:
             old.unlink(missing_ok=True)
     except OSError:
@@ -196,3 +206,76 @@ async def dispatch(
 def is_error_relay(result: Any) -> bool:
     """True when an adapter returned a relayed upstream error body."""
     return isinstance(result, dict) and "__status__" in result
+
+
+async def relay_stream(
+    chunks: AsyncIterator[bytes],
+    usage_holder: dict[str, Any],
+    log: Any,
+    *,
+    request_id: str,
+    model: str,
+    client: str,
+) -> AsyncIterator[bytes]:
+    """Relay upstream SSE bytes to the client with stream lifecycle logging.
+
+    Every stream terminates with a "stream ended" record — including the
+    abnormal ends (client disconnect, upstream mid-stream failure) that
+    would otherwise vanish silently from the logs. All three protocol
+    routes wrap their streaming responses in this so the completion record
+    carries real latency, chunk count and (when captured) usage.
+
+    On client disconnect the inner generator is closed explicitly so the
+    upstream response is released deterministically instead of waiting for
+    GC.
+    """
+    started = time.perf_counter()
+    chunks_count = 0
+    ttfb_ms: float | None = None
+    reason = "completed"
+    try:
+        async for chunk in chunks:
+            if ttfb_ms is None:
+                ttfb_ms = round((time.perf_counter() - started) * 1000, 1)
+            chunks_count += 1
+            yield chunk
+        log(200, usage_holder.get("usage"))
+    except (asyncio.CancelledError, GeneratorExit):
+        reason = "client_disconnected"
+        # Release the upstream deterministically. `chunks` is annotated as an
+        # AsyncIterator but every caller passes an async generator, which
+        # carries `aclose()`.
+        aclose = getattr(chunks, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:
+                pass
+        raise
+    except Exception as exc:
+        reason = f"relay_error:{type(exc).__name__}"
+        logger.exception(
+            "stream relay failed",
+            extra={
+                "request_id": request_id,
+                "model": model,
+                "client": client,
+                "chunks": chunks_count,
+                "reason": reason,
+                "error_detail": str(exc)[:200],
+            },
+        )
+        raise
+    finally:
+        logger.info(
+            "stream ended",
+            extra={
+                "request_id": request_id,
+                "model": model,
+                "client": client,
+                "chunks": chunks_count,
+                "ttfb_ms": ttfb_ms,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                "reason": reason,
+            },
+        )

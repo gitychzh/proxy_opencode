@@ -352,21 +352,35 @@ async def stream_anthropic_events(
                 idx = int(tc_delta.get("index") or 0)
                 slot = st.tool_blocks.get(idx)
                 if slot is None:
-                    fn = tc_delta.get("function") or {}
                     slot = {
                         "id": str(tc_delta.get("id") or _new_id("toolu")),
-                        "name": str(fn.get("name") or ""),
-                        "block_index": 0,
+                        "name": "",
+                        "started": False,
+                        "block_index": -1,
                     }
+                    st.tool_blocks[idx] = slot
+                fn = tc_delta.get("function") or {}
+                # The function name may arrive split across deltas; accumulate
+                # it while the block is unannounced — content_block_start is
+                # the only place a tool name may be carried and can never be
+                # amended afterwards.
+                if fn.get("name") and not slot["started"]:
+                    slot["name"] += str(fn["name"])
+                # Open the block lazily, on the first argument fragment. This
+                # keeps accumulating the name for as long as possible so
+                # content_block_start never goes out with a partial or empty
+                # name; a tool that never receives arguments is flushed at
+                # end-of-stream below.
+                if not slot["started"] and fn.get("arguments"):
                     async for ev in close_open_block():
                         yield ev
                     slot["block_index"] = st.next_block()
                     st.open_type = "tool"
-                    st.tool_blocks[idx] = slot
+                    slot["started"] = True
                     yield _event(
                         "content_block_start",
                         {
-                            "index": st.block_index,
+                            "index": slot["block_index"],
                             "content_block": {
                                 "type": "tool_use",
                                 "id": slot["id"],
@@ -375,10 +389,12 @@ async def stream_anthropic_events(
                             },
                         },
                     )
-                fn = tc_delta.get("function") or {}
-                if fn.get("name") and not slot["name"]:
-                    slot["name"] += fn["name"]
-                if fn.get("arguments"):
+                if slot["started"] and fn.get("arguments"):
+                    # NOTE: when an upstream interleaves argument fragments of
+                    # two already-open tool calls, Anthropic has no way to
+                    # express two open blocks at once; SDKs accumulate deltas
+                    # by `index`, so routing the delta to its own block index
+                    # is the least-lossy behaviour.
                     yield _event(
                         "content_block_delta",
                         {
@@ -393,6 +409,27 @@ async def stream_anthropic_events(
     async for ev in close_open_block():
         yield ev
 
+    # Tool slots that never received a name or arguments (degenerate upstream
+    # deltas) still get an empty block so the emitted content list matches the
+    # upstream's tool_calls count.
+    for slot in st.tool_blocks.values():
+        if not slot["started"]:
+            slot["block_index"] = st.next_block()
+            slot["started"] = True
+            yield _event(
+                "content_block_start",
+                {
+                    "index": slot["block_index"],
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": slot["id"],
+                        "name": slot["name"],
+                        "input": {},
+                    },
+                },
+            )
+            yield _event("content_block_stop", {"index": slot["block_index"]})
+
     usage = _chat_usage(st.usage)
     finish = st.finish_reason or "stop"
     stop_reason = (
@@ -400,11 +437,15 @@ async def stream_anthropic_events(
     )
     if st.tool_blocks:
         stop_reason = "tool_use"
+    # `message_start` runs before the upstream has reported usage, so it can
+    # only announce 0 input tokens. The real counters are known by the end of
+    # the stream, so the terminal message_delta must carry them — otherwise a
+    # client's context accounting sees input_tokens=0 for every streamed turn.
     yield _event(
         "message_delta",
         {
             "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-            "usage": {"output_tokens": usage["output_tokens"]},
+            "usage": usage,
         },
     )
     yield _event("message_stop", {})

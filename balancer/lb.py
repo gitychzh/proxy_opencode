@@ -10,7 +10,7 @@ cannot vary proxy_set_header per upstream server.
 Key model (v0.6.0):
   * user -> LB:  ZEN_LB_ADMIN_KEYS (permanent, can manage /admin/*) plus
                  dynamic keys from the JSON store (default 24h, 0=permanent)
-  * LB -> bucket: one shared bucket key (api_local22372222) for all buckets;
+  * LB -> bucket: one shared bucket key (ZEN_LB_BUCKET_KEY) for all buckets;
                  the dynamic-key store lives ONLY here, so keys minted at the
                  edge work across every bucket.
 
@@ -47,9 +47,15 @@ LOG_PATH = os.environ.get("ZEN_LB_LOG") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "logs", "lb.log")
 LB_KEY = os.environ.get("ZEN_LB_API_KEY", "")
 # Permanent admin keys (manage /admin/*, also valid for chat calls).
+#
+# NO built-in default: this file is in a PUBLIC repo, so a baked-in key would
+# be a published credential — and it also silently disabled the fail-closed
+# design (AGENTS.md: "ZEN_LB_API_KEY 未设置时 LB fail-closed 拒绝一切请求";
+# main() refuses a non-loopback bind without keys, and app() answers 503 when
+# both key sets are empty). An empty default makes those guards live again.
+# Set ZEN_LB_ADMIN_KEYS (comma-separated) in the deployment environment.
 LB_ADMIN_KEYS = [k for k in (
-    p.strip() for p in os.environ.get(
-        "ZEN_LB_ADMIN_KEYS", "api_ychzh22372222").split(",")) if k]
+    p.strip() for p in os.environ.get("ZEN_LB_ADMIN_KEYS", "").split(",")) if k]
 # Extra static permanent keys (back-compat: ZEN_LB_API_KEY joins this set).
 LB_STATIC_KEYS = [k for k in (p.strip() for p in
                   os.environ.get("ZEN_LB_API_KEYS", "").split(",")) if k]
@@ -91,6 +97,18 @@ HOP_BY_HOP = frozenset({
 })
 
 RETRYABLE_STATUS = frozenset({502, 503, 504})
+
+
+class ClientGone(Exception):
+    """The downstream client vanished mid-response.
+
+    Deliberately distinct from an upstream failure: a client that closes the
+    connection (Ctrl-C on a long stream, a timeout on its side, a mobile
+    network drop) says nothing about bucket health. Counting it as a failure
+    used to trip HEALTH_FAIL_THRESHOLD and cordon a perfectly healthy bucket
+    after three disconnects.
+    """
+
 
 logger = logging.getLogger("zen_lb")
 
@@ -421,6 +439,18 @@ def response_headers(raw_headers: list[tuple[bytes, bytes]]) -> list[tuple[bytes
     return [(n, v) for n, v in raw_headers if n.decode("latin-1").lower() not in skip]
 
 
+async def _asgi_send(send: Any, message: dict[str, Any]) -> None:
+    """Send one ASGI message, translating a send failure into ClientGone.
+
+    An exception out of `send` means the transport to the client is gone
+    (uvicorn raises on a closed connection); it is never an upstream fault.
+    """
+    try:
+        await send(message)
+    except Exception as exc:  # noqa: BLE001 - re-raised as a typed sentinel
+        raise ClientGone(f"{type(exc).__name__}: {exc}") from exc
+
+
 async def read_body(receive: Any) -> bytes:
     chunks: list[bytes] = []
     while True:
@@ -662,14 +692,17 @@ def create_app(pool: Pool) -> Any:
                     continue
                 out_headers = response_headers(resp.headers.raw) + [
                     (b"x-request-id", rid.encode())]
-                await send({"type": "http.response.start", "status": resp.status_code,
-                            "headers": out_headers})
                 streamed = True
+                await _asgi_send(send, {
+                    "type": "http.response.start", "status": resp.status_code,
+                    "headers": out_headers})
                 async for chunk in resp.aiter_raw():
                     if chunk:
-                        await send({"type": "http.response.body", "body": chunk,
-                                    "more_body": True})
-                await send({"type": "http.response.body", "body": b"", "more_body": False})
+                        await _asgi_send(send, {
+                            "type": "http.response.body", "body": chunk,
+                            "more_body": True})
+                await _asgi_send(send, {
+                    "type": "http.response.body", "body": b"", "more_body": False})
                 total_ms = (time.perf_counter() - t0) * 1000
                 await pool.release(up, True, total_ms)
                 # Full-chain observability (2026-09-30): ttfb covers
@@ -679,6 +712,13 @@ def create_app(pool: Pool) -> Any:
                 logger.info("rid=%s lb %s %s -> %s status=%d attempt=%d "
                             "ttfb=%.0fms total=%.0fms", rid, method, path,
                             up.name, resp.status_code, tried, ttfb_ms, total_ms)
+                return
+            except ClientGone as exc:
+                # Downstream hung up. The bucket did nothing wrong, so release
+                # it as healthy and stop: there is nobody left to answer.
+                await pool.release(up, True, (time.perf_counter() - t0) * 1000)
+                logger.info("rid=%s client disconnected mid-response from %s (%s)",
+                            rid, up.name, exc)
                 return
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
                     httpx.WriteTimeout, httpx.RemoteProtocolError, httpx.PoolTimeout) as exc:

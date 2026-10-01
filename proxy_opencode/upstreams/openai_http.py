@@ -23,20 +23,34 @@ class StreamRelay:
 
     async def chunks(self) -> AsyncIterator[bytes]:
         resp = self.response
+        # Best-effort capture of usage from streamed chunks for logging. The
+        # scan is line-buffered: a `data:` line carrying usage can be split
+        # across any number of network chunks, and a naive per-chunk
+        # `json.loads` silently drops it (observed with long tool-call
+        # streams). Bytes are still relayed verbatim — only the parse is
+        # buffered.
+        pending = b""
+
+        def scan_line(line: bytes) -> None:
+            line = line.strip()
+            if not line.startswith(b"data:") or b"usage" not in line:
+                return
+            try:
+                data = json.loads(line[5:])
+            except Exception:
+                return
+            if isinstance(data, dict) and data.get("usage"):
+                self.usage_holder["usage"] = data["usage"]
+
         try:
             async for chunk in resp.aiter_bytes():
-                # Best-effort capture of usage from streamed chunks for logging.
-                if b"data:" in chunk and b"usage" in chunk:
-                    for line in chunk.split(b"\n"):
-                        line = line.strip()
-                        if line.startswith(b"data:") and b"usage" in line:
-                            try:
-                                data = json.loads(line[5:])
-                                if isinstance(data, dict) and data.get("usage"):
-                                    self.usage_holder["usage"] = data["usage"]
-                            except Exception:
-                                pass
+                if pending or b"usage" in chunk:
+                    *lines, pending = (pending + chunk).split(b"\n")
+                    for line in lines:
+                        scan_line(line)
                 yield chunk
+            if pending:
+                scan_line(pending)
         finally:
             await resp.aclose()
 

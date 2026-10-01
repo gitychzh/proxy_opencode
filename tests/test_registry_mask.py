@@ -31,12 +31,14 @@ def test_default_catalogue_has_single_public_model():
 
 def test_resolve_maps_any_requested_model_to_upstream():
     reg = make_registry()
-    assert reg.resolve("ds41f_cus") == "opencode/big-pickle"
-    # Unknown ids (incl. direct upstream naming attempts) resolve transparently.
-    assert reg.resolve("opencode/big-pickle") == "opencode/big-pickle"
-    assert reg.resolve("gpt-4o") == "opencode/big-pickle"
-    assert reg.resolve("") == "opencode/big-pickle"
-    assert reg.resolve(None) == "opencode/big-pickle"
+    # 2026-10-02: the live zen catalogue switched to bare ids ("big-pickle");
+    # the historical "opencode/…" spelling is no longer a valid upstream id.
+    assert reg.resolve("ds41f_cus") == "big-pickle"
+    assert reg.resolve("big-pickle") == "big-pickle"
+    # Unknown ids resolve transparently to the default upstream.
+    assert reg.resolve("gpt-4o") == "big-pickle"
+    assert reg.resolve("") == "big-pickle"
+    assert reg.resolve(None) == "big-pickle"
 
 
 def test_public_id_masks_every_upstream_echo():
@@ -103,6 +105,16 @@ def test_rewrite_sse_line_scrubs_leaked_delta_name_in_the_middle():
         "role": "assistant",
         "content": "hi",
     }
+
+
+def test_rewrite_sse_line_scrubs_leaked_delta_name_as_sole_key():
+    """A `name` with no adjacent comma (sole member of its object) must not
+    fall between the two comma-anchored patterns."""
+    line = b'data: {"choices":[{"delta":{"name":"Space Bunny"}}]}'
+    out = rewrite_sse_line(line, "ds41f_cus")
+    assert b"Space Bunny" not in out
+    payload = json.loads(out[5:])
+    assert payload["choices"][0]["delta"]["name"] == ""
 
 
 def test_rewrite_sse_line_keeps_real_tool_names():

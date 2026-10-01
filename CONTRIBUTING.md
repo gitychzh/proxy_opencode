@@ -38,9 +38,12 @@ BREAKING 变更在正文写 `BREAKING CHANGE:` 说明，并升级 major 版本�
 ## 禁止事项
 
 - 风控绕过、免费额度滥用、客户端指纹伪造相关代码或文档
-- 任何凭证/密钥/Cookie/Session 入库（含测试 fixture 中的真实凭证）
-  ——**唯一例外**：`docs/ACCESS.md` 的明文节点凭证，经仓库所有者
-  2026-09-30 确认的私有仓库例外（见该文件首部声明）；其余任何位置仍禁止
+- 任何凭证/密钥/Cookie/Session 入库（含测试 fixture 中的真实凭证、以及
+  `docs/ACCESS.md`）——**没有任何例外**。本仓库是 **PUBLIC** 仓库，
+  2026-09-30 曾声明的"私有仓库明文例外"已于 2026-10-02 **作废**。
+  真实凭据只放仓库外（`scripts_local/secrets.env`，已 gitignore）；
+  文档一律使用 `dev-admin-key` / `<bucket-key>` 这类占位符。
+  防回归：`tests/test_no_secrets.py` 会在 CI 里扫描全部跟踪文件。
 - 日志记录消息体、API key 或敏感请求头
 - 硬编码上游地址、模型名、key 到代码（配置只能来自环境变量）
 

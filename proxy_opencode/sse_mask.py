@@ -22,15 +22,20 @@ from typing import Any, AsyncIterator
 _MODEL_FIELD = re.compile(rb'("model"\s*:\s*")[^"]*(")')
 
 # A tool/function name can never contain whitespace, so a `name` value with a
-# space in it is always the leaked upstream model display name. Drop the key
-# together with its separating comma so the JSON stays valid.
+# space in it is always the leaked upstream model display name. The first two
+# patterns drop the key together with one separating comma so the JSON stays
+# valid; the third handles the key being the ONLY member of its object
+# (`{"name":"Space Bunny"}`) by emptying the value instead — removal there
+# would leave `{}` anyway, and emptying is always shape-safe.
 _LEAKY_NAME_TRAILING = re.compile(rb',\s*"name"\s*:\s*"[^"]*\s[^"]*"')
 _LEAKY_NAME_LEADING = re.compile(rb'"name"\s*:\s*"[^"]*\s[^"]*"\s*,')
+_LEAKY_NAME_BARE = re.compile(rb'"name"\s*:\s*"[^"]*\s[^"]*"')
 
 
 def _scrub_leaked_name(line: bytes) -> bytes:
     line = _LEAKY_NAME_TRAILING.sub(b"", line)
-    return _LEAKY_NAME_LEADING.sub(b"", line)
+    line = _LEAKY_NAME_LEADING.sub(b"", line)
+    return _LEAKY_NAME_BARE.sub(b'"name": ""', line)
 
 
 def rewrite_sse_line(line: bytes, public_model: str) -> bytes:

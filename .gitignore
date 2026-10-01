@@ -14,6 +14,8 @@ keys.json
 
 # 端到端脚本产出的报告（scripts/e2e_hermes.py）
 e2e_report.json
+# 协议级 e2e 的临时工作目录（scripts/e2e_protocols.py）
+.e2e_tmp/
 
 # balancer 本地配置（含真实 key，绝不提交）
 balancer/run.cmd
@@ -21,3 +23,17 @@ balancer/run.local.cmd
 
 # WorkBuddy 本地工作数据（不进入仓库）
 .workbuddy-ai/
+.workbuddy/
+
+# 真实凭据只放仓库外（见 SECURITY.md / docs/ACCESS.md）
+scripts_local/
+secrets.env
+.env
+.env.*
+!.env.example
+aliyun.md
+phone_key/
+*.pem
+*_key
+id_ed25519*
+aliyun-cookies/

@@ -77,16 +77,20 @@ async def test_auth_required():
 @pytest.mark.asyncio
 async def test_no_rate_limit_burst():
     """v0.6.1 removed the per-key RPM limiter: rapid bursts must never 429."""
+    import asyncio
+
     app, _ = make_app()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         body = {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "hi"}]}
-        codes = [
-            (await client.post("/v1/chat/completions", json=body, headers=GW_HEADERS)).status_code
+        # Genuinely concurrent: all five requests are in flight at once, so a
+        # hidden burst counter would trip here and not with sequential calls.
+        codes = await asyncio.gather(*[
+            client.post("/v1/chat/completions", json=body, headers=GW_HEADERS)
             for _ in range(5)
-        ]
-    assert codes == [200] * 5
+        ])
+    assert [r.status_code for r in codes] == [200] * 5
 
 
 @pytest.mark.asyncio
@@ -153,7 +157,15 @@ async def test_models():
 
 @pytest.mark.asyncio
 async def test_payload_dump_disabled_by_default(tmp_path):
-    app, _ = make_app()
+    """With no PAYLOAD_DUMP_DIR configured, no dump is written anywhere.
+
+    The assertion is anchored to a real directory (tmp_path) so the check is
+    meaningful: a regression that enables dumping with a default directory
+    would still write nothing *here*, but the paired test below proves the
+    dump path itself works when the setting is present — together they
+    pin down "off unless explicitly configured".
+    """
+    app, _ = make_app(payload_dump_dir="")
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
@@ -163,7 +175,7 @@ async def test_payload_dump_disabled_by_default(tmp_path):
                   "messages": [{"role": "user", "content": "hi"}]},
             headers=GW_HEADERS,
         )
-    assert not any(tmp_path.rglob("*_chat.json"))
+    assert not any(tmp_path.rglob("*.json")), "no payload dump may be created"
 
 
 @pytest.mark.asyncio

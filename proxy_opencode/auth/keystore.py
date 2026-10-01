@@ -3,12 +3,19 @@
 Static keys (GATEWAY_API_KEYS / ADMIN_API_KEYS env) live in Settings and are
 permanent. Keys minted via POST /admin/keys live here: they default to 24h
 validity and stop authenticating the moment they expire or are revoked.
+
+SCOPE NOTE: the store is per-process (in-memory list + whole-file rewrite).
+Run the gateway with a single worker (the default `python -m proxy_opencode`
+does exactly that); with `--workers N` each worker keeps its own copy of
+`keys.json` and minted/revoked keys would not propagate between workers.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
+import math
 import os
 import secrets
 import tempfile
@@ -37,6 +44,14 @@ def _parse_iso(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _matches(stored: str, presented: str) -> bool:
+    """Constant-time key comparison (non-ASCII input never matches)."""
+    try:
+        return hmac.compare_digest(stored, presented)
+    except TypeError:
+        return False
 
 
 @dataclass
@@ -165,9 +180,14 @@ class KeyStore:
         meta: dict[str, Any] | None = None,
     ) -> KeyRecord:
         """Mint a key. ttl_hours=None -> store default (24h); 0 -> permanent."""
-        effective_ttl = (
-            self.default_ttl_hours if ttl_hours is None else ttl_hours
-        )
+        # Defence in depth: NaN compares False on every bound, so letting it
+        # reach the `> 0` branch below would mint a *permanent* key. A
+        # non-finite ttl falls back to the store default instead of ever
+        # meaning "permanent".
+        if ttl_hours is None or not math.isfinite(ttl_hours):
+            effective_ttl = self.default_ttl_hours
+        else:
+            effective_ttl = ttl_hours
         now = _utcnow()
         expires_at: str | None = None
         if effective_ttl is not None and effective_ttl > 0:
@@ -190,14 +210,14 @@ class KeyStore:
 
     def validate(self, key: str) -> KeyRecord | None:
         for record in self._records:
-            if record.key == key and record.is_valid():
+            if _matches(record.key, key) and record.is_valid():
                 return record
         return None
 
     def lookup_expired(self, key: str) -> KeyRecord | None:
         """Same as validate() but also matches expired/revoked entries."""
         for record in self._records:
-            if record.key == key:
+            if _matches(record.key, key):
                 return record
         return None
 

@@ -2,7 +2,7 @@
 
 OpenAI 兼容的本机网关：把 [hermes](https://github.com/NousResearch/hermes-agent)
 等任意 OpenAI SDK 客户端，直连 **OpenCode Zen**，使用其免费模型
-（如 `opencode/big-pickle`，支持 token 级流式 + 原生 tool call + reasoning）。
+（如 `big-pickle`，支持 token 级流式 + 原生 tool call + reasoning）。
 
 ```
 hermes / OpenAI SDK ──OpenAI API──> proxy_opencode ──重构协议直连──> OpenCode Zen
@@ -83,12 +83,12 @@ API key 管理（管理员 key 永久有效；新生成 key 默认 24 小时有�
 ```bash
 # 签发（默认 24h；ttl_hours: 0 = 永久）
 curl -X POST http://127.0.0.1:8787/admin/keys \
-  -H "Authorization: Bearer api_ychzh22372222" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer dev-admin-key" -H "Content-Type: application/json" \
   -d '{"name":"my-phone","ttl_hours":24}'
 # 列表（脱敏）
-curl -H "Authorization: Bearer api_ychzh22372222" http://127.0.0.1:8787/admin/keys
+curl -H "Authorization: Bearer dev-admin-key" http://127.0.0.1:8787/admin/keys
 # 吊销
-curl -X DELETE http://127.0.0.1:8787/admin/keys/<key_id> -H "Authorization: Bearer api_ychzh22372222"
+curl -X DELETE http://127.0.0.1:8787/admin/keys/<key_id> -H "Authorization: Bearer dev-admin-key"
 ```
 
 hermes 配置（`config.yaml` 的 `providers:` 下加一条）：
@@ -154,24 +154,30 @@ python balancer/lb.py
 | `UPSTREAM_MODE` | `zen-direct` | `zen-direct`（直连 Zen）/ `opencode-serve`（本机官方 serve）/ `openai`（通用透传） |
 | `OPENCODE_ZEN_BASE_URL` | `https://opencode.ai/zen/v1` | Zen API 基址（仅 opencode.ai / loopback） |
 | `OPENCODE_ZEN_API_KEY` | 空 | Zen API 密钥；空 = 匿名免费层（`Bearer public` + 标记注入 + 内置工具合并 + 强制流式） |
-| `OPENCODE_ZEN_MODELS` | `opencode/big-pickle` | `/v1/models` 兜底模型列表（逗号分隔；正常情况直接拉 Zen 目录） |
+| `OPENCODE_ZEN_MODELS` | `big-pickle` | `/v1/models` 兜底模型列表（逗号分隔；正常情况直接拉 Zen 目录）。注意：Zen 目录自 2026-10-02 起改用**无前缀**裸 ID |
 | `OPENCODE_ZEN_TIMEOUT_S` | `300` | 上游单请求超时 |
-| `ZEN_PROXY` | 空 | 显式出口代理（如 `http://127.0.0.1:7897`）；空 = 跟随系统/环境代理 |
+| `ZEN_PROXY` | 空 | 显式出口代理（如 `http://127.0.0.1:7897`）。空 = **直连**，不跟随环境代理（见 `UPSTREAM_TRUST_ENV`） |
+| `UPSTREAM_TRUST_ENV` | `false` | 是否让出站 httpx 客户端跟随 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 与 Windows 注册表代理。默认关闭：实测失效的代理环境变量会让桶在 2s 内 ConnectError 502。需要代理请用 `ZEN_PROXY` |
+| `OPENCODE_ZEN_SESSION_ID` | 空（进程内随机 UUID） | 匿名免费层必需的 `x-session-id` 头；固定它可复现同一上游会话行为 |
 | `OPENCODE_ZEN_CLIENT_VERSION` | `1.18.32` | UA 中的 opencode 版本 |
 | `OPENCODE_ZEN_BUN_VERSION` | `1.3.14` | UA 中的 bun 版本 |
 | `OPENCODE_SERVE_URL` | `http://127.0.0.1:4096` | 仅 serve 模式；**只允许 loopback** |
 | `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` | `opencode` / 空 | serve 模式的 Basic auth |
 | `OPENCODE_SERVE_MODELS` | `opencode/big-pickle` | serve 模式 `/v1/models` 列表 |
+| `OPENCODE_SERVE_TIMEOUT_S` | `120` | serve 模式单次 HTTP 调用超时 |
+| `OPENCODE_SERVE_WAIT_TIMEOUT_S` | `600` | serve 模式单个 agent 回合的最长等待（超时 504） |
+| `OPENCODE_SERVE_EPHEMERAL_SESSIONS` | `true` | 回合结束后删除临时 opencode 会话 |
 | `GATEWAY_API_KEYS` | 空（dev-open） | 网关 Bearer key（逗号分隔，**永久有效**） |
-| `ADMIN_API_KEYS` | `api_ychzh22372222` | 管理员 key（永久有效，可管理 `/admin/keys`，也可直接调用对话接口） |
+| `ADMIN_API_KEYS` | `dev-admin-key`（本地占位，**生产必须改**） | 管理员 key（永久有效，可管理 `/admin/keys`，也可直接调用对话接口） |
 | `KEY_STORE_PATH` | `keys.json` | 动态 key 存储文件（JSON，原子写） |
 | `KEY_DEFAULT_TTL_HOURS` | `24` | 新生成 key 的默认有效期（小时）；`/admin/keys` 传 `ttl_hours: 0` 可签发永久 key |
 | `MASK_MODELS` | `true` | 模型掩码开关；开启后对外只暴露 `PUBLIC_MODELS` 目录，上游模型名从所有响应中抹除 |
-| `PUBLIC_MODELS` | `ds41f_cus:DeepSeek V4.1 Flash:opencode/big-pickle` | 对外模型目录，格式 `对外id:展示名:上游模型`（逗号分隔多条） |
+| `PUBLIC_MODELS` | `ds41f_cus:DeepSeek V4.1 Flash:big-pickle` | 对外模型目录，格式 `对外id:展示名:上游模型`（逗号分隔多条）。上游 ID 需与 Zen 实时目录一致 |
 | `LOG_FORMAT` | `text` | 日志格式：`text`（人类可读）/ `json`（JSON 行，便于采集归档） |
+| `PAYLOAD_DUMP_DIR` | 空（关闭） | 调试用：把每个**原始客户端请求体**（含 prompt）落盘到该目录，每协议一个 JSON，仅保留最近 200 个。⚠️ 绕过"不记录消息内容"红线，**生产桶请保持关闭** |
 | `ZEN_MARKER_MODE` | `bridge` | zen 免费层指纹注入：`bridge`（默认，仅 ~70 token 工具提示）/ `full`（旧版完整 opencode prompt，~7.8k tokens）/ `none`（不注入） |
 | `ZEN_TOOLS_MODE` | `minimal` | zen 免费层内置工具注入档：`minimal`（默认，两个合成最小 schema，~60 token；门禁只校验**名字**不校验 schema——见 AGENTS.md）/ `captured2`（bash+read 捕获 schema，~2k token，中间回退）/ `all`（完整 11 工具，~6k token，门禁收紧时回退用） |
-| `HOST` | `127.0.0.1` | 绑定地址；设 `0.0.0.0` 供局域网调用（**必须**同时设置 `GATEWAY_API_KEYS`） |
+| `HOST` | `127.0.0.1` | 绑定地址；设 `0.0.0.0` 供局域网调用时**必须**同时设置 `GATEWAY_API_KEYS` 与 `ADMIN_API_KEYS`（内置 `dev-admin-key` 是公开占位符，不可用于对外绑定） |
 | `PORT` | `8787` | 网关端口 |
 | `UPSTREAM_BASE_URL` / `UPSTREAM_API_KEY` | `https://api.openai.com` / 空 | 仅 `openai` 透传模式 |
 
