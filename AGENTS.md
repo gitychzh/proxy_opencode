@@ -105,6 +105,12 @@ SSE 透传，死桶自动跳过。配置模板见 `balancer/run.cmd.example`，�
   已用本机 opencode.db 真机「ID/时间戳」配对逐对验证。
 - 匿名免费层：无密钥时 models 目录中 cost>0 的模型不可用，免费模型
   （如 big-pickle）`allowAnonymous`。免费额度按出口 IP、按 UTC 日限流。
+- **429 判读纪律（2026-10-02 深挖纠偏）**：`FreeUsageLimitError` 是真实的
+  出口 IP 当日额度信号（本机直连出口在 0.6.2 消融测试期耗尽，UTC 0 点重置
+  后同探测恢复 200；连发 6 次、直连/代理双路径均 200，无突发限流）。注意
+  两点：① 各出口桶独立计量，别把本机 IP 的 429 说成"全局没额度"；
+  ② **直连 opencode.ai 有间歇性 SSL EOF（连接被重置）**，探测必须带重试，
+  否则会把网络抖动误读成服务端行为。诊断工具：`scripts/diag_zen_429.py`。
 - **模型 ID 已去前缀（2026-10-02 实测）**：Zen 目录（`GET /zen/v1/models`）
   现返回裸 ID（`big-pickle`、`space-bunny-free` 等）；旧拼写
   `opencode/big-pickle` 已失效（401 `ModelError`）。zen-direct 的默认映射

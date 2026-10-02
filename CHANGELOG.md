@@ -32,6 +32,13 @@
   （`big-pickle`），旧拼写 `opencode/big-pickle` 401 `ModelError`。
   zen-direct 默认映射同步改为裸 ID；`opencode-serve`（本地 opencode 命名
   空间）保持 `provider/model` 不变。
+- **真实网关全链路 e2e 通过 + 429 误判澄清（2026-10-02）**：额度恢复后
+  以真实 zen-direct 网关完成端到端验证（非流式 / 流式 / 工具调用全 200，
+  掩码与 usage 正确，`get_weather` 参数正确回传）。此前把本机直连出口的
+  429 误读为"额度耗尽"的泛化结论已纠正：429 按出口 IP / UTC 日独立计量，
+  UTC 0 点重置后同探测恢复 200；连发 6 次、直连/代理双路径均 200，无突发
+  限流。另确认直连 opencode.ai 存在间歇性 SSL EOF，探测需带重试——新增
+  诊断工具 `scripts/diag_zen_429.py`（多出口路径对比 + 响应头取证）。
 - **Anthropic 流式 tool_use 块惰性开启**：`content_block_start` 是工具名
   唯一可发布点，旧实现收到首个 delta 立即开块，晚到/分片的 `function.name`
   只保留首段甚至为空，客户端拿到无名工具调用。现累积名字、在首个参数增量
