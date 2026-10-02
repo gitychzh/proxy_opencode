@@ -89,9 +89,16 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
 
 1. 请求必须带 `x-session-id`（稳定 UUID）头，否则 401 "Missing API key"
 2. 匿名仅 `-free` 后缀模型可用；池会轮换，`GET /v1/models` 拉全量
-   （2026-09-29 实测 `big-pickle` 无 `-free` 后缀也可匿名访问）
+   （2026-09-29 实测 `big-pickle` 无 `-free` 后缀也可匿名访问；
+   **2026-10-02 起 Zen 目录改为无前缀裸 ID**，`opencode/…` 旧拼写已 401）
 3. 配额按出口 IP 计（约 600 请求/日/IP，UTC 零点重置）；LB 检测 429 自动熔断
 4. 协议三要素（系统提示词标记 + 内置工具 schema + stream:true）由网关自动注入
+5. **429 判读纪律（2026-10-02 深挖）**：429 只代表"该出口 IP 当日额度耗尽"，
+   各桶独立计量、UTC 零点恢复——不要把单桶 429 当成全局没额度，也不要在
+   没有重试的情况下把间歇性 SSL EOF（直连被重置）误读成服务端行为。
+   一键复核四桶配额：`scripts/probe_bucket_quota.py`（admin key 走环境变量
+   `QUOTA_PROBE_ADMIN_KEY`，每桶铸临时 key → 打一次最小 chat → 吊销）。
+   2026-10-02 实测四桶（含本机）额度全部正常。
 
 ## 5. 接入各客户端（0.6.0 起）
 
@@ -180,6 +187,29 @@ vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-l
 
 四桶直连非流式 / 流式对话均 200；`/v1/responses`（codex 协议）与
 `/v1/messages`（Anthropic 协议）经公网入口均返回正确内容。
+
+### 9.1.1 ⚠️ 四桶升级欠账（2026-10-02 巡检发现，高优先级）
+
+四桶（含本机）都还在跑 **0.6.2**，即 0.6.3 安全修复发布**之前**的版本。
+实测确认：**0.6.2 仓库里泄漏的旧默认 admin key 在四桶的 `/admin/keys` 上
+全部有效**——任何能访问桶端口的人都可以直接铸永久网关 key。0.6.3 已修复
+（默认占位符 + 非回环绑定强制显式 `ADMIN_API_KEYS`），升级步骤：
+
+```
+拉取 repo → uv pip install -e . → 重启桶进程 → /healthz 核对版本号
+→ 确认启动环境里显式设置了 ADMIN_API_KEYS / GATEWAY_API_KEYS
+```
+
+升级后旧默认 admin key 即失效（不再作为默认值），四桶重新获得防护。
+另外注意 0.6.3 修复的 `/admin/keys` NaN TTL 漏洞（可绕过 24h 过期铸永久
+key）同样存在于 0.6.2 桶上，升级前请勿把 admin key 暴露给不可信网络。
+
+### 9.1.2 配额复核（2026-10-02）
+
+`scripts/probe_bucket_quota.py` 实测四桶（win10-local / owin10 / ubuntu26 /
+phone115）真实 chat 全部 200——四桶当日额度均正常。此前（2026-10-01 晚）
+单看本机直连出口的 429 得出"额度耗尽"属于误判：那是本机出口在 0.6.2 消融
+测试期的当日额度用尽，UTC 零点重置后已恢复；各桶按出口 IP 独立计量。
 
 ### 9.2 延迟基准（N=5 非流式，max_tokens=200）
 

@@ -39,6 +39,11 @@
   UTC 0 点重置后同探测恢复 200；连发 6 次、直连/代理双路径均 200，无突发
   限流。另确认直连 opencode.ai 存在间歇性 SSL EOF，探测需带重试——新增
   诊断工具 `scripts/diag_zen_429.py`（多出口路径对比 + 响应头取证）。
+- **四桶配额复核 + 巡检工具（2026-10-02）**：`scripts/probe_bucket_quota.py`
+  一键复核四桶（铸临时 key → 单次真实 chat → 吊销，admin key 走环境变量），
+  实测 win10-local / owin10 / ubuntu26 / phone115 四桶全部 QUOTA OK。
+  同时巡检发现四桶仍在跑 0.6.2、泄漏的旧默认 admin key 在四桶上全部有效
+  （详见 docs/OPERATIONS.md §9.1.1 升级欠账），请尽快升级到 0.6.3。
 - **Anthropic 流式 tool_use 块惰性开启**：`content_block_start` 是工具名
   唯一可发布点，旧实现收到首个 delta 立即开块，晚到/分片的 `function.name`
   只保留首段甚至为空，客户端拿到无名工具调用。现累积名字、在首个参数增量
