@@ -22,22 +22,15 @@ official opencode 1.18.x client sends to `https://opencode.ai/zen/v1`:
     26 chars = 12 hex chars of `(ms << 12) + counter` (low 48 bits) followed
     by 14 random chars from [0-9A-Za-z].
 
-  * Free tier gate (reverse-engineered 2026-09-27 via ablation on live
-    requests; every combination below verified reproducibly):
-        system prompt marker + builtin tool schemas   -> 200
-        marker only (no builtin tools)                -> 403 (CN egress)
-                                                        429/pass (non-CN)
-        builtin tools only (no marker system)         -> 403
-        custom tools only                             -> 403
-        builtin + custom tools merged                 -> 200
-    i.e. the server fingerprints the request BODY: it must carry BOTH
-    opencode's genuine default system prompt (v1.18.32 `prompt/default.txt`,
-    shipped as `zen_prompt_default.txt`) AND opencode's builtin tool schema
-    list (`zen_builtin_tools.json`, captured from the genuine client). The
-    adapter injects both when no API key is configured and merges the
-    client's own tools on top. Egress IP region additionally matters:
-    non-tunnelled CN egress needs the full marker set (see Settings.zen_proxy
-    / trust_env note in the client constructor).
+  * Anonymous free-tier checks: the latest live ablation (2026-09-30) found
+    that stream=true and at least two OpenCode built-in tool names suffice;
+    tiny or absent system prompts passed. The earlier 2026-09-27 claim that
+    a full system marker and complete tool schemas were mandatory was
+    disproved. The adapter injects minimal schemas by default and offers
+    full captured assets only as compatibility fallback. On 2026-10-02 the
+    Zen catalogue switched to bare model IDs such as big-pickle; the old
+    opencode/big-pickle spelling returns 401. For diagnosis and present-day
+    deployment state see AGENTS.md and docs/OPERATIONS.md.
 
 Everything else is a faithful OpenAI passthrough: messages/params are
 forwarded via the shared whitelist, SSE chunks are relayed as-is, and
@@ -81,10 +74,8 @@ _BRIDGE_NOTE = (
 )
 
 # Standalone tiny system note for marker_mode="bridge" (~70 tokens): the
-# builtin tool schemas are still injected (gate requirement) but the big
-# opencode default prompt is not, so the note alone steers the model away
-# from calling them. Verified against the live gate on 2026-09-30 (the gate
-# no longer inspects the system prompt; only the tool schemas fingerprint).
+# built-in tool names are still injected for the observed gate, but the full
+# captured prompt is not. The note steers the model away from calling them.
 _BRIDGE_NOTE_STANDALONE = (
     "You are serving an OpenAI-compatible API client. Answer the client's "
     "latest message directly, using ONLY the client-supplied tools (if any). "
@@ -371,7 +362,7 @@ class ZenDirectAdapter:
 
     @staticmethod
     def _inject_marker(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Prepend opencode's genuine system prompt (free-tier requirement)."""
+        """Prepend the captured opencode prompt (legacy compatibility option)."""
         marker: dict[str, Any] = {
             "role": "system",
             "content": _default_prompt() + _BRIDGE_NOTE,
