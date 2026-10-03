@@ -4,31 +4,27 @@
 
 `proxy_opencode`：一个 OpenAI 兼容（`/v1/chat/completions`、`/v1/models`）的
 本机网关，默认以 **`zen-direct` 模式直连 OpenCode Zen**（重构 opencode
-1.18.32 客户端协议，使用免费模型 `opencode/big-pickle` 等）；另保留
+1.18.32 客户端协议，使用免费模型裸 ID `big-pickle` 等）；另保留
 `opencode-serve`（驱动本机官方 serve）与 `openai`（通用透传）两种模式。
 
 ## 硬约束（不可违反）
 
-1. **免费层协议事实（2026-09-27 消融 + 2026-09-30 复测精化，勿再走弯路）**：
-   服务端对匿名免费层请求做请求体指纹校验。**2026-09-30 活体复测（可复现）
-   把规则精确到「名字」层面**：
-   - ① **至少 2 个工具，且其 `function.name` 属于 opencode 内置工具集**
-     （bash/edit/glob/grep/read/skill/task/todowrite/webfetch/websearch/write）
-     ——**schema 内容完全不校验**：`bash+read` 空参数(246 字符) 200、
-     仅名字(104 字符) 200、全量 schema(7,872 字符) 200；
-     **只有 1 个工具 → 403**；**两个非内置名 → 403**；`bash+read+edit` → 200。
-     因此默认 `ZEN_TOOLS_MODE=minimal` 只注入两个合成最小 schema（~60 token）；
-     `captured2` / `all` 为回退档。
-   - ② **`stream: true`**——免费层只服务流式请求，stream=false → 403。
-     网关因此恒流式调 zen，非流式客户端由网关聚合 SSE。
-   - ③ 系统提示词**不再被校验**：一句 tiny prompt 甚至无 system 消息均 200
-     （2026-09-27 曾要求 opencode 默认提示词，已失效）。
-   辅助事实：消息/会话 ID 需为 opencode 标识符格式（乱造格式 → 403）；
-   0.2.0 时期"TLS 指纹校验"的结论**是错的**（mitm 两侧均可 200）；
-   免费额度按出口 IP 计（429 `FreeUsageLimitError`，**但 429 是间歇限流，
-   不等于日配额耗尽**——实测同桶 429 后数分钟即恢复 200）。
-   资产 `zen_prompt_default.txt` / `zen_builtin_tools.json` 仅在
-   `ZEN_MARKER_MODE=full` / `ZEN_TOOLS_MODE=all|captured2` 时被使用。
+1. **免费层协议事实（最近活体复测：2026-09-30；上游模型目录复核：2026-10-02）**：
+   - 匿名请求实测门槛：至少 2 个工具，且其 `function.name` 属于 OpenCode 内置工具集
+     （bash/edit/glob/grep/read/skill/task/todowrite/webfetch/websearch/write），并且
+     `stream: true`；少于 2 个或使用两个非内置名、或 `stream: false` 均得到 403。
+     当前默认 `ZEN_TOOLS_MODE=minimal` 注入两个合成最小 schema（~60 token）；
+     `captured2` / `all` 是较大 schema 回退档。
+   - 同次复测中，tiny prompt 或没有 system 消息也可通过；因此 system marker 不是
+     已验证的门槛。默认 `ZEN_MARKER_MODE=bridge` 仍注入兼容说明，勿把“代码默认注入”
+     误写成“上游强制要求”。历史实验若与这组复测冲突，以此处标注的最近实测为准。
+   - 消息/会话 ID 需符合 opencode 标识符格式（乱造格式 → 403）；
+     0.2.0 时期“TLS 指纹校验”的结论已证伪（mitm 两侧均可 200）。
+   - 配额错误须区分：上游 `FreeUsageLimitError` 表示该出口 IP 当前触发免费额度限制，
+     按出口 IP / UTC 日独立计量、UTC 0 点重置；它不代表所有桶都耗尽。传输失败、
+     TLS EOF 或超时不是 429，不得据此判断配额；诊断需带重试并核对同一桶与 UTC 日期。
+   Zen 模型目录自 2026-10-02 起使用裸 ID（如 `big-pickle`）；旧 `opencode/big-pickle`
+   已失效。协议细节与诊断流程见 `docs/OPERATIONS.md`。
 2. **回环限定**：`OPENCODE_SERVE_URL` 只允许 loopback（config.py 强制校验）；
    `OPENCODE_ZEN_BASE_URL` 只允许 opencode.ai / loopback（zen_direct 校验）。
 3. **工程化**：改代码必须同步改测试与文档；`pytest tests/` +
@@ -66,8 +62,8 @@ hermes / codex CLI / claude code / 任意 OpenAI SDK
 
 多个网关实例（不同出口 IP = 不同免费配额桶）之间的轮询由 **`balancer/lb.py`**
 承担：纯 ASGI least-connection 负载均衡，为每个上游改写各自的 `Authorization`，
-SSE 透传，死桶自动跳过。配置模板见 `balancer/run.cmd.example`，完整拓扑、实测
-数据与已知坑见 **`docs/dual-bucket-topology.md`（改拓扑前必读）**。
+SSE 透传，死桶自动跳过。配置模板见 `balancer/run.cmd.example`；当前节点、运行状态与
+拓扑排障见 **`docs/OPERATIONS.md`（改部署前必读）**，地址与访问方式见 `docs/ACCESS.md`。
 
 新增上游模式 = 在 `upstreams/` 加一个实现 `UpstreamAdapter` 协议的模块 +
 `build_adapter` 里注册一行。新增客户端协议 = 在 `formats/` 加一对

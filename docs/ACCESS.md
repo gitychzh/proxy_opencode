@@ -12,30 +12,35 @@
 
 - **Tailscale tailnet**：四桶 + ECS 互通；SSH 全部走 Tailscale IP
 - **DERP 中继**：region 901 = 自建 derper（自签证书，STUN 3478）
-- **公网入口**：`https://llm.223722.xyz/v1`（Cloudflare Tunnel，杭州 ECS 承载）
+- **公网入口 A（Cloudflare，通用）**：`https://llm.223722.xyz/v1`（Cloudflare Tunnel，杭州 ECS 承载）——
+  任意网络可用；移动网实测约 90%（见 §6.5）
+- **公网入口 B（IP 直连，移动网推荐）**：`https://115.29.231.25:9443/v1`（杭州 ECS 自签证书 + IP SAN）——
+  **客户端必须用 IP 而非域名**（域名会带 SNI 触发备案拦截），详见 §6.5；移动网实测 100%
 
 ## 1. 四桶总览
 
 | 桶 | Tailscale IP | 网关地址 | 桶间 Key | 出口 | 系统 |
 |---|---|---|---|---|---|
-| win10-local（本机） | `100.121.137.118` | http://100.121.137.118:8791 | `<bucket-key>` | 家庭宽带 | Windows |
+| win10-local（用户个人设备） | `100.121.137.118` | http://100.121.137.118:8791 | `<bucket-key>` | 家庭宽带 | Windows；经常关机属预期，不按常驻节点故障处理 |
 | owin10 | `100.109.109.108` | http://100.109.109.108:8791 | `<bucket-key>` | owin10 宽带 | Windows |
 | ubuntu-26（=opc2） | `100.109.57.26` | http://100.109.57.26:8791 | `<bucket-key>` | ubuntu 宽带 | Ubuntu |
 | phone115 | `100.87.219.115` | http://100.87.219.115:8792 | `<bucket-key>` | 手机流量 | Android/Termux |
 
-- 上游清单权威来源：ECS `/opt/proxy_opencode/edge_lb.env`（`ZEN_LB_UPSTREAMS`）
+- 上游清单权威来源：ECS `/opt/proxy_opencode/edge_lb.env`（`ZEN_LB_UPSTREAMS`）。
+  `win10-local` 的 LB healthz 检查可能显示离线；这是用户个人设备关机的预期状态，
+  不应据此更换目标地址或误报全局故障。
 - 四桶 `.env`/启动脚本统一：`GATEWAY_API_KEYS=<bucket-key>` +
   `ADMIN_API_KEYS=<admin-key>`（真实值见各桶 `.env` / 仓库外 `secrets.env`）
 
-## 2. 本机 win10 桶（win10-local）
+## 2. win10-local 桶（用户个人设备）
 
 ```bash
-curl http://127.0.0.1:8791/healthz          # 健康检查（版本号在此确认）
+curl http://100.121.137.118:8791/healthz    # 设备在线时的远程健康检查
 ```
 
 | 项 | 值 |
 |---|---|
-| 仓库 | `D:\wb_ps\proxy_opencode\repo`（v0.6.2） |
+| 部署目录 | 既有设备上使用 `D:\wb_ps\proxy_opencode\repo`；关机期间不可核对版本，在线后以 `/healthz` 为准 |
 | Python | `D:\wb_ps\proxy_opencode\repo\.venv\Scripts\python.exe` |
 | 启动脚本 | `D:\wb_ps\proxy_opencode\scripts_local\start_gw_detached.cmd`（`HOST=0.0.0.0`，`:loop` 自愈，退出 5s 重启） |
 | 守护 | 计划任务 **`zen-gw-local`**：开机+登录自启（S4U 后台会话，脱离交互会话存活） |
@@ -77,14 +82,16 @@ type %USERPROFILE%\proxy_opencode\gateway_runtime.err.log
 ## 4. ubuntu-26 桶（= opc2 救援机）
 
 ```bash
-ssh -p 2222 opc2_uname@100.109.57.26        # 免密（本机 ~/.ssh/config 别名即 `ssh opc2_uname`）
+ssh -p 2222 opc2_uname@100.109.57.26        # 本次已验证密码认证；密钥认证需另行确认
 ```
 
 | 项 | 值 |
 |---|---|
-| SSH | 端口 **2222**（2026-09-30 统一），用户 `opc2_uname`，密钥 `~/.ssh/id_ed25519` |
+| SSH | Tailscale `100.109.57.26:2222`，用户 `opc2_uname`；2026-10-02/03 已验证密码认证可用。不要在仓库记录密码；端口 22 不通 |
 | 守护 | systemd `proxy_opencode.service`（`enabled` + `Restart=always`，开机自启） |
 | 网关目录 | `~/proxy_opencode`（桶部署） |
+| Hermes 模型链路 | `~/.hermes/config.yaml` 默认 `ds41f_cus` → **`https://115.29.231.25:9443/v1`（IP 直连，无 SNI，见 §6.5）**；CF `https://llm.223722.xyz/v1` 作为备用。CA 已装入系统信任库，并在 `~/.bashrc` + systemd drop-in `zen-gw-ca.conf` 设 `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`（httpx 走 certifi，必须显式指定）。2026-10-03 实测 one-shot 通过 |
+| 公网路径状态 | opc2 到 Cloudflare IPv6 不通，IPv4 Anycast 路由仍有明显超时；已将 Wi-Fi MTU 持久设为 1480。**移动网下 IP 直连（9443）已实测 20/20，优于 CF 的 18/20**；Tailscale LB 入口 `http://100.81.214.95:7892/v1` 仍可用作备用 |
 
 ```bash
 systemctl status|restart proxy_opencode
@@ -92,8 +99,8 @@ journalctl -u proxy_opencode -n 50
 cat ~/proxy_opencode/.env        # GATEWAY_API_KEYS / ADMIN_API_KEYS 在此
 ```
 
-- **网络注意**：该机 Tailscale 只有 relay 路径（DERP region 901）；DERP 半死时 SSH 握手超时，
-  改用**手机跳板**（手机↔opc2 同局域网走 direct）：
+- **网络注意**：Tailscale 的直连/中继状态随当时网络变化，先运行 `tailscale status`
+  确认。远端直连不通且手机跳板已验证可用时，才考虑经手机转发：
 
   ```bash
   ssh -o ProxyCommand="ssh -p 2222 -o StrictHostKeyChecking=accept-new -i D:/wb_ps/proxy_opencode/phone_key/id_ed25519 -W %h:%p 100.87.219.115" -p 2222 opc2_uname@100.109.57.26
@@ -118,6 +125,33 @@ ssh -p 2222 -i D:\wb_ps\proxy_opencode\phone_key\id_ed25519 100.87.219.115
 | 守护 | `~/run_gw.sh`（死循环重启）+ `~/.termux/boot/start_gw.sh`（Termux:Boot 开机自启）+ wake-lock |
 | 配置 | `~/repo/.env` —— ⚠️ **必须 LF 换行**，CRLF 会导致 .env 不生效 |
 | 代码 | `~/repo/proxy_opencode/`（venv editable 安装，换代码只需覆盖包目录后重启 run_gw.sh） |
+
+**远程拉起（2026-10-03 验证，本机 adb 直连）**：先启用 `~/.termux/termux.properties` 的
+`allow-external-apps = true` 并 `am force-stop com.termux` 重启，再以 **root** 身份发 RUN_COMMAND
+intent（`shell` uid 缺 `com.termux.permission.RUN_COMMAND`；`su 10254` 的 `u:r:magisk:s0` 域**无网络权限**，
+会以 `could not bind on any address out of [('0.0.0.0', 8792)]` 失败）：
+
+```bash
+adb connect 100.87.219.115:43357
+adb shell 'su -c "am startservice --user 0 -n com.termux/com.termux.app.RunCommandService -a com.termux.RUN_COMMAND --es com.termux.RUN_COMMAND_PATH /data/data/com.termux/files/usr/bin/bash --esa com.termux.RUN_COMMAND_ARGUMENTS -l,-c,~/.termux/boot/start_gw.sh --ez com.termux.RUN_COMMAND_BACKGROUND true --es com.termux.RUN_COMMAND_WORKDIR /data/data/com.termux/files/home"'
+```
+
+手机 chroot 内的 hermes（`/opt/hermes-venv/bin/hermes`）跑 one-shot 时**必须 `export HOME=/root`**，
+否则读 `/.hermes/` 而非 `/root/.hermes/` 并报 `No inference provider configured`。
+
+⚠️ **进入 chroot 的正确写法（2026-10-03 修正）**：`su 0 chroot …` / `su 0 sh -c "chroot …"`
+**都不会真正 chroot**（命令仍在 Android 根下执行，`ls /` 显示的是 Android 根）。
+必须用 **`su -c "chroot …"`**，并给 chroot 内的二进制**绝对路径**：
+
+```bash
+adb -s 100.87.219.115:43357 shell 'su -c "chroot /data/local/chroot/ubuntu /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root /bin/bash /root/xxx.sh"'
+```
+
+（PATH 被 `env -i` 清空后 `wc`/`sed` 会 not found，脚本内一律用 `/usr/bin/...` 绝对路径。）
+
+手机 chroot 内已注册**非默认** provider `zen-gw-direct` → `https://115.29.231.25:9443/v1`（§6.5），
+并已把自签 CA 装入系统信任库、追加进 `/opt/hermes-venv/.../certifi/cacert.pem`；
+默认模型仍为本地 `ms-glm`，不受影响。
 
 ⚠️ 沙箱环境每次调用 adb daemon 都会重死——**connect + shell 必须写在同一条命令里**：
 
@@ -147,11 +181,78 @@ adb connect 100.87.219.115:43357 && adb -s 100.87.219.115:43357 shell "su -c 'ne
 
 ### 杭州新 ECS（i-bp1bzxumftqasjq6nid5 · 99元/年 · 到期 2027-10-01）
 
-- 公网 `115.29.231.25`（安全组：22/443/80/8443/8388/8442 tcp + 3478/41641 udp）
+- 公网 `115.29.231.25`（安全组：22/443/80/8443/8388/8442/**9443** tcp + 3478/41641 udp；
+  `9443` 为 IP 直连 TLS 入口，见 §6.5。7892 仅限内网/Tailscale，公网不放行）
 - Ubuntu 24.04.5，2C2G，Tailscale `hangzhou-ecs` = **100.81.214.95**（四桶全 direct：owin10 42ms / phone 72ms）
-- 服务：zen-lb(:7892) / cloudflared-tunnel(**必须 http2**) / caddy(:443,:80) / xray(:8443) / shadowsocks(:8388) / derper(:8442+STUN:3478) / tailscaled
+- 服务：zen-lb(:7892) / cloudflared-tunnel(**必须 http2**) / caddy(:443,:80,**9443 直连入口**) / xray(:8443) / shadowsocks(:8388) / derper(:8442+STUN:3478) / tailscaled
 - derper 证书指纹：`sha256-raw:883ec3b90aaa75d463c0ee4db639064a57639014aeb531e650d963a55420dbaf`（Tailscale ACL derpMap region 901 已指向）
 - cloudflared DNS 坑：systemd-resolved 显式配 `223.5.5.5 + 1.1.1.1`（`/etc/systemd/resolved.conf.d/migrate.conf`），否则 argotunnel SRV 解析失败
+
+## 6.5 直连入口：为何 `223722.xyz` 不能直连，以及"无 SNI"绕行
+
+### 根因（2026-10-03 定位，从 opc2 实测）
+
+杭州 ECS 在**中国大陆**，阿里云的 ICP 合规拦截（响应头 `Server: Beaver`）按**域名**拦截到达
+该 ECS 的流量，且**不限于 80/443**：
+
+| 探测 | 结果 |
+|---|---|
+| `http://115.29.231.25:7892/healthz`，`Host: 115.29.231.25` | **200** |
+| 同端口，`Host:` 任意 `*.223722.xyz` | **403 `Server: Beaver`** |
+| 同端口，`Host: www.baidu.com` | 200 |
+| `openssl s_client -connect 115.29.231.25:9443`（**无 SNI**） | 握手成功 |
+| 同端口，SNI = `zen`/`llm`/`223722.xyz` 任一 | **连接被 RST** |
+| 同端口，SNI = `www.baidu.com` / `example.com` | 握手成功 |
+
+拦截键值是**域名本身**（HTTP `Host` 头 + TLS `SNI`），与端口无关；`223722.xyz` 整域
+（含全部子域）未备案 → 全端口被封。IP 直连、以及不解析到该 ECS 的第三方域名不受影响。
+
+`https://llm.223722.xyz` 之所以可用，只是因为 Cloudflare 在**边缘**终止 TLS，cloudflared
+**从 ECS 主动出站**建隧道——阿里云侧从未看到入站的该域名。
+
+### 绕行：IP 直连 + 不发送 SNI
+
+TLS 客户端连接 **IP 字面量**时不发送 SNI，因此不触发域名拦截。ECS 侧 caddy 用
+**catch-all 站点 + 自签证书（SAN 含 `IP:115.29.231.25`）** 服务该端口：
+
+```
+# /etc/caddy/Caddyfile
+zen.223722.xyz {
+    reverse_proxy 127.0.0.1:7892
+    encode gzip
+}
+
+https://:9443 {
+    tls /etc/caddy/certs/gw.crt /etc/caddy/certs/gw.key
+    reverse_proxy 127.0.0.1:7892
+    encode gzip
+}
+```
+
+- ⚠️ Caddy 2.6 的 **hostname-less 站点不会自动签发内部证书**，必须显式 `tls <crt> <key>`；
+  否则该端口表现为握手 `internal error (alert 80)`。
+- 证书位于 `/etc/caddy/certs/`（`ca.crt` 自签 CA，10 年；`gw.crt` SAN =
+  `IP:115.29.231.25, IP:100.81.214.95, DNS:zen-gw.local`）。
+- 安全组永久放行 `9443/tcp 0.0.0.0/0`（此前 7892/9443 的临时规则已撤销）。
+
+### 客户端怎么接
+
+`base_url: https://115.29.231.25:9443/v1` —— **写 IP，不要写域名**（域名会带 SNI 被拦）。
+
+证书信任（二选一）：
+
+1. 装 CA 到信任库。Linux 系统库：`/usr/local/share/ca-certificates/` + `update-ca-certificates`；
+   但 **Python 的 httpx/openai 默认用 certifi**，还需 `SSL_CERT_FILE=/path/ca-bundle.crt`
+   （certifi 包 + 自签 CA 拼接）或直接把 CA 追加到 venv 的 `certifi/cacert.pem`。
+2. 客户端关闭校验（`verify=false` / `-k`）——不推荐。
+
+**实测（opc2 · 移动网 · 各 20 次）**：直连 9443 **20/20**（约 70–80 ms）；CF `llm.223722.xyz` **18/20**。
+手机（电信）直连同样 200。
+
+### 仍未解决
+
+若要让 `zen.223722.xyz` 成为**正式域名入口**，只有两条路：给域名做 **ICP 备案**，
+或把入口换到**非大陆节点**（香港/新加坡 ECS，无需备案）。当前策略是"CF + IP 直连"双入口。
 
 ## 7. Hermes 接入模板（各 Windows 桶通用）
 
@@ -175,10 +276,11 @@ model_aliases:
 
 改完重启桌面版生效；CLI 可 `hermes -m ds41f` 按别名切模型。
 
-**直连提速（2026-09-30 起，两台 Windows 已采用）**：本机 hermes 把上面两处
-base_url 换成 `http://127.0.0.1:8791/v1`（owin10 同理），绕开公网链路省 ~2s/请求。
-代价：失去 LB 跨桶 failover（本桶配额打满即 429）；换回公网域名即恢复。
-api_key 用管理员 key（各桶通用），无需改动。
+**当前 Hermes 链路（2026-10-03 实测）**：`owin10` 仍指向 `https://llm.223722.xyz/v1`；
+**opc2 已切到 IP 直连 `https://115.29.231.25:9443/v1`**（§6.5），one-shot 通过，移动网 20/20。
+opc2 的 Cloudflare 公网路径仍有丢包与连接超时（18/20），保留为备用；Tailscale LB 入口
+`http://100.81.214.95:7892/v1`（约 38–41ms）亦可备用。此前“两个 Windows 客户端都已切本机 8791”
+的记录已过时，不再作为当前状态。
 
 ## 8. 冒烟测试
 
@@ -193,6 +295,9 @@ curl https://llm.223722.xyz/v1/chat/completions \
 for u in 100.121.137.118:8791 100.109.109.108:8791 100.109.57.26:8791 100.87.219.115:8792; do
   curl -s "http://$u/healthz" && echo " <- $u"
 done
+
+# IP 直连入口（§6.5）——必须用 IP，证书用自签 CA 校验
+curl --cacert ca.crt https://115.29.231.25:9443/healthz
 ```
 
 ## 9. 凭据轮换清单（2026-10-02 泄露后必做）

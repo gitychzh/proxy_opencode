@@ -1,323 +1,145 @@
-# 运维手册（OPERATIONS）
+# 运维手册（当前事实）
 
-> **凭证说明（2026-09-30 更新）**：经仓库所有者确认按明文方式管理——所有 IP、key、
-> 密码已明文写入 [`docs/ACCESS.md`](ACCESS.md)（家庭局域网环境，私有仓库，安全不设防）。
-> 本文保留脱敏叙述作为运维流程手册，具体值以 ACCESS.md 为准。
+> 现状快照：2026-10-03。本文只记录当前部署状态、操作方法和仍未解决的风险。
+> 版本历史与已关闭问题看 `CHANGELOG.md`；设备地址和登录方式看 `ACCESS.md`；
+> 架构与安全红线看 `AGENTS.md`。历史实验文档已合并或删除，避免将旧拓扑当作现状。
 
-## 1. 架构总览
+## 1. 当前架构
 
-```
-任何 OpenAI 兼容客户端（hermes / OpenAI SDK / curl）
-    │  base_url = https://<公网域名>/v1   (Cloudflare Tunnel 托管)
-    ▼
-ECS Edge LB（zen-lb.service，:7892 内部）
-    │  least-connection + 配额感知调度，429 自动熔断至 UTC 零点
-    ▼
-4 个桶（Tailscale 内网直连，各跑一套 proxy_opencode 网关 0.5.1）
-    ├─ win10-local   :8791（本机，出口=家庭宽带）
-    ├─ owin10        :8791（出口=第二宽带）
-    ├─ ubuntu-26     :8791（出口=ubuntu 宽带）
-    └─ phone115      :8792（Termux，出口=手机流量）
-    ▼
-OpenCode Zen（匿名免费层，配额按出口 IP 计）
+```text
+客户端
+  -> https://llm.223722.xyz/v1 (Cloudflare)
+  -> cloudflared 隧道 zen-gw
+  -> 杭州 ECS 上的 zen-lb :7892
+  -> Tailscale 上的各 proxy_opencode 桶 :8791 / :8792
+  -> OpenCode Zen
 ```
 
-- 管理面板：`https://<公网域名>/admin?key=<LB_KEY>`（实时桶健康/配额/计数）
-- 公网入口由 Cloudflare Tunnel `zen-gw` 承载：ECS 上 `cloudflared-tunnel.service`，
-  配置 `/etc/cloudflared/config.yml`，凭据 `/root/.cloudflared/`
+对外模型为 `ds41f_cus`，上游 Zen 模型 ID 使用裸 ID `big-pickle`。四个桶按各自出口 IP 独立计额度；LB 做 least-connection 分发、失败重试及额度冷却。ECS/Tailscale 地址、服务及凭据位置见 `ACCESS.md`，不要把真实密钥写入仓库。
 
-### 2.1 请求级耗时日志（0.6.1 起，ECS 端可观测）
+## 2. 部署与最近状态
 
-```bash
-ssh root@<ECS_IP> tail -f /opt/proxy_opencode/balancer/logs/lb.log
-```
-
-每条转发成功日志：
-
-```
-rid=<id> lb POST /v1/chat/completions -> win10-local status=200 attempt=1 ttfb=4247ms total=5468ms
-```
-
-读法（2026-09-30 三路径 ablation 标定：直打上游 TTFT ~2.3-4.2s，桶内开销 <0.5s，
-公网链路固定 ~0.7s）：
-
-| 字段 | 覆盖段 | 异常解读 |
+| 节点 | 当前角色 | 最近确认状态 |
 |---|---|---|
-| `ttfb` | LB→桶→上游首字节（含桶代码 + Zen TTFT） | 持续走高 = 上游慢或桶慢；对照直打上游基线 |
-| `total` | 整个响应流回传完 | ttfb 平稳而 total 增长 = 大响应体（正常） |
-| `attempt` | 重试次数 | >1 = 有桶 429/502 被跳过（看 WARNING 行详情） |
+| `win10-local` / `100.121.137.118` | 用户个人 Windows 桶，8791 | 常关机属预期，不作为常驻可用性告警；除用户另行要求外不处理 |
+| `owin10` / `100.109.109.108` | Windows 桶，8791 | 2026-10-02 检查为 0.6.2 |
+| `ubuntu26`（`opc2_uname`）/ `100.109.57.26` | Ubuntu 桶，8791；同时运行 Hermes Gateway | 2026-10-02 检查网关为 0.6.2；Hermes 默认模型已切换到公网 LB，并于 2026-10-03 00:14 重启 gateway，systemd 显示 active/running，飞书 WebSocket 已重新连接 |
+| `phone115` / `100.87.219.115` | Termux 桶，8792 | 2026-10-02 检查为 0.6.2 |
+| `hangzhou-ecs` / `100.81.214.95` | 公网入口后的 LB，7892 | Tailscale `/healthz` 与 chat 正常；详细节点记录见 `ACCESS.md` |
 
-429/502/超时日志同样带 `ttfb=`/`elapsed=`，配额熔断行有 `cordoned for quota`。
+**部署欠账**：代码库已到 0.6.3，但最近实测的四桶仍为 0.6.2，尚未完成 0.6.3 部署与旧默认管理员凭据轮换。0.6.2 缺少 0.6.3 的安全修复；在全部桶升级前，不要把桶管理端口暴露给不可信网络。升级时先检查每台启动环境已显式设置管理员/网关密钥，再同步代码、editable 安装、重启并核对 `/healthz` 版本。版本元数据从 `importlib.metadata` 读取，部署后若健康检查仍显示旧版本，检查 venv 的 editable 安装和残留 egg-info，不要手工篡改 `dist-info/METADATA` 伪造版本。
 
-## 2. ECS（杭州活动机，2026-10-02 迁移完成）
-
-> 吉隆坡 SWAS（47.250.130.52，到期 2027-09-25）自 2026-10-02 起退出边缘角色，
-> cloudflared 已 stop+disable；caddy/xray/ss/derper 空转待退订。
+## 3. 验证与常用操作
 
 ```bash
-ssh root@115.29.231.25                  # 杭州新机（公钥免密）；详见本地凭证文档
-systemctl status|restart zen-lb         # Edge LB :7892
-systemctl status|restart cloudflared-tunnel
-vim /opt/proxy_opencode/edge_lb.env     # LB 上游清单，改完 restart zen-lb
+# 公网入口（无凭据健康检查）
+curl -sS https://llm.223722.xyz/healthz
+
+# ECS 上检查服务；设备登录方式见 ACCESS.md
+systemctl status zen-lb
+journalctl -u zen-lb -n 50 --no-pager
+
+# 四桶配额复核：每桶临时签发 key、发一个真实请求、随后吊销
+QUOTA_PROBE_ADMIN_KEY="$ADMIN_KEY" python scripts/probe_bucket_quota.py
 ```
 
-- LB 配置经 EnvironmentFile 注入：`ZEN_LB_HOST/PORT/API_KEY/UPSTREAMS`
-- 旧 Docker 版 LB 已删除，统一 systemd 管理
-- 迁移坑（2026-10-02 实战）：
-  - **cloudflared 必须 `protocol: http2`**（/etc/cloudflared/config.yml）：QUIC 出境绕
-    LAX 丢包严重（models 成功率 7/10），http2 后 12/12 全通
-  - **systemd-resolved 显式配 DNS**（`/etc/systemd/resolved.conf.d/migrate.conf`，
-    223.5.5.5 + 1.1.1.1）：阿里默认解析不了 `_v2-origintunneld._tcp.argotunnel.com` SRV
-  - caddy 报 217/USER = 缺 caddy 系统用户，`useradd --system --home /var/lib/caddy --create-home --shell /usr/sbin/nologin caddy`
-  - 安全组：22/443/80/8443/8388/8442 tcp + 3478/41641 udp（AuthorizeSecurityGroup API）
-  - zen-lb keys.json 实际路径：`/opt/proxy_opencode/balancer/keys.json`
+四桶配额曾于 2026-10-02 实测全部返回 200 / QUOTA OK。重新检查配额时，应分别报告每个桶；单桶的 429、TLS EOF、DNS 失败或超时都不能推断为全局额度用尽。
 
-## 3. 各桶运维
+项目质量门禁：
 
-| 桶 | 端口 | 守护方式 | 注意 |
+```bash
+pytest tests/ -q
+pytest balancer/tests/ -q
+ruff check proxy_opencode tests balancer
+mypy proxy_opencode
+python scripts/e2e_protocols.py
+```
+
+提交前四项门禁必须全绿；`scripts/e2e_protocols.py` 使用 mock upstream 做协议端到端验证。真实 Hermes 推理是额外的环境测试，通常会消耗上游额度。
+
+## 4. 协议与排障纪律
+
+- 免费层最新复测边界：匿名请求须 `stream: true` 且包含至少两个 OpenCode 内置工具名；默认 `ZEN_TOOLS_MODE=minimal` 注入最小 schema。最近复测显示 tiny prompt / 无 system 消息也能通过，system marker 不是已验证的强制门槛。详细表述以 `AGENTS.md` 为准。
+- Zen 免费额度按出口 IP 和 UTC 日期独立计量，UTC 0 点重置。`FreeUsageLimitError` 才是上游额度信号；TLS/传输错误需重试并单独诊断。
+- Zen 目录已改用裸模型 ID（`big-pickle`）；`opencode/big-pickle` 旧拼写返回 401。`opencode-serve` 使用其自身模型命名空间，不要与 zen-direct 混淆。
+- SSE 公网链路出现断流时，先区分 Cloudflare/网络超时、LB 到桶问题和桶到 Zen 问题。LB 日志的 `ttfb` 覆盖 LB→桶→Zen 首字节；`total` 是整流回传时间。
+- 不要用真实用户密钥做批量探测；不要把请求正文、prompt 或 key 写入日志。配额探测工具使用临时 key 并在结束后吊销。
+
+## 5. 当前网络事件：opc2 到 Cloudflare
+
+2026-10-02/03 对比 opc2（Ubuntu）与本机 `owin10`：
+
+- opc2 的 Cloudflare IPv6 连接失败；IPv4 对 Cloudflare 的部分 Anycast 地址丢包/建连极不稳定。MTU 实测路径约 1480，原 Wi-Fi 接口 MTU 为 2312。
+- 已在 opc2 设置 Hermes `network.force_ipv4: true`、`/etc/gai.conf` IPv4 优先，并把 `wlx0c9160fb3c7c` MTU 从 2312 调到 1480；netplan 已写入 1480 并通过 `netplan generate`，运行时 MTU 也为 1480。
+- 修复后，opc2 到 Cloudflare A 记录 `104.21.89.73` 的 6 次 HTTPS 健康探测有 5 次成功、1 次超时，成功请求 TCP 建连约 0.05–13 秒；对另一 A 记录 `172.67.156.243` 的 5 次强制连接均在 5 秒内失败。30 次 ICMP 对两地址分别观测到约 46.7% / 3.3% 丢包（ICMP 仅作辅助，HTTPS 结果更关键）。
+- 同期 opc2 经 Tailscale 直连 ECS LB `100.81.214.95:7892` 的 `/healthz` 为 6/6 成功、每次约 38–41 ms，真实 chat 200 / 2.25 秒。因此主要故障域在 opc2 到 Cloudflare 的 ISP/Anycast 公网路径，不是 ECS LB 或四桶调度。
+- 本机 `owin10` 的 Hermes CLI 是 `vgit.0ab1ffd`，本机 Hermes 真实 one-shot 返回 `owin10-pong`；本机 IPv4 公网健康检查约 1 秒，但重复测试也发生过连接超时。强制 Cloudflare `104.21.89.73` 有 3/3 成功（约 0.9–3.7 秒），`172.67.156.243` 有 0/3 成功；本机 IPv6 同样连接失败。
+- **结论**：本机 Hermes 应用层配置和模型调用正常；本机到公网入口明显好于 opc2，但 Cloudflare Anycast/IPv6 仍非完全稳定。opc2 Hermes 已按用户选择保留 `https://llm.223722.xyz/v1` 公网入口，IPv4 优先配置有效，但不能承诺该公网路径稳定。已验证的稳定备用是同一 LB 的 Tailscale 地址 `http://100.81.214.95:7892/v1`；切换客户端入口前需明确确认。
+
+本机和 opc2 的模型推理端到端验证：opc2 Hermes 返回 `pong` 与 `17*23 = 391`；本机 Hermes 返回 `owin10-pong`。本机 E2E 成功不能证明所有 Cloudflare Anycast IP 均可达；重复探测数据如上。
+
+### 5.1 运营商差异与直连 ECS 复核（2026-10-03）
+
+出口实测：`opc2` 与 `owin10` 是**同一出口 `36.149.54.82`（移动，江苏宿迁）**；`phone115` 出口 `117.95.231.70`（**电信**，江苏宿迁）。三机同城，故对照实为「移动 vs 电信」。
+
+用 `curl --resolve` 强制同一 Cloudflare IP 的受控实验：
+
+| 目标 IP | 手机（电信） | opc2（移动） | owin10（移动） |
 |---|---|---|---|
-| win10-local | 8791 | 计划任务 `zen-gw-local`：**开机+登录自启**（S4U 后台会话，脱离交互会话存活），脚本内 `:loop` 自愈循环（退出 5s 重启） | 脚本 `scripts_local/start_gw_detached.cmd`；健康检查 `GET /healthz` |
-| owin10 | 8791 | 计划任务 `ProxyOpencodeBoot`（**开机 SYSTEM 自启** ✅）+ `ProxyOpencode`（登录触发）+ `run.cmd` 内置 `:loop` 自愈循环 | SSH：`ssh -p 2222 owin10@<tailnet>`（已装本机公钥，免密 ✅；Windows OpenSSH，管理员公钥在 `C:\ProgramData\ssh\administrators_authorized_keys`） |
-| ubuntu-26 | 8791 | systemd `proxy_opencode.service`（`enabled` + `Restart=always`，开机自启 ✅） | `ssh opc2_uname@<tailnet> -p 222` |
-| phone115 | 8792 | Termux:Boot `~/.termux/boot/start_gw.sh`（开机自启 ✅）+ 死循环 + wake-lock | 配置 `~/repo/.env` 必须 **LF** 换行；升级版本需手机内手动清理 0.4.0 幽灵进程（Magisk `su`） |
+| `104.21.89.73` | 5/5，~1.5 s | 5/5，0.6–6.6 s | 5/5，0.8–3.3 s |
+| `172.67.156.243` | **5/5，~1.5 s** | **3/5 超时** | **4/5 超时** |
 
-升级桶版本：拉取 repo → `uv pip install -e .`（editable）→ 重启进程 → `/healthz` 核对版本号。
-⚠️ editable 安装时若 repo 内残留 `proxy_opencode.egg-info/`，cwd 在 repo 启动的进程会读到旧版本号
-（sys.path[0] 优先命中 egg-info），删除即可。
+真实 chat 到 `https://llm.223722.xyz/v1`：手机（电信）5/5（4–14 s）；opc2（移动）仅 **2/5**（3 次 40 s 超时）。
 
-## 4. Zen 免费层协议要点（0.5.1 已内置）
+**结论**：故障域是「**移动 ↔ 特定 Cloudflare Anycast IP（`172.67.156.243`）**」的对等/路由问题，不是 ECS、LB、四桶或 Cloudflare 全局。电信命中同一 IP 完全正常。因此把客户端换到电信出口可显著改善，但不可控（取决于用户 ISP）。
 
-1. 请求必须带 `x-session-id`（稳定 UUID）头，否则 401 "Missing API key"
-2. 匿名仅 `-free` 后缀模型可用；池会轮换，`GET /v1/models` 拉全量
-   （2026-09-29 实测 `big-pickle` 无 `-free` 后缀也可匿名访问；
-   **2026-10-02 起 Zen 目录改为无前缀裸 ID**，`opencode/…` 旧拼写已 401）
-3. 配额按出口 IP 计（约 600 请求/日/IP，UTC 零点重置）；LB 检测 429 自动熔断
-4. 协议三要素（系统提示词标记 + 内置工具 schema + stream:true）由网关自动注入
-5. **429 判读纪律（2026-10-02 深挖）**：429 只代表"该出口 IP 当日额度耗尽"，
-   各桶独立计量、UTC 零点恢复——不要把单桶 429 当成全局没额度，也不要在
-   没有重试的情况下把间歇性 SSL EOF（直连被重置）误读成服务端行为。
-   一键复核四桶配额：`scripts/probe_bucket_quota.py`（admin key 走环境变量
-   `QUOTA_PROBE_ADMIN_KEY`，每桶铸临时 key → 打一次最小 chat → 吊销）。
-   2026-10-02 实测四桶（含本机）额度全部正常。
+**直连 ECS 复核**：安全组 `sg-bp17u8pw6r3kdkgz6hes` 原开放 22/80/443/3389/8442/8443/8388 tcp + 3478/41641 udp + ICMP，**7892 原未放行**。临时放行后，`opc2` 与手机直连 `http://115.29.231.25:7892` 的 `/healthz` 均 3/3、约 **45–50 ms**，直连真实 chat 3/3（opc2 3.3–8.9 s、手机 1.3–3.0 s）。**直连比经 Cloudflare 快约 100–300 倍且无丢包。** 注意：该直连目前是**明文 HTTP**，Bearer 凭据会明文传输，正式启用前需加 TLS。临时规则仅对上述两个测试 IP 放行，描述 `temp-direct-lb-test`；是否保留/扩展/移除待定。
 
-## 5. 接入各客户端（0.6.0 起）
+**访问限制**：ECS 的 SSH（root/ubuntu/ecs-user）均 publickey denied；云助手已安装（v2.2.4.1097）但服务未运行（心跳停于 2026-10-01T16:11Z），无法远程执行命令。故本轮**未能读取 `cloudflared`/`caddy` 配置**，也未能为直连配置 TLS。要完成「直连 + TLS」或「备案域名直连 443」，需先恢复 ECS 主机访问（提供 root 凭据，或修复云助手，或由控制台操作）。
 
-- **对外唯一模型：`ds41f_cus`**（DeepSeek V4.1 Flash）。客户端请求任意模型名
-  都透明路由到上游；响应（含流式 SSE）的模型字段一律改写为 `ds41f_cus`，
-  上游真实模型名不出网关（`MASK_MODELS=false` 可关闭）。
-- **三种协议接口**：
-  - `POST /v1/chat/completions`——OpenAI 格式（hermes / 任意 SDK），Bearer 认证
-  - `POST /v1/responses`——OpenAI Responses 格式（**codex CLI** 直连，
-    `wire_api = "responses"`），Bearer 认证
-  - `POST /v1/messages`——Anthropic Messages 格式（**claude code** 直连，
-    `ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`），`x-api-key` 或 Bearer
-- **API key 有效期**（0.6.0 起）：
-  - 管理员 key：由 `ADMIN_API_KEYS` 环境变量注入（**永久**，可管理 key）；
-    仓库内置默认值只是本地占位 `dev-admin-key`，**生产必须覆盖**
-  - 存量 `GATEWAY_API_KEYS` 静态 key：永久（四桶配置向后兼容）
-  - 新签发 key：默认 **24 小时**；`POST /admin/keys` 可自定义 TTL（0=永久）
-  - 管理：`POST/GET/DELETE /admin/keys`（仅管理员 key；列表脱敏）
-  - 存储文件：`keys.json`（KEY_STORE_PATH，已 gitignore；**不要删桶上的
-    keys.json**，删了已签发 key 全部失效）
-- Hermes 桌面版仍需 `model_aliases` 才会显示自建模型（别名指向 `ds41f_cus`）。
+### 5.2 根因定位：阿里云按域名拦截（未备案），与"无 SNI 直连 TLS"方案（2026-10-03）
 
-## 6. Hermes 接入（chat_completions）
+§5.1 的"直连仅明文"问题已解决。完整矩阵探测（从 opc2 发起）表明拦截**不是**按端口，而是按**域名**：
 
-- CLI 与桌面版共用 `%LOCALAPPDATA%\hermes\config.yaml`（HERMES_HOME）
-- `model.default` + `provider: custom` + `base_url` + `api_key` 四件套
-- **桌面版模型列表只认 models.dev 目录 + `model_aliases`**：自建网关模型必须
-  在 config 顶层加 `model_aliases`（别名 → model/provider/base_url/api_key）才会显示
-- 验证：`hermes -z "..."` 基础对话；`--reasoning high` 思考；工具调用建文件
+| 探测 | 结果 |
+|---|---|
+| `Host: 115.29.231.25`（明文 7892） | 200 |
+| `Host:` 任意 `*.223722.xyz`（明文 7892） | **403 `Server: Beaver`** |
+| `Host: www.baidu.com`（明文 7892） | 200 |
+| `openssl s_client -connect 115.29.231.25:9443`（**无 SNI**） | 握手成功 |
+| 同端口 SNI = `zen`/`llm`/`223722.xyz` | **连接被 RST** |
+| 同端口 SNI = `www.baidu.com` / `example.com` | 握手成功 |
 
-## 7. 已知问题 / TODO
+**根因**：杭州 ECS 在中国大陆，阿里云 ICP 合规拦截按 `Host` 头 / TLS `SNI` 的**域名**生效，
+**不限端口**；`223722.xyz` 整域未备案 → 全端口被封。`llm.223722.xyz` 能用是因为
+Cloudflare 在**边缘**终止 TLS、cloudflared 由 ECS **主动出站**，阿里云从未见到入站该域名。
+（此前 §5.1 判定的"移动↔特定 CF Anycast IP 路由问题"依然成立，两者是叠加的两层问题。）
 
-- [x] ~~本机网关随终端会话退出~~ → 已注册计划任务 `zen-gw-local`（AtLogOn 触发）
-- [x] ~~owin10 桶下线~~ → 2026-09-29 晚恢复：拉起网关 + 建 `ProxyOpencodeBoot`（ONSTART/SYSTEM）
-      开机自启任务 + `run.cmd` 加自愈循环 + 本机公钥装入 `administrators_authorized_keys`（免密 SSH ✅）
-- [ ] **big-pickle 上游答案质量不稳定**（Zen/Space Bunny 好坏后端混布，简单数学题
-      ~30-50% 错误率，错误响应通常缺 `reasoning_content`）。缓解：
-      ① 请求带 `reasoning_effort: high` 或提示词要求逐步推理；② 需要稳定性的场景
-      切 `gw-nemotron`（实测更稳）；③ 网关层无法根治，属上游问题
-- [x] ~~速度慢——网关侧可做的部分~~ → **0.6.1 已完成**（2026-09-30）：①拆除每 key
-      60 RPM 限速（agent 并发扇出不再被自建层惩罚）；②活体 ablation 实测 Zen 门禁
-      只查工具 schema（≥2 个即过），`ZEN_MARKER_MODE=bridge` + `ZEN_TOOLS_MODE=minimal`
-      把每请求 prefill 从 ~7.8k 降到 ~2.3k tokens（-70%）；③两台 Windows 的 hermes
-      切本桶直连（省公网链路 ~2s/请求）。
-- [ ] **剩余慢因子全在上游**（网关无法再压）：Zen TTFT ~2-4s（上游排队+启动）、
-      生成 ~22 tokens/s（模型速度）。候选：筛选响应更快的免费模型
-- [ ] Zen 偶发上游 400/invalid request（如 `400 {"model":"big-pickle"}`）会原样
-      透传给客户端（`_raw_relay_body`），属瞬时故障；LB 熔断 + 客户端重试即可
+**解决**：ECS caddy 用 catch-all 站点 + 自签证书（SAN 含 `IP:115.29.231.25`）在 `:9443` 服务；
+客户端连 **IP 字面量** → 不发送 SNI → 不触发拦截。
 
-## 8. 版本历史
+- Caddyfile 关键点：Caddy 2.6 的 hostname-less 站点**不会**自动签发内部证书，必须显式
+  `tls /etc/caddy/certs/gw.crt /etc/caddy/certs/gw.key`，否则握手报 `internal error (alert 80)`。
+- 安全组：`9443/tcp 0.0.0.0/0` 已**永久**放行（描述 `zen-gw direct TLS entry`）；
+  §5.1 的两条 `temp-direct-lb-test`（7892）与两条 `temp-9443-tls-test` 临时规则**已撤销**。
+- Python 客户端（httpx/openai）默认用 **certifi**，装系统信任库不够，需 `SSL_CERT_FILE`
+  或把 CA 追加进 venv 的 `certifi/cacert.pem`。
 
-- **边缘迁移**（2026-10-02）：KL SWAS → 杭州活动机（99元/年）。7 服务全量迁移并
-  逐个调试：zen-lb/cloudflared/caddy/xray/shadowsocks/derper(重签证书+derpMap
-  就地更新)/tailscale（auth key 经 GitHub SSO 生成，节点 hangzhou-ecs=100.81.214.95，
-  四桶全 direct 42-72ms）。域名 llm./zen. 均已切杭州，E2E 公网推理 200。
-  阿里云主账号 AK/CF Global API Key 明文见 ACCESS.md §6。
-- **0.6.2**（2026-09-30）：系统性缺陷排查与工程化重构。修复 Responses 流式
-  `output_index` 冲突与缺函数参数增量事件、Anthropic 空 assistant 轮次导致
-  上游 400、SSE 事件体缺 `type`、keystore 异形 JSON 致**启动崩溃**、LB 全桶
-  饱和误返 502、admin 错误码 200→400/404、日志白名单丢字段、`PUBLIC_MODELS`
-  解析丢条目；新增 `routes/_pipeline.py` 收敛三条协议路由重复代码；去除
-  `app` 导入期副作用；CI 补齐 ruff + mypy 门禁（此前从未真正执行）。
-- **0.6.1**（2026-09-30）：移除每 key 限流；Zen 门禁指纹重校准（bridge/minimal，
-  prefill ~7.8k → ~1k tokens）
-- **0.6.0**（2026-09-30）：对外唯一模型 ds41f_cus（掩码）；key 有效期 + /admin/keys；
-  Responses API（codex）与 Anthropic API（claude code）；auth/ formats/ 模块化细分
-- **0.5.1**（2026-09-29）：适配 Zen 新门禁（x-session-id 稳定头）
-- **0.5.0**：配额感知熔断、request_id 追踪、/admin 面板、双桶→四桶拓扑
-- **0.4.x**：单桶原型（Docker 部署，已淘汰）
+**实测**（各 20 次）：`https://115.29.231.25:9443` **20/20**（约 70–80 ms）；
+`https://llm.223722.xyz` **18/20**。opc2 Hermes 默认已切到 IP 直连，one-shot 通过；
+手机 chroot 内新增非默认 provider `zen-gw-direct`，默认仍为本地 `ms-glm`。
 
-## 9. 全链路验证记录（2026-09-30）
+****若要正式域名入口**：只能给域名做 **ICP 备案**，或把入口迁到**非大陆节点**（港/新，免备案）。
 
-在 owin10 上以 hermes 与 claude code 为客户端，覆盖四桶直连 + LB + 公网入口
-的实测记录。可复现命令见 `scripts/e2e_hermes.md`。
+## 6. 当前风险与待办
 
-### 9.1 拓扑连通性（全部通过）
+1. **高优先级：桶仍运行 0.6.2**。计划在具备各节点访问条件后升级到 0.6.3，确认旧默认 admin key 失效，并轮换曾暴露的凭据。不要在此手册粘贴具体凭据。
+2. **公网路径**：opc2 已切 IP 直连 `https://115.29.231.25:9443/v1`（20/20）；CF 入口保留为备用（18/20）。若要长期用**域名**入口，需决策：**ICP 备案** 还是 **迁到非大陆节点**（见 §5.2）。`owin10` 仍是 CF 入口，如需同样稳定性可照 §6.5 切直连。
+3. **自签证书的信任分发**是新增运维点：新增客户端需装 `ca.crt`（Linux 系统库 / Python 需 `SSL_CERT_FILE`）。证书 10 年有效，但 ECS 重装或 `/etc/caddy/certs/` 丢失需重建并重新分发。
+3. **公开 `/healthz` 暴露 LB 上游拓扑、请求计数和错误摘要**。当前可公网读取，后续应评估将细节收至管理员接口或提供脱敏公开健康响应。`win10-local` 的离线是用户个人设备关机的预期状态，不在本轮处理其地址或健康告警。
+4. Hermes Gateway 的 systemd user service 已于 2026-10-03 00:14 重启并显示 active/running；飞书 WebSocket 已连接。CLI 真实调用已通过，但尚未用一次真实飞书会话单独确认 Gateway 发出的模型请求，避免擅自向外发送测试消息。
+5. `win10-local`（100.121.137.118）是用户个人设备且经常关机；离线为预期，不在本手册列作故障或本轮待办。
 
-| 目标 | 地址 | healthz | 版本 |
-| --- | --- | --- | --- |
-| win10-local | `100.121.137.118:8791` | 200（本机 5ms） | 0.6.1 |
-| owin10 | `100.109.109.108:8791` | 200 | 0.6.1 |
-| ubuntu26 | `100.109.57.26:8791` | 200 | 0.6.1 |
-| phone115 | `100.87.219.115:8792` | 200 | 0.6.1 |
-| ECS LB | `100.90.84.65:7892` / `47.250.130.52:7892` | 200 | — |
-| 公网入口 | `https://llm.223722.xyz` | 200 | — |
+## 7. 未实施的架构想法（不是现状）
 
-四桶直连非流式 / 流式对话均 200；`/v1/responses`（codex 协议）与
-`/v1/messages`（Anthropic 协议）经公网入口均返回正确内容。
-
-### 9.1.1 ⚠️ 四桶升级欠账（2026-10-02 巡检发现，高优先级）
-
-四桶（含本机）都还在跑 **0.6.2**，即 0.6.3 安全修复发布**之前**的版本。
-实测确认：**0.6.2 仓库里泄漏的旧默认 admin key 在四桶的 `/admin/keys` 上
-全部有效**——任何能访问桶端口的人都可以直接铸永久网关 key。0.6.3 已修复
-（默认占位符 + 非回环绑定强制显式 `ADMIN_API_KEYS`），升级步骤：
-
-```
-拉取 repo → uv pip install -e . → 重启桶进程 → /healthz 核对版本号
-→ 确认启动环境里显式设置了 ADMIN_API_KEYS / GATEWAY_API_KEYS
-```
-
-升级后旧默认 admin key 即失效（不再作为默认值），四桶重新获得防护。
-另外注意 0.6.3 修复的 `/admin/keys` NaN TTL 漏洞（可绕过 24h 过期铸永久
-key）同样存在于 0.6.2 桶上，升级前请勿把 admin key 暴露给不可信网络。
-
-### 9.1.2 配额复核（2026-10-02）
-
-`scripts/probe_bucket_quota.py` 实测四桶（win10-local / owin10 / ubuntu26 /
-phone115）真实 chat 全部 200——四桶当日额度均正常。此前（2026-10-01 晚）
-单看本机直连出口的 429 得出"额度耗尽"属于误判：那是本机出口在 0.6.2 消融
-测试期的当日额度用尽，UTC 零点重置后已恢复；各桶按出口 IP 独立计量。
-
-### 9.2 延迟基准（N=5 非流式，max_tokens=200）
-
-| 路径 | TTFB 中位 | 总耗时 中位 | 总耗时 min/max |
-| --- | --- | --- | --- |
-| ubuntu26 直连 | 2946ms | **2948ms** | 2441/4863 |
-| owin10 直连 | 3184ms | 3197ms | 2401/7527 |
-| phone115 直连 | 3042ms | 4061ms | 2354/5805 |
-| LB 公网入口 | 4554ms | **5082ms** | 4444/5885 |
-
-结论：**直连桶比公网入口快约 1.5–2.1s/请求**（与 ACCESS.md 的 ~2s 一致）。
-owin10 的 hermes / claude code 目前都指向公网入口，尚未启用直连提速。
-注意 phone115（Termux）出现 1/6 连接失败，稳定性弱于其他三桶。
-
-### 9.3 客户端实测（owin10）
-
-| 用例 | 耗时 | 结果 |
-| --- | --- | --- |
-| hermes 普通问答 | 20.0s | ✅ 正确 |
-| hermes 推理（`--reasoning high`） | 18.2s | ✅ 正确（Reasoning 面板可见） |
-| hermes 工具（`-t terminal -t file --yolo`） | 25s | ✅ 落盘 `e2e_probe.txt`=hello，6 次工具调用 |
-| claude code 普通问答 | 18.8s | ✅ 正确 |
-| claude code 工具（Write/Read） | 77.3s | ✅ 落盘 `c_e2e.txt`=hi |
-
-⚠️ claude code 对 `ds41f_cus` 报 `[claude-code:unrecognized_model]`：不在其模型
-目录内，auto-compact 按 200k 上下文估算。功能不受影响；如需消除告警，可用
-`modelOverrides`/`behavesAs` 映射，或设 `CLAUDE_CODE_MAX_CONTEXT_TOKENS`。
-
-### 9.4 实测确认的两个部署缺陷（已在 0.6.2 修复，需重新部署桶与 LB）
-
-1. **SSE 泄漏 `delta.name`**：Zen 回填上游模型名 `Space Bunny`，旧掩码只改
-   `model`，故随流式响应泄漏。已在 `sse_mask.py` 修复。
-2. **LB 熔断过激**：win10-local 桶在实测中 **可正常服务**（多次 200），却因
-   早先一次 429 被 LB 熔断到 UTC 零点（快照显示 `quota_exhausted=true,
-   reset=747min`，而直连该桶持续返回 200），静默损失 1/4 容量。已改为冷却
-   窗口（默认 900s 自动重探）。
-
-> 上述两项均在**部署版 0.6.1** 上实测复现；修复位于 0.6.2，**需要把四桶与
-> ECS LB 重新部署**后才会生效。
-
-### 9.5 三个客户端实际使用的协议（抓包实证）
-
-用本机 8877 透明抓包代理（stdlib，转发到真实网关）实测：
-
-| 客户端 | 协议 | 端点 | 备注 |
-| --- | --- | --- | --- |
-| hermes | **chat_completions**（主）+ responses（辅助） | `/v1/chat/completions` 2 次；`/v1/responses` 1 次 | 主请求 40KB；另有 `/v1/models`、`/api/tags` 等探测 |
-| codex / codex++ | **responses** | `/v1/responses` | `config.toml` 里 `wire_api = "responses"` |
-| claude code | **anthropic messages** | `/v1/messages?beta=true` | 同时发 stream=True 与 False 两版 |
-
-**结论：三种格式都在被真实使用，都必须保留。** hermes 走 chat（还顺带打了
-一次 responses），codex 走 responses，claude code 走 anthropic。
-
-### 9.6 提示词构成与瘦身（本轮重点）
-
-输入 token 的构成（抓包实测）：
-
-| 客户端 | 工具定义 | 系统提示词 | 消息 | 合计 |
-| --- | --- | --- | --- | --- |
-| claude code | **15,068 tok / 23 个（79%）** | 1,451 tok | 2,416 tok | ~19.1k |
-| codex | **6,786 tok / 15 个** | 42 tok | ~1,600 tok | ~8.5k |
-| hermes | **5,989 tok / 14 个** | 4,042 tok | ~13 tok | ~10.1k |
-
-**工具定义是绝对大头**，故优化都落在工具上：
-
-1. **网关注入（全客户端，省 ~1,900 tok/请求）**：门禁只认「≥2 个内置工具名」，
-   schema 内容不校验 → 注入从 7,872 字符降到 246 字符。
-2. **claude code（省 ~9,500 tok/请求，-50%）**：`permissions.deny` 摘除 11 个
-   与编码无关的工具（DesignSync/SendMessage/Workflow/ScheduleWakeup/Cron*/
-   Worktree*/ReportFindings/ListAgents）——Claude Code 会把它们**从请求里
-   移除**。请求体 76,027 → 37,740 字符。
-3. **codex（待定，潜在 ~5,500 tok）**：`~/.codex/config.toml` 启用了
-   `browser` / `unified-computer-use` / `visualize` / `codex-app-tools`
-   四个 bundled 插件，其工具（`multi_agent_v1` 2,385 tok、`mcp__cua_repl`
-   992、`mcp__node_repl` 525、goals 系列 ~1,175、MCP 资源系列 ~486）占了
-   codex 工具预算的绝大部分。未擅自关闭（可能影响 codex++ 既有能力），
-   需要时把对应 `[plugins."..."]` 的 `enabled` 改为 `false` 即可。
-
-**合计效果（claude code 端到端）**：上行请求 21.1k → 8.9k tok，**降幅 ~57%**。
-
-### 9.7 0.6.2 部署记录（2026-09-30）
-
-四桶 + ECS LB 已全部滚动升级到 **0.6.2**，逐点验证通过。
-
-| 节点 | 目录 | 重启方式 | 结果 |
-| --- | --- | --- | --- |
-| win10-local | `D:\wb_ps\proxy_opencode\repo` | 自愈循环（kill python 进程即自动拉起） | 0.6.2 ✓ |
-| owin10 | `C:\Users\owin10\proxy_opencode` | `schtasks /run /tn ProxyOpencodeBoot` | 0.6.2 ✓ |
-| ubuntu26 | `~/proxy_opencode` | `sudo systemctl restart proxy_opencode` | 0.6.2 ✓ |
-| phone115 | `~/repo` | 自愈循环（kill python 进程） | 0.6.2 ✓ |
-| ECS LB | `/opt/proxy_opencode/balancer/lb.py` | `systemctl restart zen-lb` | ✓ |
-
-**部署要点（下次照做）**：
-
-1. owin10 / ubuntu26 / phone115 的部署目录**不是 git 仓库**，只能同步文件：
-   本地 `tar czf pkg.tgz --exclude=__pycache__ proxy_opencode` → scp → 远端
-   `mv proxy_opencode proxy_opencode.bak_<日期> && tar xzf pkg.tgz`。
-2. **必须同步修正 venv 里 dist-info 的 METADATA `Version:`**，否则 healthz
-   仍报旧版本号（`__version__` 取自 `importlib.metadata`，不是源码）：
-   `sed -i "s/^Version: .*/Version: 0.6.2/" <venv>/lib/python3*/site-packages/proxy_opencode-*.dist-info/METADATA`
-3. **owin10 的 `taskkill /F` 之后自愈循环不会自动拉起**（实测），需
-   `schtasks /run /tn ProxyOpencodeBoot` 补一手；其余三处 kill 后自动恢复。
-4. 备份产物：`proxy_opencode.bak_0620`（三桶）、`lb.py.bak_0620`（ECS）。
-
-**部署后实测（0.6.2）**：
-
-- 四桶 healthz 全部 `version=0.6.2`；LB 四桶 `healthy=true`、
-  `quota_exhausted=false`（win10-local 的误熔断随重启清除）。
-- 公网入口简单对话 **`prompt_tokens` 2,323 → 476（-79%）**。
-- 三客户端回归：hermes ✅、claude code 工具链 ✅（落盘核验）、
-  codex ✅ 且 `tokens used` **6,119 → 4,081（-33%）**。
+曾评估用杭州 ECS 上的单网关 + 多出口槽位替代四台异构机器各跑完整网关，另开独立入口先灰度、保留现有 `llm.223722.xyz` 回滚路径。该方案**未部署**：涉及出口独立性、SSH 转发稳定性、ECS 资源、鉴权隔离与恢复演练；不能将旧 `llm2.223722.xyz` 计划中的命令或端口当作当前部署操作。若重启该评估，先验证当前资源、访问权限与合规要求，再在不影响现网的环境做试验。

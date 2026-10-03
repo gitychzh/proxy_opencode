@@ -1,5 +1,12 @@
 # Changelog
 
+> 2026-10-03 文档治理说明：早期版本日志中提及的 `docs/dual-bucket-topology.md`、
+> `docs/roadmap.md` 等是**历史产物**，已合并有效操作信息到 `docs/OPERATIONS.md`
+> 与 `docs/ACCESS.md` 并移除源文件。旧版本记录用于追溯当时的变化，不能视作当前部署指引。
+> 0.3.0 曾记录的“免费层三要素”（含 system marker）被 2026-09-30 活体复测修正：
+> 当前记录的门槛是 `stream=true` + 至少两个内置工具名；system marker 并非强制条件。
+> 当前事实以 `AGENTS.md` 为准。
+
 ## [0.6.3] - 2026-10-02
 
 第二轮系统性审计（安全 + 协议正确性 + 上游漂移）。所有修复均带回归测试；
@@ -426,7 +433,7 @@
   - 会话/消息标识符精确复刻 opencode `schema/src/identifier.ts` 算法
     （26 字符 = 12 位 hex 时间部分 + 14 位随机，时间部分与 opencode.db
     中真机数据逐对吻合）。
-  - **免费层校验三要素**（消融实测，推翻 0.2.0 的 TLS 指纹结论）：
+  - **免费层校验（2026-09-27 当时结论；后经 2026-09-30 活体复测修正，勿用于当前配置）**：
     ① 系统提示词标记（随包 `zen_prompt_default.txt`）
     ② opencode 内置工具 schema 列表（随包 `zen_builtin_tools.json`，
     11 个 schema 抓包提取；客户端工具合并其后、同名以客户端为准）
@@ -448,10 +455,11 @@
 - 默认 `UPSTREAM_MODE` 从 `opencode-serve` 改为 `zen-direct`。
 - `opencode-serve` 模式保留作为无代理环境下的回退。
 
-### Notes（背景结论，2026-09-27 实测）
+### Notes（背景结论，2026-09-27 实测；2026-09-30 已复测修正）
 
-- 免费层校验三要素：系统提示词标记 + 内置工具 schema + stream=true
-  （消融验证：任一缺失 → 403 `FreeTierError`；内置+客户端工具合并 → 200）。
+- 当时记录为“系统提示词标记 + 内置工具 schema + stream=true”，后续复测推翻了
+  system marker 必须这一项，并把工具门槛精确为至少两个内置工具名。当前有效结论见
+  `AGENTS.md`；本历史版本记录仅保留原始研发背景，不应作为现行配置依据。
 - 免费额度按出口 IP 计（429 `FreeUsageLimitError`），按 UTC 日重置。
 - hermes e2e 验收见 `scripts/e2e_hermes.md`。
 

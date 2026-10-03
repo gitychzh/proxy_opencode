@@ -20,9 +20,8 @@ key）、受影响版本。我们会在确认后尽快回复并协调修复与�
 ## 密钥处理
 
 - 任何 API key / 凭证都只能通过环境变量（如 `UPSTREAM_API_KEY`、
-  `GATEWAY_API_KEYS`）注入，**永不入库**，测试与文档同样只使用 dummy key。
-  唯一例外是 `docs/ACCESS.md`：经仓库所有者确认的私有仓库明文节点凭证
-  （见该文件首部声明），本节其余约束对其余所有文件仍然有效。
+  `GATEWAY_API_KEYS`）注入，**永不入库**；测试与文档同样只使用 dummy key。
+  `docs/ACCESS.md` 仅记录凭据名称、用途和仓库外存放位置，不记录凭据值。
 - 日志只记录元数据（`request_id`、`model`、`status`、`latency_ms` 等），
   **绝不记录消息体内容或任何 API key**。
 - 客户端网关 key 不透传给上游；若发现透传路径，请按漏洞上报。

@@ -1,14 +1,11 @@
-# balancer 配置模板
-#
-# 复制为 run.local.cmd（或 run.cmd）后按机器实际情况修改，**不要把填好真实
-# key 的版本提交到 git**（run.cmd 已在 .gitignore 中）。
-#
-# 启动：双击 run.cmd，或注册成计划任务 / systemd 服务（见
-# docs/dual-bucket-topology.md「持久化」一节）。
-
 @echo off
+REM balancer 配置模板；复制为 run.cmd 后按机器实际情况修改。
+REM 不要提交含真实 key 的 run.cmd（已被 .gitignore 排除）。
+REM 双击 run.cmd 启动；当前部署形态见 docs/OPERATIONS.md。
 chcp 65001 >nul
-cd /d D:\wb_ps\proxy_opencode\repo
+set "ROOT=%~dp0.."
+cd /d "%ROOT%"
+if not exist "%ROOT%\logs" mkdir "%ROOT%\logs"
 
 REM ── 监听 ──────────────────────────────────────────────────────────────
 REM 0.0.0.0 让 tailnet 上其他设备也能用；仅本机调试改成 127.0.0.1
@@ -30,8 +27,8 @@ set "ZEN_LB_UPSTREAMS=bucket-a|http://127.0.0.1:8791|CHANGE-ME-gateway-key;bucke
 
 REM ── 日志 ──────────────────────────────────────────────────────────────
 REM 不设则默认写到脚本同级的 logs/lb.log（相对路径，不绑定任何盘符）
-set "ZEN_LB_LOG=D:\wb_ps\proxy_opencode\repo\logs\lb.log"
+set "ZEN_LB_LOG=%ROOT%\logs\lb.log"
 set "PYTHONUNBUFFERED=1"
 
-REM 用网关自己的虚拟环境跑，避免污染系统 Python
-"D:\wb_ps\proxy_opencode\repo\.venv\Scripts\python.exe" balancer\lb.py >> D:\wb_ps\proxy_opencode\repo\logs\stdout.log 2>&1
+REM 用项目虚拟环境运行，不污染系统 Python
+"%ROOT%\.venv\Scripts\python.exe" "%ROOT%\balancer\lb.py" >> "%ROOT%\logs\stdout.log" 2>&1
