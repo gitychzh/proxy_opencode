@@ -12,10 +12,9 @@
 
 - **Tailscale tailnet**：四桶 + ECS 互通；SSH 全部走 Tailscale IP
 - **DERP 中继**：region 901 = 自建 derper（自签证书，STUN 3478）
-- **公网入口 A（Cloudflare，通用）**：`https://llm.223722.xyz/v1`（Cloudflare Tunnel，杭州 ECS 承载）——
-  任意网络可用；移动网实测约 90%（见 §6.5）
-- **公网入口 B（IP 直连，移动网推荐）**：`https://115.29.231.25:9443/v1`（杭州 ECS 自签证书 + IP SAN）——
-  **客户端必须用 IP 而非域名**（域名会带 SNI 触发备案拦截），详见 §6.5；移动网实测 100%
+- **公网入口 A（Cloudflare，通用）**：`https://llm.223722.xyz/v1`（Cloudflare Tunnel，杭州 ECS 承载）
+- **公网入口 B（IP 直连，移动网推荐）**：`https://115.29.231.25:9443/v1` —— **必须用 IP 而非域名**
+  （域名会带 SNI 触发备案拦截），见 §7
 
 ## 1. 四桶总览
 
@@ -67,7 +66,7 @@ ssh -p 2222 owin10@100.109.109.108          # 已装本机公钥，免密
 | 网关目录 | `C:\Users\owin10\proxy_opencode`，启动脚本 `run.cmd`（自举 VBS 无窗 + pythonw + `:loop` 自愈；备份 `.bak_20260930_windowless`） |
 | 守护 | 计划任务 `ProxyOpencodeBoot`（开机 SYSTEM 自启，**不限时** PT0S，无窗口） |
 | 远端 Python | `C:\Users\Owin10\AppData\Local\Programs\Python\Python312\python.exe` |
-| Hermes 配置 | `C:\Users\Owin10\AppData\Local\hermes\config.yaml`（CLI 与桌面版共用，接入示例见 §7） |
+| Hermes 配置 | `C:\Users\Owin10\AppData\Local\hermes\config.yaml`（CLI 与桌面版共用，接入示例见 §8） |
 
 远程执行辅助：本机 `scripts_local/owin_exec.py`（paramiko，密码从 `secrets.env` 读取）。
 ⚠️ Git Bash 会把命令里的 `C:\` 改写成 `C://`——路径一律用 `%USERPROFILE%` 或走脚本文件。
@@ -90,8 +89,8 @@ ssh -p 2222 opc2_uname@100.109.57.26        # 本次已验证密码认证；密�
 | SSH | Tailscale `100.109.57.26:2222`，用户 `opc2_uname`；2026-10-02/03 已验证密码认证可用。不要在仓库记录密码；端口 22 不通 |
 | 守护 | systemd `proxy_opencode.service`（`enabled` + `Restart=always`，开机自启） |
 | 网关目录 | `~/proxy_opencode`（桶部署） |
-| Hermes 模型链路 | `~/.hermes/config.yaml` 默认 `ds41f_cus` → **`https://115.29.231.25:9443/v1`（IP 直连，无 SNI，见 §6.5）**；CF `https://llm.223722.xyz/v1` 作为备用。CA 已装入系统信任库，并在 `~/.bashrc` + systemd drop-in `zen-gw-ca.conf` 设 `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`（httpx 走 certifi，必须显式指定）。2026-10-03 实测 one-shot 通过 |
-| 公网路径状态 | opc2 到 Cloudflare IPv6 不通，IPv4 Anycast 路由仍有明显超时；已将 Wi-Fi MTU 持久设为 1480。**移动网下 IP 直连（9443）已实测 20/20，优于 CF 的 18/20**；Tailscale LB 入口 `http://100.81.214.95:7892/v1` 仍可用作备用 |
+| Hermes 模型链路 | `~/.hermes/config.yaml` 默认 `ds41f_cus` → `https://115.29.231.25:9443/v1`（IP 直连，见 §7）；CF 入口作备用。2026-10-03 one-shot 通过 |
+| 公网路径状态 | opc2 到 CF IPv6 不通、IPv4 Anycast 部分地址超时（Wi-Fi MTU 已持久设 1480）。**IP 直连 9443 实测 20/20，优于 CF 的 18/20**；Tailscale LB `http://100.81.214.95:7892/v1` 可备用 |
 
 ```bash
 systemctl status|restart proxy_opencode
@@ -136,22 +135,19 @@ adb connect 100.87.219.115:43357
 adb shell 'su -c "am startservice --user 0 -n com.termux/com.termux.app.RunCommandService -a com.termux.RUN_COMMAND --es com.termux.RUN_COMMAND_PATH /data/data/com.termux/files/usr/bin/bash --esa com.termux.RUN_COMMAND_ARGUMENTS -l,-c,~/.termux/boot/start_gw.sh --ez com.termux.RUN_COMMAND_BACKGROUND true --es com.termux.RUN_COMMAND_WORKDIR /data/data/com.termux/files/home"'
 ```
 
-手机 chroot 内的 hermes（`/opt/hermes-venv/bin/hermes`）跑 one-shot 时**必须 `export HOME=/root`**，
-否则读 `/.hermes/` 而非 `/root/.hermes/` 并报 `No inference provider configured`。
+**chroot 内 hermes**：`/opt/hermes-venv/bin/hermes` 跑 one-shot 时**必须 `export HOME=/root`**，
+否则读 `/.hermes/` 而非 `/root/.hermes/`，报 `No inference provider configured`。
 
-⚠️ **进入 chroot 的正确写法（2026-10-03 修正）**：`su 0 chroot …` / `su 0 sh -c "chroot …"`
-**都不会真正 chroot**（命令仍在 Android 根下执行，`ls /` 显示的是 Android 根）。
-必须用 **`su -c "chroot …"`**，并给 chroot 内的二进制**绝对路径**：
+⚠️ **进入 chroot 的正确写法（2026-10-03 修正）**：`su 0 chroot …` / `su 0 sh -c "chroot …"` 都
+**不会真正 chroot**（命令仍在 Android 根下跑，`ls /` 显示 Android 根）。必须用 `su -c "chroot …"`，
+并给 chroot 内的二进制**绝对路径**（`env -i` 清空 PATH 后 `wc`/`sed` 会 not found）：
 
 ```bash
 adb -s 100.87.219.115:43357 shell 'su -c "chroot /data/local/chroot/ubuntu /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root /bin/bash /root/xxx.sh"'
 ```
 
-（PATH 被 `env -i` 清空后 `wc`/`sed` 会 not found，脚本内一律用 `/usr/bin/...` 绝对路径。）
-
-手机 chroot 内已注册**非默认** provider `zen-gw-direct` → `https://115.29.231.25:9443/v1`（§6.5），
-并已把自签 CA 装入系统信任库、追加进 `/opt/hermes-venv/.../certifi/cacert.pem`；
-默认模型仍为本地 `ms-glm`，不受影响。
+已注册**非默认** provider `zen-gw-direct` → `https://115.29.231.25:9443/v1`（§7），并把自签 CA
+装入系统信任库、追加进 `/opt/hermes-venv/.../certifi/cacert.pem`；默认模型仍为本地 `ms-glm`。
 
 ⚠️ 沙箱环境每次调用 adb daemon 都会重死——**connect + shell 必须写在同一条命令里**：
 
@@ -182,38 +178,23 @@ adb connect 100.87.219.115:43357 && adb -s 100.87.219.115:43357 shell "su -c 'ne
 ### 杭州新 ECS（i-bp1bzxumftqasjq6nid5 · 99元/年 · 到期 2027-10-01）
 
 - 公网 `115.29.231.25`（安全组：22/443/80/8443/8388/8442/**9443** tcp + 3478/41641 udp；
-  `9443` 为 IP 直连 TLS 入口，见 §6.5。7892 仅限内网/Tailscale，公网不放行）
+  `9443` 为 IP 直连 TLS 入口，见 §7。7892 仅限内网/Tailscale，公网不放行）
 - Ubuntu 24.04.5，2C2G，Tailscale `hangzhou-ecs` = **100.81.214.95**（四桶全 direct：owin10 42ms / phone 72ms）
 - 服务：zen-lb(:7892) / cloudflared-tunnel(**必须 http2**) / caddy(:443,:80,**9443 直连入口**) / xray(:8443) / shadowsocks(:8388) / derper(:8442+STUN:3478) / tailscaled
 - derper 证书指纹：`sha256-raw:883ec3b90aaa75d463c0ee4db639064a57639014aeb531e650d963a55420dbaf`（Tailscale ACL derpMap region 901 已指向）
 - cloudflared DNS 坑：systemd-resolved 显式配 `223.5.5.5 + 1.1.1.1`（`/etc/systemd/resolved.conf.d/migrate.conf`），否则 argotunnel SRV 解析失败
 
-## 6.5 直连入口：为何 `223722.xyz` 不能直连，以及"无 SNI"绕行
+## 7. 直连入口：为何必须用 IP 而不是域名
 
-### 根因（2026-10-03 定位，从 opc2 实测）
+杭州 ECS 在中国大陆，阿里云 ICP 合规拦截按**域名**（HTTP `Host` 头 + TLS `SNI`）生效、
+**不限端口**。`223722.xyz` 整域未备案 → 任意端口只要带该域名就被拦（明文 403 `Server: Beaver`、
+TLS 直接 RST）；不带域名（`Host: <IP>`、无 SNI、或第三方域名）则正常。完整探测矩阵与推导见
+`OPERATIONS.md` §5.2。
 
-杭州 ECS 在**中国大陆**，阿里云的 ICP 合规拦截（响应头 `Server: Beaver`）按**域名**拦截到达
-该 ECS 的流量，且**不限于 80/443**：
+**绕行**：客户端连 **IP 字面量** → TLS 不发 SNI → 不触发拦截。ECS 侧 caddy 用 catch-all 站点
++ 自签证书服务该端口。
 
-| 探测 | 结果 |
-|---|---|
-| `http://115.29.231.25:7892/healthz`，`Host: 115.29.231.25` | **200** |
-| 同端口，`Host:` 任意 `*.223722.xyz` | **403 `Server: Beaver`** |
-| 同端口，`Host: www.baidu.com` | 200 |
-| `openssl s_client -connect 115.29.231.25:9443`（**无 SNI**） | 握手成功 |
-| 同端口，SNI = `zen`/`llm`/`223722.xyz` 任一 | **连接被 RST** |
-| 同端口，SNI = `www.baidu.com` / `example.com` | 握手成功 |
-
-拦截键值是**域名本身**（HTTP `Host` 头 + TLS `SNI`），与端口无关；`223722.xyz` 整域
-（含全部子域）未备案 → 全端口被封。IP 直连、以及不解析到该 ECS 的第三方域名不受影响。
-
-`https://llm.223722.xyz` 之所以可用，只是因为 Cloudflare 在**边缘**终止 TLS，cloudflared
-**从 ECS 主动出站**建隧道——阿里云侧从未看到入站的该域名。
-
-### 绕行：IP 直连 + 不发送 SNI
-
-TLS 客户端连接 **IP 字面量**时不发送 SNI，因此不触发域名拦截。ECS 侧 caddy 用
-**catch-all 站点 + 自签证书（SAN 含 `IP:115.29.231.25`）** 服务该端口：
+### 服务端（杭州 ECS）
 
 ```
 # /etc/caddy/Caddyfile
@@ -230,31 +211,32 @@ https://:9443 {
 ```
 
 - ⚠️ Caddy 2.6 的 **hostname-less 站点不会自动签发内部证书**，必须显式 `tls <crt> <key>`；
-  否则该端口表现为握手 `internal error (alert 80)`。
-- 证书位于 `/etc/caddy/certs/`（`ca.crt` 自签 CA，10 年；`gw.crt` SAN =
+  否则该端口握手报 `internal error (alert 80)`。
+- 证书 `/etc/caddy/certs/`：`ca.crt`（自签 CA，10 年）、`gw.crt`（SAN =
   `IP:115.29.231.25, IP:100.81.214.95, DNS:zen-gw.local`）。
-- 安全组永久放行 `9443/tcp 0.0.0.0/0`（此前 7892/9443 的临时规则已撤销）。
+- 安全组永久放行 `9443/tcp 0.0.0.0/0`（描述 `zen-gw direct TLS entry`）；7892 仅内网/Tailscale。
 
-### 客户端怎么接
+### 客户端
 
-`base_url: https://115.29.231.25:9443/v1` —— **写 IP，不要写域名**（域名会带 SNI 被拦）。
+`base_url: https://115.29.231.25:9443/v1` —— **写 IP，不要写域名**（写域名会带 SNI 被拦）。
 
-证书信任（二选一）：
+证书信任二选一：
 
-1. 装 CA 到信任库。Linux 系统库：`/usr/local/share/ca-certificates/` + `update-ca-certificates`；
+1. 装 CA。Linux 系统库 `/usr/local/share/ca-certificates/` + `update-ca-certificates`；
    但 **Python 的 httpx/openai 默认用 certifi**，还需 `SSL_CERT_FILE=/path/ca-bundle.crt`
-   （certifi 包 + 自签 CA 拼接）或直接把 CA 追加到 venv 的 `certifi/cacert.pem`。
-2. 客户端关闭校验（`verify=false` / `-k`）——不推荐。
+   （certifi 包 + 自签 CA 拼接），或把 CA 追加到 venv 的 `certifi/cacert.pem`。
+2. 关闭校验（`verify=false` / `-k`）——不推荐。
 
-**实测（opc2 · 移动网 · 各 20 次）**：直连 9443 **20/20**（约 70–80 ms）；CF `llm.223722.xyz` **18/20**。
-手机（电信）直连同样 200。
+已接入：**opc2**（Hermes 默认入口；CA 入系统库，并在 `~/.bashrc` 与 systemd drop-in
+`zen-gw-ca.conf` 设 `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`）；**手机 chroot**（非默认 provider
+`zen-gw-direct`，默认仍为本地 `ms-glm`）。
 
-### 仍未解决
+**实测**（opc2 · 移动网 · 各 20 次）：直连 9443 **20/20**（约 70–80 ms）vs CF **18/20**；
+`/v1/chat/completions` 无 key / 错 key 均 401，`/healthz` 公开。
 
-若要让 `zen.223722.xyz` 成为**正式域名入口**，只有两条路：给域名做 **ICP 备案**，
-或把入口换到**非大陆节点**（香港/新加坡 ECS，无需备案）。当前策略是"CF + IP 直连"双入口。
+正式**域名**入口仍需 **ICP 备案**或**迁非大陆节点**（见 `OPERATIONS.md` §5.2）。
 
-## 7. Hermes 接入模板（各 Windows 桶通用）
+## 8. Hermes 接入模板（各 Windows 桶通用）
 
 配置文件：`%LOCALAPPDATA%\hermes\config.yaml`
 
@@ -262,7 +244,7 @@ https://:9443 {
 model:
   default:  "ds41f_cus"
   provider: "custom"
-  base_url: "https://llm.223722.xyz/v1"
+  base_url: "https://llm.223722.xyz/v1"   # 移动网可改用 IP 直连 https://115.29.231.25:9443/v1（§7）
   api_key:  "<admin-key>"          # 从 secrets.env 取，勿写死进仓库
 
 # 桌面版模型列表只认 models.dev 目录 + 别名，必须加 model_aliases 才在 UI 可见
@@ -276,13 +258,11 @@ model_aliases:
 
 改完重启桌面版生效；CLI 可 `hermes -m ds41f` 按别名切模型。
 
-**当前 Hermes 链路（2026-10-03 实测）**：`owin10` 仍指向 `https://llm.223722.xyz/v1`；
-**opc2 已切到 IP 直连 `https://115.29.231.25:9443/v1`**（§6.5），one-shot 通过，移动网 20/20。
-opc2 的 Cloudflare 公网路径仍有丢包与连接超时（18/20），保留为备用；Tailscale LB 入口
-`http://100.81.214.95:7892/v1`（约 38–41ms）亦可备用。此前“两个 Windows 客户端都已切本机 8791”
-的记录已过时，不再作为当前状态。
+**当前链路（2026-10-03 实测）**：`owin10` 用 CF `https://llm.223722.xyz/v1`；`opc2` 用 IP 直连
+`https://115.29.231.25:9443/v1`（见 §4 与 §7）。两台 CLI 的 one-shot 均已通过；opc2 另有
+Tailscale LB 入口 `http://100.81.214.95:7892/v1` 可备用。
 
-## 8. 冒烟测试
+## 9. 冒烟测试
 
 ```bash
 # 公网入口（key 从 secrets.env 注入，勿写死）
@@ -296,11 +276,11 @@ for u in 100.121.137.118:8791 100.109.109.108:8791 100.109.57.26:8791 100.87.219
   curl -s "http://$u/healthz" && echo " <- $u"
 done
 
-# IP 直连入口（§6.5）——必须用 IP，证书用自签 CA 校验
+# IP 直连入口（§7）——必须用 IP，证书用自签 CA 校验
 curl --cacert ca.crt https://115.29.231.25:9443/healthz
 ```
 
-## 9. 凭据轮换清单（2026-10-02 泄露后必做）
+## 10. 凭据轮换清单（2026-10-02 泄露后必做）
 
 以下凭据曾以明文进入公开仓库历史，**必须全部轮换**（改密码 / 重新签发 /
 吊销重建），旧值视为已泄露：

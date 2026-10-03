@@ -111,9 +111,11 @@ providers:
 ## 多出口桶池与公开 LB
 
 Zen 免费额度按**出口 IP**计，因此 LB 将多个不同出口的 `proxy_opencode` 网关汇聚到一个
-OpenAI 兼容入口。当前公网链路由 Cloudflare Tunnel 转到杭州 ECS 上的 Python ASGI LB，
-再经 Tailscale 分发到四个桶；具体节点状态、运行方式和已知风险统一维护在
-`docs/OPERATIONS.md` 与 `docs/ACCESS.md`。
+OpenAI 兼容入口。公网有两个入口：Cloudflare Tunnel（`https://llm.223722.xyz/v1`，通用）与
+ECS 上的 **IP 直连**（`https://115.29.231.25:9443/v1`，无 SNI，移动网更稳）——后者为何必须用
+IP 而不能用域名，见 `docs/ACCESS.md` §7。两者都转到杭州 ECS 上的 Python ASGI LB，再经
+Tailscale 分发到四个桶；具体节点状态、运行方式和已知风险统一维护在 `docs/OPERATIONS.md`
+与 `docs/ACCESS.md`。
 
 LB 为每个上游单独改写 `Authorization`，支持 least-connection 调度、失败前的重试、
 SSE 透传及按桶配额冷却。健康检查当前包含上游明细；公开入口因此存在内部拓扑信息
