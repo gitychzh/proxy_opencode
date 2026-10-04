@@ -155,6 +155,34 @@ adb -s 100.87.219.115:43357 shell 'su -c "chroot /data/local/chroot/ubuntu /usr/
 adb connect 100.87.219.115:43357 && adb -s 100.87.219.115:43357 shell "su -c 'netstat -tlnp | grep 8792'"
 ```
 
+### 5.1 手机网络出口（联通宽带）网关：API 重启换 IP（2026-10-05 实测打通）
+
+手机 **没插 SIM**（`gsm.sim.state=ABSENT`），它的出口 = Wi-Fi `CU_业_5G`：
+
+```
+手机(192.168.3.34) → WO-38 FTTR 从网关(192.168.3.1, 华为 V173-50 系固件)
+                   → HG6142A-C FTTR 主网关(192.168.1.1, 烽火, "中国联通智能网关")
+                   → 联通宽带 PPPoE（江苏宿迁；重启后 IP 会换，实测 112.83.208.192 → 112.83.208.241）
+```
+
+- 登录账号 `user`（普通用户，密码见仓库外 `D:\wb_ps\proxy_opencode\凭证与接入指南.md`）；
+  注意 `192.168.1.1` 从 opc2 有线侧看到的是**另一台设备**（移动 FTTR，华为 HGU 界面），
+  两台都占 192.168.1.1 但在不同 LAN——**操作手机网络网关必须从手机上发起 curl**（经 adb root）。
+- **登录协议**（烽火 ajax，与华为 HGU 完全不同）：
+  1. `GET /cgi-bin/ajax?ajaxmethod=get_login_user&tkn=<完整浏览器UA>` → 返回 `sessionid`。
+     **坑：`tkn` 必须是完整浏览器 UA**，`tkn=M5` 之类只回 `random_string` 没有 sessionid；
+  2. `POST /cgi-bin/ajax`，form 字段 `username / loginpd=sha256(password) / port=0 / sessionid / ajaxmethod=do_login`
+     → 成功返回 `"login_result": 0`；
+  3. 重启：`POST /cgi-bin/ajax`，body `sessionid=<sid>&ajaxmethod=reboot` → `"success": "true"`，
+     约 3 分钟后 PPPoE 重拨拿到新 IP。会话按 **IP+UA** 绑定，POST 的 Referer 要指向对应 html 页。
+- **3 次密码错误锁 1 分钟**；成功响应示例已验证可重复执行。
+- 普通用户即可 `reboot`（`/html/resetrouter.html` 权限位 3 = 1|2）；admin 界面在首页点「管理员账户」。
+
+**手机无人值守加固（2026-10-05 已生效，Magisk `/data/adb/service.sh` 开机自动执行）**：
+`dumpsys deviceidle disable`（禁 doze）+ Termux/Tailscale 加入 deviceidle 白名单 +
+`stay_on_while_plugged_in=7` + `wifi_sleep_policy=2` + `locksettings set-disabled true`（禁锁屏）。
+此前小米 doze 会冻结 sshd/adbd 导致远程失联，现 adb(43357)/SSH(2222) 长期可达。
+
 ## 6. 凭证索引（**只列名与位置，不含值**）
 
 真实值统一放在**仓库外**的 `scripts_local/secrets.env`（本机）与各桶 `.env`。
