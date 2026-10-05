@@ -241,7 +241,7 @@ adb -s 100.109.109.106:5555 shell 'su -c "/data/local/bin/start-ubuntu.sh cmd /r
 | Cloudflare API | `secrets.env`（Global API Key + 邮箱） | 账户级操作（Tunnel/DNS/防火墙），走 `X-Auth-Email`+`X-Auth-Key` |
 | 杭州 ECS root 密码 | `secrets.env`（SSH 免密优先） | 救援用 |
 | 吉隆坡 SWAS root 密码 | `secrets.env`（SWAS 救援 VNC 用，SSH 免密优先） | 救援用 |
-| 杭州 ECS SSH | `ssh root@115.29.231.25` | Ubuntu 24.04.5，公钥已注入 |
+| 杭州 ECS SSH | `ssh -p 222 root@115.29.231.25` | Ubuntu 24.04.5，公钥已注入；**2026-10-06 起 SSH 端口 22 → 222**（sshd_config 仅 Port 222；`ssh.socket` 已禁用改经典 `ssh.service`，Ubuntu 24.04 socket 激活模式下 Port 指令不生效的坑） |
 | 吉隆坡 SWAS SSH | `ssh -p 2222 root@47.250.130.52`（备用 22） | 密钥对 `gw-edge-2026`；Tailscale `ssh root@100.90.84.65`；**2026-10-02 起边缘角色已迁杭州，待退订** |
 
 ### 杭州新 ECS（i-bp1bzxumftqasjq6nid5 · 99元/年 · 到期 2027-10-01）
