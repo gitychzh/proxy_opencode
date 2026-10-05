@@ -9,6 +9,16 @@
 
 ## [Unreleased]
 
+### Ops
+
+- 2026-10-05 将杭州 ECS zen-lb 上游改为四个不同公网出口：OPC2 无线 `117.95.231.70`、OPC2 有线 `36.149.54.158`、CC9 联通 `112.83.208.241`、小米平板5 `218.93.215.38`。OPC2 有线桶用独立 systemd UID 与策略路由表 991，避免与无线桶共用出口；变更前配置保留在 ECS `edge_lb.env.before-four-buckets-20261005`。
+- 小米平板5 Android 13 / Ubuntu 24.04 chroot 新装 Hermes Agent CLI v0.21.5，并部署 `proxy_opencode 0.6.3` 到 8791；OPC2 8791/8793、CC9 8792、平板 8791 四个上游 health 与鉴权 models 检查均返回 200。
+- 2026-10-06 平板 Hermes 收尾：暴露 PM 安装 CLI 到 `/usr/local/bin`；模型链路按约定从 Tailscale LB 内网地址切公网 `https://llm.223722.xyz/v1` 并改签**永久动态 key**（name=`xiaomipad5-hermes`，可在 `/admin/keys` 吊销）；E2E 三件套（聊天 / terminal 工具真执行 / reasoning）全过。
+- 2026-10-06 平板飞书机器人端到端：脚本化复刻 `hermes gateway setup` 的 device-code 扫码流程（`scripts_local/feishu_qr_setup.py`），扫码自动创建应用并写入凭据；gateway 以 websocket 模式（出站连 `msg-frontier.feishu.cn`，无需公网入口）上线，飞书私聊 → agent 工具调用 → 经 LB 回复全链路实测通过。上游不支持 structured `response_format` 导致的标题生成 400 通过 `auxiliary.title_generation.model_upgrade_enabled: false` 规避。
+- 2026-10-06 平板开机自启闭环：chroot 幂等启动脚本（sshd + gw8791 + hermes）+ Termux:Boot（F-Droid 签名与已装 GitHub 版 Termux 不兼容，需 `termux-boot-app_v0.8.1+github.debug.apk` root 静默安装）。
+- 2026-10-06 四桶均衡/健康巡检（LB 日志聚合脚本 `lb_stats.py`）：新池请求分布 17/13/18/16 均匀（least-conn），无 5xx；404 均为 `/api/show` 客户端探测。健康检查 OPC2 双桶与平板 0% 失败、CC9 6.4%（省电抖动）；ECS→三桶 Tailscale 全 direct、ICMP 0% 丢包（RTT avg 25/29/59ms）。
+- 2026-10-06 杭州 ECS SSH 端口 22 → 222：安全组放行 222/tcp；Ubuntu 24.04 的 `ssh.socket` 激活模式会使 `sshd_config` 的 Port 失效，须切经典 `ssh.service`。终态 sshd 仅听 222（22 的 SG 规则保留但端口已关）。
+
 ### Docs
 
 - 记录杭州 ECS 直连入口被阿里云按**域名**（HTTP `Host` / TLS `SNI`，**不限端口**）拦截的根因，
