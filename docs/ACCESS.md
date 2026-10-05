@@ -119,7 +119,7 @@ ssh -p 2222 -i D:\wb_ps\proxy_opencode\phone_key\id_ed25519 100.87.219.115
 | 项 | 值 |
 |---|---|
 | SSH | 端口 **2222**（sshd_config 里原 8022 行保留，两个端口都监听）；专用私钥 `D:\wb_ps\proxy_opencode\phone_key\id_ed25519`（**仓库外，勿入库**） |
-| ADB（root） | `adb connect 100.87.219.115:43357`；root 操作 `adb shell "su -c '…'"`；本机 adbkey.pub 已写入手机信任列表；opc2 有 Magisk 模块强制 adbd TCP 43357 |
+| ADB（root） | `adb connect 100.87.219.115:43357`；root 操作 `adb shell "su -c '…'"`；本机 adbkey.pub 已写入手机信任列表；opc2 有 Magisk 模块强制 adbd TCP 43357。**2026-10-05 起 `ro.adb.secure=0`（免鉴权无弹窗），且 5555 端口 iptables 转发到 43357——局域网任意设备 `adb connect <手机IP>:5555` 即控**（post-fs-data.sh + service.sh 开机自动恢复） |
 | 网关端口 | **8792**（8791 曾被 0.4.0 幽灵进程占用，已清除） |
 | 守护 | `~/run_gw.sh`（死循环重启）+ `~/.termux/boot/start_gw.sh`（Termux:Boot 开机自启）+ wake-lock |
 | 配置 | `~/repo/.env` —— ⚠️ **必须 LF 换行**，CRLF 会导致 .env 不生效 |
