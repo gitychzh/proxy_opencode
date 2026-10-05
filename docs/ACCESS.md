@@ -18,18 +18,20 @@
 
 ## 1. 四桶总览
 
-| 桶 | Tailscale IP | 网关地址 | 桶间 Key | 出口 | 系统 |
-|---|---|---|---|---|---|
-| win10-local（用户个人设备） | `100.121.137.118` | http://100.121.137.118:8791 | `<bucket-key>` | 家庭宽带 | Windows；经常关机属预期，不按常驻节点故障处理 |
-| owin10 | `100.109.109.108` | http://100.109.109.108:8791 | `<bucket-key>` | owin10 宽带 | Windows |
-| ubuntu-26（=opc2） | `100.109.57.26` | http://100.109.57.26:8791 | `<bucket-key>` | ubuntu 宽带 | Ubuntu |
-| phone115 | `100.87.219.115` | http://100.87.219.115:8792 | `<bucket-key>` | 手机流量 | Android/Termux |
+| 桶 | Tailscale IP | 网关地址 | 当前公网 IPv4 出口 | 系统 / 进程 |
+|---|---|---|---|---|
+| `opc2-wifi` | `100.109.57.26` | http://100.109.57.26:8791 | `117.95.231.70`（无线网卡） | Ubuntu 24.04；`proxy_opencode.service` |
+| `opc2-eth` | `100.109.57.26` | http://100.109.57.26:8793 | `36.149.54.158`（有线网卡） | Ubuntu 24.04；独立 UID + 策略路由，`proxy_opencode-opc2b.service` |
+| `cc9` | `100.87.219.115` | http://100.87.219.115:8792 | `112.83.208.241`（当前，联通宽带会变） | MI CC 9 Meitu Edition；Android/Termux |
+| `xiaomipad5` | `100.109.109.105` | http://100.109.109.105:8791 | `218.93.215.38`（当前） | 小米平板5；Android 13 + Ubuntu 24.04 chroot |
 
-- 上游清单权威来源：ECS `/opt/proxy_opencode/edge_lb.env`（`ZEN_LB_UPSTREAMS`）。
-  `win10-local` 的 LB healthz 检查可能显示离线；这是用户个人设备关机的预期状态，
-  不应据此更换目标地址或误报全局故障。
-- 四桶 `.env`/启动脚本统一：`GATEWAY_API_KEYS=<bucket-key>` +
-  `ADMIN_API_KEYS=<admin-key>`（真实值见各桶 `.env` / 仓库外 `secrets.env`）
+- 当前 zen-lb 四个上游以这张表为准；权威配置在 ECS
+  `/opt/proxy_opencode/edge_lb.env`（`ZEN_LB_UPSTREAMS`）。`win10-local` 和 `owin10`
+  已退出当前 LB 池，不计入四桶。
+- 四桶均运行 `proxy_opencode 0.6.3`。`opc2-wifi` 与 `opc2-eth` 共用物理主机，但由
+  不同网卡、出口 IPv4、Linux UID 与路由表形成两个独立出口桶；只有出口 IP 不同才是独立配额桶。
+- 四桶 `GATEWAY_API_KEYS` 统一使用桶间凭据；实际值只存在于各节点环境文件 / ECS
+  `/opt/proxy_opencode/edge_lb.env`，不要写入仓库。Hermes 客户端使用从 LB 签发的独立 key。
 
 ## 2. win10-local 桶（用户个人设备）
 
@@ -110,6 +112,25 @@ cat ~/proxy_opencode/.env        # GATEWAY_API_KEYS / ADMIN_API_KEYS 在此
   `~/aliyun-cookies/` 有国内站 cookie 导出（会过期）
 - 该机与手机 USB 相连、有 root（Magisk），ADB 授权操作可经它执行
 
+### 4.1 OPC2 第二公网出口（opc2-eth）
+
+OPC2 无线默认路由保持不变；第二桶走 `enp12s0` 有线口，经独立 Linux 用户和策略路由表 `991` 固定出口，避免影响主桶和 Tailscale 路由。
+
+| 项 | 值 |
+|---|---|
+| 地址 / 端口 | `http://100.109.57.26:8793` |
+| 当前出口 | `36.149.54.158`（有线）；主桶无线出口当前为 `117.95.231.70` |
+| 服务身份 | `opc2-bucket-b`（UID 996）；不运行第二个共享用户进程 |
+| systemd | `proxy_opencode-opc2b-route.service` + `proxy_opencode-opc2b.service`（均 enabled） |
+| 策略路由 | `/etc/systemd/system/proxy_opencode-opc2b-route.service`；优先级 `29991`，表 `991` |
+| 环境文件 | `/etc/proxy_opencode-opc2b.env`（权限 600；凭据不入库） |
+
+```bash
+systemctl status proxy_opencode-opc2b
+systemctl status proxy_opencode-opc2b-route
+curl http://127.0.0.1:8793/healthz
+```
+
 ## 5. 手机桶（phone115 · Termux）
 
 ```bash
@@ -183,6 +204,26 @@ adb connect 100.87.219.115:43357 && adb -s 100.87.219.115:43357 shell "su -c 'ne
 `stay_on_while_plugged_in=7` + `wifi_sleep_policy=2` + `locksettings set-disabled true`（禁锁屏）。
 此前小米 doze 会冻结 sshd/adbd 导致远程失联，现 adb(43357)/SSH(2222) 长期可达。
 
+## 5.2 小米平板5 桶（xiaomipad5 · Ubuntu chroot）
+
+- Android 设备 `100.109.109.106:5555`，型号 21051182G / Android 13 / arm64；Tailscale 地址为 `100.109.109.105`。
+- Ubuntu 24.04 chroot 根目录 `/data/local/ubuntu`；从 Android root 执行命令时使用
+  `su -c "/data/local/bin/start-ubuntu.sh cmd <命令>"`，该启动器会设置 `HOME=/root` 并挂载 chroot 所需目录。
+- 网关目录 `/opt/proxy_opencode`，虚拟环境 `/opt/proxy_opencode/.venv`，端口 **8791**；当前 `proxy_opencode 0.6.3`。
+- Hermes Agent CLI `v0.21.5`，命令 `/root/.local/bin/hermes`；配置 `/root/.hermes/config.yaml`，默认模型 `ds41f_cus`、provider `custom`，Base URL 指向 `http://100.81.214.95:7892/v1`。API key 使用 LB 单独签发的客户端 key，不要将 key 写入仓库。
+- 出口当前为 `218.93.215.38`。chroot 的默认路由走平板 Wi-Fi；Zen 直连及经本机 mihomo `127.0.0.1:7890` 均实测可达。
+- 守护：`/data/local/ubuntu/usr/local/bin/start-proxy-opencode.sh` 由 chroot 的
+  `/usr/local/bin/services-start.sh` 调用；后者由 Magisk `/data/adb/service.d/boot_services.sh` 开机拉起。
+
+```bash
+# 从本机运行健康检查
+adb connect 100.109.109.106:5555
+adb -s 100.109.109.106:5555 shell 'su -c "/data/local/bin/start-ubuntu.sh cmd /usr/bin/curl -fsS http://127.0.0.1:8791/healthz"'
+
+# Hermes one-shot；wrapper 会将 HOME 正确设为 /root
+adb -s 100.109.109.106:5555 shell 'su -c "/data/local/bin/start-ubuntu.sh cmd /root/.local/bin/hermes -z \\\"Reply with only the number: what is 2 plus 2?\\\""'
+```
+
 ## 6. 凭证索引（**只列名与位置，不含值**）
 
 真实值统一放在**仓库外**的 `scripts_local/secrets.env`（本机）与各桶 `.env`。
@@ -207,7 +248,7 @@ adb connect 100.87.219.115:43357 && adb -s 100.87.219.115:43357 shell "su -c 'ne
 
 - 公网 `115.29.231.25`（安全组：22/443/80/8443/8388/8442/**9443** tcp + 3478/41641 udp；
   `9443` 为 IP 直连 TLS 入口，见 §7。7892 仅限内网/Tailscale，公网不放行）
-- Ubuntu 24.04.5，2C2G，Tailscale `hangzhou-ecs` = **100.81.214.95**（四桶全 direct：owin10 42ms / phone 72ms）
+- Ubuntu 24.04.5，2C2G，Tailscale `hangzhou-ecs` = **100.81.214.95**；zen-lb 监听 `0.0.0.0:7892`，当前上游清单见 §1 与 `OPERATIONS.md`
 - 服务：zen-lb(:7892) / cloudflared-tunnel(**必须 http2**) / caddy(:443,:80,**9443 直连入口**) / xray(:8443) / shadowsocks(:8388) / derper(:8442+STUN:3478) / tailscaled
 - derper 证书指纹：`sha256-raw:883ec3b90aaa75d463c0ee4db639064a57639014aeb531e650d963a55420dbaf`（Tailscale ACL derpMap region 901 已指向）
 - cloudflared DNS 坑：systemd-resolved 显式配 `223.5.5.5 + 1.1.1.1`（`/etc/systemd/resolved.conf.d/migrate.conf`），否则 argotunnel SRV 解析失败
@@ -286,9 +327,9 @@ model_aliases:
 
 改完重启桌面版生效；CLI 可 `hermes -m ds41f` 按别名切模型。
 
-**当前链路（2026-10-03 实测）**：`owin10` 用 CF `https://llm.223722.xyz/v1`；`opc2` 用 IP 直连
-`https://115.29.231.25:9443/v1`（见 §4 与 §7）。两台 CLI 的 one-shot 均已通过；opc2 另有
-Tailscale LB 入口 `http://100.81.214.95:7892/v1` 可备用。
+**当前链路（2026-10-05）**：当前四桶 LB 为 `opc2-wifi`、`opc2-eth`、`cc9`、`xiaomipad5`；小米平板 Hermes 默认走
+`http://100.81.214.95:7892/v1`。2026-10-05 在平板 Ubuntu chroot 通过 Hermes one-shot 实测返回 `4`。
+每个上游的 Tailscale 地址和端口见 §1；公网 HTTPS/IP 入口仍可作为独立客户端入口（§7）。
 
 ## 9. 冒烟测试
 
@@ -299,8 +340,8 @@ curl https://llm.223722.xyz/v1/chat/completions \
   -H "Authorization: Bearer $ADMIN_KEY" \
   -d '{"model":"ds41f_cus","stream":false,"messages":[{"role":"user","content":"hi"}]}'
 
-# 直连各桶（Tailscale 内网）
-for u in 100.121.137.118:8791 100.109.109.108:8791 100.109.57.26:8791 100.87.219.115:8792; do
+# 直连四桶（Tailscale 内网）
+for u in 100.109.57.26:8791 100.109.57.26:8793 100.87.219.115:8792 100.109.109.105:8791; do
   curl -s "http://$u/healthz" && echo " <- $u"
 done
 
@@ -321,3 +362,21 @@ curl --cacert ca.crt https://115.29.231.25:9443/healthz
 6. 网关 `ADMIN_API_KEYS` / `GATEWAY_API_KEYS` / `ZEN_LB_API_KEY`（三处全部换新值，
    同步更新各桶 `.env`、LB `edge_lb.env`、Hermes/客户端配置）
 7. 已签发的动态 key：`keys.json` 全量吊销后重新签发
+
+## 11. 小米平板5 桶（xiaomipad5 · chroot Ubuntu + hermes 飞书网关，2026-10-06 新增）
+
+```bash
+ssh -p 2222 root@100.109.109.106    # 本机公钥已通过 adb+root 注入 chroot root
+ssh -p 2222 root@100.109.109.105    # 同一 chroot 的 Tailscale chroot 侧身份，等效
+# 救援通道：adb connect 100.109.109.106:5555（root 可用，5555 直连）
+```
+
+| 项 | 值 |
+|---|---|
+| 设备 | 小米平板5（21051182G，Magisk root），Termux + chroot Ubuntu 24.04.5 aarch64，chroot 位于 `/data/local/ubuntu` |
+| 进入 chroot | Termux: `~/ubuntu`（= `su -c /data/local/bin/start-ubuntu.sh`）；非交互：`su -c "/data/local/bin/start-ubuntu.sh cmd '<命令>'"` |
+| 网关桶 | `:8791`（`/opt/proxy_opencode`，venv python -m proxy_opencode；env 同其他桶） |
+| hermes | PM 安装于 `/root/.hermes/installs/…/venv`，`/usr/local/bin/hermes` 软链；模型链路 `llm.223722.xyz/v1` + 专用永久动态 key（凭证文档键名 `xiaomipad5-hermes`） |
+| 飞书网关 | `hermes gateway run`（websocket 出站连 msg-frontier.feishu.cn，无需公网入口）；凭据在 pad `/root/.hermes/.env`（FEISHU_APP_ID/SECRET，扫码一键创建，流程见 `scripts_local/feishu_qr_setup.py`） |
+| 自启 | chroot 内 `/root/start-pad-services.sh`（幂等：sshd + gw8791 + hermes）+ Termux `~/.termux/boot/start-pad.sh`；⚠️ **Termux:Boot App 尚未安装**，装好（F-Droid）并开一次即生效 |
+| 日志 | `/root/hermes-gateway.log`、`/root/gw8791.log` |
