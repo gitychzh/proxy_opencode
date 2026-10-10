@@ -122,6 +122,22 @@ python scripts/e2e_protocols.py
 3. **自签证书的信任分发**是新增运维点：新增客户端需装 `ca.crt`（Linux 系统库；Python 还需 `SSL_CERT_FILE`）。证书 10 年有效，但 ECS 重装或 `/etc/caddy/certs/` 丢失需重建并重新分发。
 4. **公开 `/healthz` 暴露 LB 上游拓扑、请求计数和错误摘要**。当前可公网读取，后续应评估将细节收至管理员接口或提供脱敏公开健康响应。
 5. Hermes Gateway（opc2）此前因飞书 WebSocket 正常关闭被 `lark_oapi` 抛出而退出，2026-10-03 已重启恢复；飞书会话尚未单独验证 Gateway 发出的模型请求，避免擅自向外发送测试消息。
+6. **ECS 部署的 `balancer/lb.py` 与仓库 `main` 已经分叉**（2026-10-11 发现），两边互缺，合流前不要相互覆盖：
+
+   | 能力 | 仓库 `main` | ECS 部署版 |
+   | --- | --- | --- |
+   | 模型目录 `ZEN_LB_MODELS="id:group"` + 上游第 4 字段分组（当前生产配置依赖） | ❌ 缺（只认 3 字段，**部署上去会因解析失败起不来**） | ✅ 有 |
+   | `TRUST_ENV`：出站 httpx 不跟随 ambient `HTTP_PROXY` | ✅ 有 | ❌ 缺 |
+   | `ClientGone`：客户端断连不计入桶故障 | ✅ 有 | ❌ 缺 |
+   | `ZEN_LB_ADMIN_KEYS` 默认值为空（fail-closed） | ✅ 有 | ❌ **默认回落到硬编码 key**（0.6.3 已修的问题回归） |
+
+   影响评估：ECS 当前未设置任何 proxy 环境变量，第 2 行只是潜在风险；第 3 行最坏效果是
+   连续 3 次客户端断连（如连按 Ctrl+C 中断流式回答）把健康桶标为 unhealthy，但健康检查
+   每 20s 会将其恢复（`mark_health` 成功时清零 `consecutive_failures`），**属瞬时抖动**。
+   第 4 行是真实凭据回归，需留意轮换（§ `ACCESS.md` §10）。
+   **合流方向**：以仓库 `main` 为基底（保留全部加固），把「模型目录 + 分组」移植上去，
+   跑通 `balancer/tests/` 后再部署；变更后立即用 `/healthz` 与一次真实 chat 验证，并保留
+   `edge_lb.env` 与 `lb.py` 备份以便回滚。
 
 ## 7. 未实施的架构想法（不是现状）
 

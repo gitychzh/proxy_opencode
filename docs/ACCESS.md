@@ -307,7 +307,55 @@ https://:9443 {
 
 ## 8. Hermes 接入模板（各 Windows 桶通用）
 
-配置文件：`%LOCALAPPDATA%\hermes\config.yaml`
+配置文件：`%LOCALAPPDATA%\hermes\config.yaml`（CLI 与桌面版共用）。
+
+### 8.1 推荐写法：自定义 provider + IP 直连 + 自签 CA（2026-10-11 本机实测通过）
+
+```yaml
+model:
+  default:  "big-pickle"      # 或 ds41f_cus
+  provider: "zen-gw"          # ← 关键，见下方「模型名冲突」警告
+  api_mode: chat_completions
+
+providers:
+  zen-gw:
+    name: zen-gw
+    base_url: https://115.29.231.25:9443/v1   # IP 直连，不得写域名（§7）
+    model: big-pickle
+    api_mode: chat_completions
+    api_key: "<admin-key>"                     # 从 secrets.env 取，勿写死进仓库
+    ssl_ca_cert: '%LOCALAPPDATA%\hermes\certs\ca.crt'
+    discover_models: false                     # 显式声明模型，免去启动探测
+    models:
+      big-pickle: {}
+      ds41f_cus: {}
+```
+
+- **`ssl_ca_cert` 是 Hermes 的原生字段**（白名单见 `hermes_cli/config_providers.py`，
+  与 `ssl_verify` 并列），消费点 `agent/ssl_verify.py::resolve_httpx_verify`：给了就是用
+  **该 bundle 取代平台信任库**，并在渲染进程/非提到了对象引用的情况下也会
+  **逐IP校验**。桌面版是 **Python**（venv + uv），因此不要去改 Windows 证书库，
+  也不要去动 `certifi/cacert.pem`（升级会被覆盖）。
+- **为什么不用 Windows 证书库**：本机 `curl` 走 **SChannel**，对自签 CA（无 CRL/OCSP）
+  会报 `CERT_TRUST_REVOCATION_STATUS_UNKNOWN`。用 `curl` 探查时需加 `--ssl-no-revoke`
+  或 `--ssl-revoke-best-effort`——**这是探查工具的问题，不是服务端的问题**
+  （`openssl s_client` 直连校验为 `Verify return code: 0 (ok)`）。Hermes 走 OpenSSL，
+  不受影响。
+
+### 8.2 ⚠️ 模型名冲突：`big-pickle` 在 Hermes 内置静态目录里已存在
+
+`hermes_cli/models_catalog_static.py` 把 `big-pickle` 登记在 **`opencode-zen`** 分组下。
+若只写 `model.default: big-pickle` 而**不指定 `provider`**，Hermes 会解析到它自己的
+上游（实测落到 `NVIDIA NIM` 并 404），**请求根本不会到杭州 ECS**。
+
+两种规避方式（任选）：
+
+1. `model.provider: "zen-gw"` 指向自定义 provider（推荐，`-m big-pickle` 与 `-m ds41f_cus` 都通）；
+2. 用非冲突的名字 `ds41f_cus`（无需 `provider` 也能自动落到网关）。
+
+排查手法：`hermes status` 看 `Provider:` 一行——必须是 `zen-gw` 而不是 `NVIDIA NIM`。
+
+### 8.3 旧写法（域名入口，备用）
 
 ```yaml
 model:
@@ -326,6 +374,9 @@ model_aliases:
 ```
 
 改完重启桌面版生效；CLI 可 `hermes -m ds41f` 按别名切模型。
+**改配置前必须停掉 Hermes**：进程退出时会回写 `config.yaml`，未停就改会被覆盖。
+桌面版本体位置：`%LOCALAPPDATA%\hermes\hermes-agent\apps\desktop\release\win-unpacked\Hermes.exe`
+（`Start-Process` 拉起时父进程会 exitCode=0 立即退出，属正常；子进程随之出现）。
 
 **当前链路（2026-10-05）**：当前四桶 LB 为 `opc2-wifi`、`opc2-eth`、`cc9`、`xiaomipad5`；小米平板 Hermes 默认走
 `http://100.81.214.95:7892/v1`。2026-10-05 在平板 Ubuntu chroot 通过 Hermes one-shot 实测返回 `4`。
