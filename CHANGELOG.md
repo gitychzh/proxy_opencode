@@ -18,14 +18,19 @@
 - 2026-10-06 平板开机自启闭环：chroot 幂等启动脚本（sshd + gw8791 + hermes）+ Termux:Boot（F-Droid 签名与已装 GitHub 版 Termux 不兼容，需 `termux-boot-app_v0.8.1+github.debug.apk` root 静默安装）。
 - 2026-10-06 四桶均衡/健康巡检（LB 日志聚合脚本 `lb_stats.py`）：新池请求分布 17/13/18/16 均匀（least-conn），无 5xx；404 均为 `/api/show` 客户端探测。健康检查 OPC2 双桶与平板 0% 失败、CC9 6.4%（省电抖动）；ECS→三桶 Tailscale 全 direct、ICMP 0% 丢包（RTT avg 25/29/59ms）。
 - 2026-10-06 杭州 ECS SSH 端口 22 → 222：安全组放行 222/tcp；Ubuntu 24.04 的 `ssh.socket` 激活模式会使 `sshd_config` 的 Port 失效，须切经典 `ssh.service`。终态 sshd 仅听 222（22 的 SG 规则保留但端口已关）。
-- 2026-10-11 LB 模型目录新增公开 id `big-pickle`（group `zen`，与既有 `ds41f_cus` 同指向 Zen big-pickle 上游；`kimik3_cus` 仍属 `nv` 组，互不混流）。四桶上游清单维持
+- 2026-10-11 公开模型名由 `big-pickle` 改为带供应商前缀的 **`cusoc/DeepSeek-V4.1-Flash`**（后端真实模型为
+  DeepSeek V4.1 Flash，Zen 侧代号仍是 `big-pickle`）。LB 侧新增 `ZEN_LB_MODEL_UPSTREAM_ID="zen:big-pickle"`，
+  在转发前把任意 zen 组名字改回上游认识的裸 ID——否则带斜杠的名字会被 Zen 拒。
+  实测确认 Hermes **不会**剥掉前缀（把 LB 目录收敛到只剩该名字后请求仍 200、`model rejected` 计数 0）。
+  Hermes 侧 provider 由 `zen-gw` 更名为 `cusoc`。注意 `hermes doctor` 会对 `vendor/model` 命名提惯例警告
+  （openrouter 一类聚合商才用），非错误。
+- 2026-10-11 四桶上游清单维持
   `opc2-wifi`（电信 `117.95.231.70`）/ `opc2-eth`（移动 `36.149.54.158`）/ `cc9`（联通）/ `xiaomipad5`，
   改前备份为 ECS `edge_lb.env.before-three-buckets-20261011`。双出口已用
   `ip rule` uidrange 996→table 991 复核属实（8791 跑 opc2_uname 走无线、8793 跑 opc2-bucket-b 走有线）。
-- 2026-10-11 本机 Hermes 桌面版接入：默认模型 `big-pickle`，provider `zen-gw`，走 IP 直连
-  `https://115.29.231.25:9443/v1`（不用域名），自签 CA 经 provider 原生字段 `ssl_ca_cert` 校验。
-  E2E 三件套全过：基础聊天、`terminal` 工具真实执行（读磁盘令牌文件与 `Get-Date` 时间戳均与实际一致）、
-  `--reasoning high` 推理（`17*23=391`）。详见 `ACCESS.md` §8.1–8.3。
+- 2026-10-11 本机 Hermes 接入：走 IP 直连 `https://115.29.231.25:9443/v1`（不用域名），自签 CA 经 provider 原生字段 `ssl_ca_cert` 校验。
+  E2E 三件套全过：基础聊天、`terminal` 工具真实执行（读磁盘令牌文件 ``CUSOC_9d17e4ab53f2`` 完全一致、
+  `Get-Date` 时间戳落在会话窗口内）、`--reasoning high` 推理（`47*83=3901`）。详见 `ACCESS.md` §8.1–8.3。
 - 2026-10-11 延迟画像（各 4 次直连取中位数）：`opc2-eth` 1.80s < `xiaomipad5` 2.21s <
   `opc2-wifi` 2.25s < `cc9` 2.59s；网络开销极小（TCP ~0.05s + TLS ~0.13s），瓶颈在上游生成。
   `xiaomipad5` 观测到 13.7s / 15.1s（502）的长尾，**方差远大于其他桶**，如需极致稳定性可关注。

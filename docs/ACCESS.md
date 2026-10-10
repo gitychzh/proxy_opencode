@@ -311,49 +311,75 @@ https://:9443 {
 
 ### 8.1 推荐写法：自定义 provider + IP 直连 + 自签 CA（2026-10-11 本机实测通过）
 
+公开模型名用带供应商前缀的 `cusoc/DeepSeek-V4.1-Flash`（决定见 §8.2）。
+
 ```yaml
 model:
-  default:  "big-pickle"      # 或 ds41f_cus
-  provider: "zen-gw"          # ← 关键，见下方「模型名冲突」警告
+  default:  "cusoc/DeepSeek-V4.1-Flash"
+  provider: "cusoc"
   api_mode: chat_completions
 
 providers:
-  zen-gw:
-    name: zen-gw
+  cusoc:
+    name: cusoc
     base_url: https://115.29.231.25:9443/v1   # IP 直连，不得写域名（§7）
-    model: big-pickle
+    model: cusoc/DeepSeek-V4.1-Flash
     api_mode: chat_completions
-    api_key: "<admin-key>"                     # 从 secrets.env 取，勿写死进仓库
+    api_key: "<admin-key>"                    # 从 secrets.env 取，勿写死进仓库
     ssl_ca_cert: '%LOCALAPPDATA%\hermes\certs\ca.crt'
-    discover_models: false                     # 显式声明模型，免去启动探测
+    discover_models: false                    # 显式声明模型，免去启动探测
     models:
-      big-pickle: {}
+      cusoc/DeepSeek-V4.1-Flash: {}
       ds41f_cus: {}
 ```
 
+LB 侧须同时登记这个名字，并把请求改写回上游认识的裸 ID：
+
+```
+ZEN_LB_MODELS="ds41f_cus:zen;cusoc/DeepSeek-V4.1-Flash:zen;kimik3_cus:nv"
+ZEN_LB_MODEL_UPSTREAM_ID="zen:big-pickle"
+```
+
+第二条是关键：上游 Zen 目录只认裸 ID（见 `CHANGELOG` 0.6.3），面对 `cusoc/…` 这种带斜杠的名字
+会拒绝；`MODEL_UPSTREAM_ID` 在转发前把它改回 `big-pickle`，客户端仍收到掩码后的 `ds41f_cus`。
+
 - **`ssl_ca_cert` 是 Hermes 的原生字段**（白名单见 `hermes_cli/config_providers.py`，
   与 `ssl_verify` 并列），消费点 `agent/ssl_verify.py::resolve_httpx_verify`：给了就是用
-  **该 bundle 取代平台信任库**，并在渲染进程/非提到了对象引用的情况下也会
-  **逐IP校验**。桌面版是 **Python**（venv + uv），因此不要去改 Windows 证书库，
-  也不要去动 `certifi/cacert.pem`（升级会被覆盖）。
+  **该 bundle 取代平台信任库**，并且在会话中途改也会被重新读取。
+  桌面版是 **Python**（venv + uv），因此不要去改 Windows 证书库，也不要去动
+  `certifi/cacert.pem`（升级会被覆盖）。
 - **为什么不用 Windows 证书库**：本机 `curl` 走 **SChannel**，对自签 CA（无 CRL/OCSP）
   会报 `CERT_TRUST_REVOCATION_STATUS_UNKNOWN`。用 `curl` 探查时需加 `--ssl-no-revoke`
   或 `--ssl-revoke-best-effort`——**这是探查工具的问题，不是服务端的问题**
   （`openssl s_client` 直连校验为 `Verify return code: 0 (ok)`）。Hermes 走 OpenSSL，
   不受影响。
 
-### 8.2 ⚠️ 模型名冲突：`big-pickle` 在 Hermes 内置静态目录里已存在
+### 8.2 为什么公开名带 `cusoc/` 前缀
 
-`hermes_cli/models_catalog_static.py` 把 `big-pickle` 登记在 **`opencode-zen`** 分组下。
-若只写 `model.default: big-pickle` 而**不指定 `provider`**，Hermes 会解析到它自己的
-上游（实测落到 `NVIDIA NIM` 并 404），**请求根本不会到杭州 ECS**。
+两个原因，**第二个更关键**：
 
-两种规避方式（任选）：
+1. **语义**：后端真实模型是 DeepSeek V4.1 Flash（Zen 侧代号 `big-pickle`），名字应当反映这点。
+2. **避冲突**：`hermes_cli/models_catalog_static.py` 把裸名 `big-pickle` 登记在 **`opencode-zen`**
+   分组下。只写 `model.default: big-pickle` 时，Hermes 会解析到它自己的上游（实测落到
+   `NVIDIA NIM` 并 404），**请求根本不会到杭州 ECS**。加前缀即天然错开。
 
-1. `model.provider: "zen-gw"` 指向自定义 provider（推荐，`-m big-pickle` 与 `-m ds41f_cus` 都通）；
-2. 用非冲突的名字 `ds41f_cus`（无需 `provider` 也能自动落到网关）。
+**前缀会不会被 Hermes 剥掉？** 实测不会。`hermes_cli/model_switch.py:246`
+对部分路径会把 `vendor/model` 拆开，但本配置路径下 LB 收到的是**完整**的
+`cusoc/DeepSeek-V4.1-Flash`——验证方法是把 LB 目录收敛到只剩这个名字，请求照样 200、
+`model rejected` 计数为 0。
 
-排查手法：`hermes status` 看 `Provider:` 一行——必须是 `zen-gw` 而不是 `NVIDIA NIM`。
+⚠️ 但 `hermes doctor` 会对此提出警告：
+
+```
+⚠ model.default 'cusoc/DeepSeek-V4.1-Flash' uses a vendor/model slug
+  but provider is 'cusoc' (vendor-prefixed slugs belong to aggregators like openrouter)
+```
+
+这是**命名惯例提示，不是错误**：Hermes 惯例上把 `vendor/model` 留给 openrouter 一类的聚合商。
+由于本配置显式指定了 `base_url` 与 `provider`，功能不受影响。若不想看到该提示，
+可改用无前缀的名字（但要避开 §8.2 第 2 点的内置目录冲突）。
+
+排查手法：`hermes status` 看 `Provider:` 一行——必须是 `cusoc` 而不是 `NVIDIA NIM`。
 
 ### 8.3 旧写法（域名入口，备用）
 
@@ -375,8 +401,17 @@ model_aliases:
 
 改完重启桌面版生效；CLI 可 `hermes -m ds41f` 按别名切模型。
 **改配置前必须停掉 Hermes**：进程退出时会回写 `config.yaml`，未停就改会被覆盖。
-桌面版本体位置：`%LOCALAPPDATA%\hermes\hermes-agent\apps\desktop\release\win-unpacked\Hermes.exe`
-（`Start-Process` 拉起时父进程会 exitCode=0 立即退出，属正常；子进程随之出现）。
+桌面版本体：`%LOCALAPPDATA%\hermes\hermes-agent\apps\desktop\release\win-unpacked\Hermes.exe`
+（用户入口是快捷方式 `C:\Users\ychzh\Desktop\Hermes.lnk`）。
+
+⚠️ **自动化拉不起桌面版 ≠ 桌面版坏了**（2026-10-11 实测）：助手/脚本用 `Start-Process` 起 exe 时，
+进程会以 exitCode=0 立即退出且不起子进程，看起来像崩溃，但**用户手动双击 `Hermes.lnk` 后完全正常**
+（6 个进程在跑）。用两种 `config.yaml` 做过对照，结果一致 → 与配置内容无关，是「非交互上下文启动 GUI」
+的能力边界。所以不要为此去回滚配置或重装。磁盘端验证可用：
+
+```powershell
+Get-Process -Name "Hermes","hermes" | Select-Object Id,Name,StartTime
+```
 
 **当前链路（2026-10-05）**：当前四桶 LB 为 `opc2-wifi`、`opc2-eth`、`cc9`、`xiaomipad5`；小米平板 Hermes 默认走
 `http://100.81.214.95:7892/v1`。2026-10-05 在平板 Ubuntu chroot 通过 Hermes one-shot 实测返回 `4`。
