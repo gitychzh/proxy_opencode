@@ -517,14 +517,23 @@ async def _aggregate_sse(resp: httpx.Response, model: str) -> dict[str, Any]:
         message["tool_calls"] = ordered
     if tool_calls and finish_reason is None:
         finish_reason = "tool_calls"
+    # Silent upstream cut: content arrived but the stream ended without a
+    # terminal chunk (see StreamRelay). Report it as an output-cap
+    # truncation — never stamp "stop" on a cut generation.
+    cut = finish_reason is None and bool(content_parts or reasoning_parts)
+    final_reason = finish_reason or ("length" if cut else "stop")
     return {
         "id": completion_id or f"chatcmpl-zen-{secrets.token_hex(8)}",
         "object": "chat.completion",
         "created": created,
         "model": model,
         "choices": [
-            {"index": 0, "message": message, "finish_reason": finish_reason or "stop"}
+            {"index": 0, "message": message, "finish_reason": final_reason}
         ],
         "usage": usage,
-        "metadata": {"adapter": "zen-direct", "aggregated_stream": True},
+        "metadata": {
+            "adapter": "zen-direct",
+            "aggregated_stream": True,
+            **({"upstream_stream_cut": True} if cut else {}),
+        },
     }

@@ -9,6 +9,23 @@
 
 ## [Unreleased]
 
+### Fixed — 上游流静默切断（0.6.5）
+
+- **`StreamRelay` 合成终止 chunk**：2026-10-13 实测，Zen 上游 provider 会以
+  ~25-30% 的概率在长生成中途干净地关闭流——内容 chunk 之后**没有**
+  `finish_reason` chunk、没有 usage chunk、也没有 `data: [DONE]`（切断点随机，
+  实测 393/804 chunk 处；python 直连可稳定复现）。OpenAI 协议客户端将此
+  视为协议违规并硬失败（hermes：`Response remained truncated after 4
+  continuation attempts`）。现在 `StreamRelay.chunks()` 在流结束时若未见过
+  终止 chunk，会补一个显式的 `finish_reason:"length"` chunk + `[DONE]`，
+  把静默切断变成正常的输出截断——hermes 走既有的续写逻辑保留部分答案，
+  其他客户端（codex / claude code）也不再看到违规流。
+- **`_aggregate_sse` 不再把切断流盖成 `stop`**：非流式客户端此前会把切断的
+  生成标成 `finish_reason:"stop"`（静默截断答案）；现在有内容无终止 chunk 时
+  如实标 `length`，并带 `metadata.upstream_stream_cut=true`。
+- 新增回归测试：切断流合成 / 正常流不改写 / 有 finish 缺 [DONE] 只补
+  [DONE] / SSE 行跨 TCP 分片的检测 / 非流式切断标 length。
+
 ### Fixed — zen-direct 免费层 gate（0.6.4）
 
 - **session ID 改为 descending 编码（2026-10-13 实测定位）**：opencode 1.19.0 起

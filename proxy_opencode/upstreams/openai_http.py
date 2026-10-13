@@ -7,19 +7,39 @@ UPSTREAM_API_KEY. Streaming responses are relayed byte-for-byte.
 from __future__ import annotations
 
 import json
+import re
+import secrets
+import time
 from typing import Any, AsyncIterator
 
 import httpx
 
 from ..config import Settings
 
+_CHUNK_ID_RE = re.compile(rb'"id":"([^"]+)"')
+
 
 class StreamRelay:
-    """Wraps an upstream streaming response for the route layer to consume."""
+    """Wraps an upstream streaming response for the route layer to consume.
+
+    Upstream providers behind Zen intermittently drop streams mid-generation:
+    the connection closes cleanly after content chunks but WITHOUT the
+    terminal ``finish_reason`` chunk, the usage chunk and ``data: [DONE]``
+    (live-verified 2026-10-13 at ~25-30% rate for long generations; the
+    client sees a stream that just stops). OpenAI-wire clients classify that
+    as a protocol violation and hard-fail (hermes: "Response remained
+    truncated after 4 continuation attempts"). To keep the wire contract
+    honest and explicit, :meth:`chunks` synthesises a terminal
+    ``finish_reason: "length"`` chunk + ``[DONE]`` when the upstream stream
+    ends without one, so a silent cut surfaces as a normal output-cap
+    truncation that clients already know how to handle.
+    """
 
     def __init__(self, resp: httpx.Response, usage_holder: dict[str, Any]) -> None:
         self.response = resp
         self.usage_holder = usage_holder
+        # Set after chunks() ran: True when the terminal chunk was synthesised.
+        self.stream_cut = False
 
     async def chunks(self) -> AsyncIterator[bytes]:
         resp = self.response
@@ -30,29 +50,68 @@ class StreamRelay:
         # streams). Bytes are still relayed verbatim — only the parse is
         # buffered.
         pending = b""
+        saw_finish = False
+        saw_done = False
+        last_id = b""
 
         def scan_line(line: bytes) -> None:
-            line = line.strip()
-            if not line.startswith(b"data:") or b"usage" not in line:
+            nonlocal saw_finish, saw_done, last_id
+            stripped = line.strip()
+            if not stripped.startswith(b"data:"):
                 return
-            try:
-                data = json.loads(line[5:])
-            except Exception:
+            payload = stripped[5:].strip()
+            if payload == b"[DONE]":
+                saw_done = True
                 return
-            if isinstance(data, dict) and data.get("usage"):
-                self.usage_holder["usage"] = data["usage"]
+            if b'"id":"' in stripped:
+                match = _CHUNK_ID_RE.search(stripped)
+                if match:
+                    last_id = match.group(1)
+            if b"usage" in stripped:
+                try:
+                    data = json.loads(payload)
+                except Exception:
+                    data = None
+                if isinstance(data, dict) and data.get("usage"):
+                    self.usage_holder["usage"] = data["usage"]
+            # A terminal chunk carries a non-null finish_reason. Zen emits
+            # compact JSON (`"finish_reason":"stop"` / `"finish_reason":null`),
+            # so the quoted-value form is a conservative signal: missing a
+            # real finish chunk would only duplicate a harmless terminator,
+            # while a false positive would relabel a completed stream.
+            if b'"finish_reason":"' in stripped or b'"finish_reason": "' in stripped:
+                saw_finish = True
 
         try:
             async for chunk in resp.aiter_bytes():
-                if pending or b"usage" in chunk:
-                    *lines, pending = (pending + chunk).split(b"\n")
-                    for line in lines:
-                        scan_line(line)
+                # Always run the line-buffered scan (cheap bytes ops): id /
+                # finish markers live on lines that carry neither "usage" nor
+                # "finish_reason", and a skipped line means a missed terminal
+                # chunk or a lost completion id for the synthesised tail.
+                *lines, pending = (pending + chunk).split(b"\n")
+                for line in lines:
+                    scan_line(line)
                 yield chunk
             if pending:
                 scan_line(pending)
         finally:
             await resp.aclose()
+        if not saw_finish:
+            # Silent upstream cut: make the truncation explicit so clients
+            # treat it as an output-cap stop instead of a protocol violation.
+            self.stream_cut = True
+            completion_id = last_id.decode("utf-8", "replace") if last_id else (
+                f"chatcmpl-zen-{secrets.token_hex(8)}"
+            )
+            synth = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}],
+            }
+            yield f"data: {json.dumps(synth, separators=(',', ':'))}\n\n".encode()
+        if not saw_done:
+            yield b"data: [DONE]\n\n"
 
 
 class OpenAIHttpAdapter:

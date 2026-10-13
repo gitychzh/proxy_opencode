@@ -466,6 +466,108 @@ async def test_chat_stream_returns_relay() -> None:
     await adapter.aclose()
 
 
+# ------------------------------------------------- upstream stream drops
+
+
+def _relay_from_sse(sse: bytes) -> StreamRelay:
+    async def gen():
+        yield sse
+
+    return StreamRelay(httpx.Response(200, content=gen()), {})
+
+
+CUT_SSE = (
+    b'data: {"id":"z9","created":1,"model":"big-pickle","choices":[{"index":0,'
+    b'"delta":{"role":"assistant","content":"partial an"}}]}\n\n'
+    b'data: {"id":"z9","created":1,"model":"big-pickle","choices":[{"index":0,'
+    b'"delta":{"content":"swer"}}]}\n\n'
+)
+
+
+@pytest.mark.asyncio
+async def test_relay_synthesizes_finish_chunk_on_silent_cut() -> None:
+    # Live-verified 2026-10-13: Zen providers intermittently close streams
+    # mid-generation with no finish chunk, no usage chunk and no [DONE].
+    relay = _relay_from_sse(CUT_SSE)
+    out = b"".join([c async for c in relay.chunks()])
+    assert relay.stream_cut is True
+    assert out.startswith(CUT_SSE)  # original bytes relayed verbatim
+    assert b'"finish_reason":"length"' in out
+    assert out.rstrip().endswith(b"data: [DONE]")
+    # the synthesized chunk reuses the upstream completion id
+    assert b'"id":"z9"' in out[len(CUT_SSE):]
+
+
+@pytest.mark.asyncio
+async def test_relay_untouched_when_stream_completes_normally() -> None:
+    sse = (
+        b'data: {"id":"z1","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'
+        b'data: {"id":"z1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+        b'data: {"id":"z1","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n'
+        b'data: [DONE]\n\n'
+    )
+    relay = _relay_from_sse(sse)
+    out = b"".join([c async for c in relay.chunks()])
+    assert out == sse
+    assert relay.stream_cut is False
+    assert relay.usage_holder["usage"]["completion_tokens"] == 1
+
+
+@pytest.mark.asyncio
+async def test_relay_appends_done_when_only_finish_present() -> None:
+    sse = (
+        b'data: {"id":"z2","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'
+        b'data: {"id":"z2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+    )
+    relay = _relay_from_sse(sse)
+    out = b"".join([c async for c in relay.chunks()])
+    assert relay.stream_cut is False
+    assert out == sse + b"data: [DONE]\n\n"
+
+
+@pytest.mark.asyncio
+async def test_relay_cut_split_across_tcp_chunks_still_detected() -> None:
+    # the finish-less cut must be detected even when SSE lines straddle
+    # arbitrary TCP chunk boundaries
+
+    async def gen():
+        raw = CUT_SSE
+        for i in range(0, len(raw), 7):
+            yield raw[i : i + 7]
+
+    relay = StreamRelay(httpx.Response(200, content=gen()), {})
+    out = b"".join([c async for c in relay.chunks()])
+    assert relay.stream_cut is True
+    assert out.startswith(CUT_SSE)
+    assert b'"finish_reason":"length"' in out
+    assert out.rstrip().endswith(b"data: [DONE]")
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_non_stream_cut_is_reported_as_length() -> None:
+    route = respx.post("https://opencode.ai/zen/v1/chat/completions")
+    adapter = ZenDirectAdapter(make_settings())
+    sse = (
+        'data: {"id":"z8","created":9,"model":"big-pickle","choices":[{"index":0,'
+        '"delta":{"content":"half a"}}]}\n\n'
+        'data: {"id":"z8","created":9,"model":"big-pickle","choices":[{"index":0,'
+        '"delta":{"content":"n answer"}}]}\n\n'
+    )
+    route.respond(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+        content=sse.encode(),
+    )
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["choices"][0]["finish_reason"] == "length"
+    assert result["choices"][0]["message"]["content"] == "half an answer"
+    assert result["metadata"]["upstream_stream_cut"] is True
+    await adapter.aclose()
+
+
 @respx.mock
 @pytest.mark.asyncio
 async def test_models_endpoint() -> None:
