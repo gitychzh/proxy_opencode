@@ -1,8 +1,29 @@
 # 运维手册（当前事实）
 
-> 现状快照：2026-10-03。本文只记录当前部署状态、操作方法和仍未解决的风险。
+> 现状快照：2026-10-13。本文只记录当前部署状态、操作方法和仍未解决的风险。
 > 版本历史与已关闭问题看 `CHANGELOG.md`；设备地址和登录方式看 `ACCESS.md`；
 > 架构与安全红线看 `AGENTS.md`。历史实验文档已合并或删除，避免将旧拓扑当作现状。
+
+## 0. 2026-10-13 事故：免费层 session ID gate（已解决）
+
+opencode 1.19.0（2026-10-11 发布）把客户端 session ID 的生成从 ascending 改为
+`descending()`（`packages/schema/src/session-id.ts`）；Zen 免费层随 inference
+服务切换新增 gate：`x-opencode-session` 必须为 descending 编码
+（`~((ms<<12)+counter) & 0xFFFFFFFFFFFF`）且同毫秒 counter < 64，否则
+403 `FreeTierError` "OpenCode's free tier can only be used from within
+OpenCode"。0.6.3 及之前的网关恒发 ascending ID → 四桶全 403，hermes 整链不可用。
+
+**修复（0.6.4）**：`zen_direct.opencode_id()` 恢复 `descending` 参数语义，
+session ID 按 descending 生成（counter=1），`x-opencode-request`（msg_）维持
+ascending。已部署 win10-local + 四桶，经公网 LB 7/7 实测 200。
+
+**定位手法**（复现同类问题时照做）：用真客户端二进制
+（`npm i -g opencode-ai@latest`，本机临时目录 + XDG_* 环境变量隔离）跑一次确认
+免费层本身没死；把客户端 catalog 缓存 `models.json` 的 provider `api` 指向本地
+回显服务器抓真请求；从捕获请求逐项消融。结论：只有 session ID 编码 + counter
+参与判定（UA 版本 / client 名 / project 值 / `x-session-id` / marker 均无关），
+counter 阈值实测为 63/64。诊断脚本存放于本机
+`%TEMP%\opencode\ablate*.py`（未入库，仅一次性取证）。
 
 ## 1. 当前架构
 
@@ -21,10 +42,11 @@
 
 | 节点 | 当前角色 | 最近确认状态 |
 |---|---|---|
-| `opc2-wifi` / `100.109.57.26:8791` | OPC2 无线出口桶 | 0.6.3；公网 IPv4 `117.95.231.70`；Zen 返回 200 |
-| `opc2-eth` / `100.109.57.26:8793` | OPC2 有线出口桶（独立 Linux UID + 策略路由表 991） | 0.6.3；公网 IPv4 `36.149.54.158`；Zen 返回 200 |
-| `cc9` / `100.87.219.115:8792` | MI CC 9 Meitu Edition / Termux 桶 | 0.6.3；当前公网 IPv4 `112.83.208.241`；Zen 返回 200 |
-| `xiaomipad5` / `100.109.109.105:8791` | 小米平板5 Ubuntu chroot 桶 | 0.6.3；公网 IPv4 `218.93.215.38`；Hermes CLI（公网入口 + 永久动态 key）E2E 三件套通过；**飞书机器人网关** websocket 模式在线（见 `ACCESS.md` §11） |
+| `opc2-wifi` / `100.109.57.26:8791` | OPC2 无线出口桶 | 0.6.4；公网 IPv4 `117.95.231.70`；Zen 返回 200 |
+| `opc2-eth` / `100.109.57.26:8793` | OPC2 有线出口桶（独立 Linux UID + 策略路由表 991） | 0.6.4；公网 IPv4 `36.149.54.158`；Zen 返回 200 |
+| `cc9` / `100.87.219.115:8792` | MI CC 9 Meitu Edition / Termux 桶 | 0.6.4；当前公网 IPv4 `112.83.208.241`；Zen 返回 200 |
+| `xiaomipad5` / `100.109.109.105:8791` | 小米平板5 Ubuntu chroot 桶 | 0.6.4；公网 IPv4 `218.93.215.38`；Hermes CLI（公网入口 + 永久动态 key）E2E 三件套通过；**飞书机器人网关** websocket 模式在线（见 `ACCESS.md` §11） |
+| `win10-local` / 本机 | 用户个人机桶（已退出 LB 池，仍可直连） | 0.6.4；计划任务 `zen-gw-local` |
 | `hangzhou-ecs` / `100.81.214.95` | Tailscale LB，7892 | zen-lb active；当前仅含上述四个上游；**SSH 已改 `-p 222`**（公网/ts 均只听 222）；详细配置与访问见 `ACCESS.md` |
 
 2026-10-05 已将 LB 池切换为两个 OPC2 不同公网出口 + CC9 + 小米平板5，共四桶。旧 `win10-local` / `owin10` 不在当前 LB 池；ECS 上保留变更前配置备份 `/opt/proxy_opencode/edge_lb.env.before-four-buckets-20261005`。四个新目标均通过 Bearer 桶间 key 的 `GET /v1/models`（HTTP 200），并已在 Hermes/负载均衡链路上完成真实 chat 检查。

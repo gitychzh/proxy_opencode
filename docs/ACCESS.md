@@ -28,8 +28,10 @@
 - 当前 zen-lb 四个上游以这张表为准；权威配置在 ECS
   `/opt/proxy_opencode/edge_lb.env`（`ZEN_LB_UPSTREAMS`）。`win10-local` 和 `owin10`
   已退出当前 LB 池，不计入四桶。
-- 四桶均运行 `proxy_opencode 0.6.3`。`opc2-wifi` 与 `opc2-eth` 共用物理主机，但由
-  不同网卡、出口 IPv4、Linux UID 与路由表形成两个独立出口桶；只有出口 IP 不同才是独立配额桶。
+- 四桶均运行 `proxy_opencode 0.6.4`（2026-10-13 因免费层 session ID gate 全量升级，
+  见 `OPERATIONS.md` §0；本机 `win10-local` 亦为 0.6.4）。`opc2-wifi` 与 `opc2-eth`
+  共用物理主机，但由不同网卡、出口 IPv4、Linux UID 与路由表形成两个独立出口桶；
+  只有出口 IP 不同才是独立配额桶。
 - 四桶 `GATEWAY_API_KEYS` 统一使用桶间凭据；实际值只存在于各节点环境文件 / ECS
   `/opt/proxy_opencode/edge_lb.env`，不要写入仓库。Hermes 客户端使用从 LB 签发的独立 key。
 

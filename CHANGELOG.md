@@ -26,6 +26,16 @@
 
 ### Ops
 
+- 2026-10-13 修复免费层 session ID gate 后全量部署 0.6.4：win10-local + 四桶
+  （opc2-wifi / opc2-eth / cc9 / xiaomipad5）经公网 LB 7/7 实测 200，hermes 恢复。
+  各桶部署方式沿用包目录覆盖 + 服务重启；dist/egg-info 的 METADATA `Version:`
+  行需同步改写，否则 `/healthz` 仍报旧版本号（坑：pad 的启动脚本幂等——
+  healthz 通就不重启，需先按 PID 杀进程；cc9 走 adb root，`pkill -f` 会误杀
+  携带同样字符串的远程 shell，须 `pgrep -x python` 精确匹配）。
+- 2026-10-13 诊断固化：真客户端二进制（npm `opencode-ai` 平台包）+ catalog 缓存
+  指向本地回显服务器，可完整抓取 1.19.0 客户端对 `opencode.ai/inference/v1` 的请求；
+  本次 gate 消融取证见 `OPERATIONS.md` §0。
+
 - 2026-10-05 将杭州 ECS zen-lb 上游改为四个不同公网出口：OPC2 无线 `117.95.231.70`、OPC2 有线 `36.149.54.158`、CC9 联通 `112.83.208.241`、小米平板5 `218.93.215.38`。OPC2 有线桶用独立 systemd UID 与策略路由表 991，避免与无线桶共用出口；变更前配置保留在 ECS `edge_lb.env.before-four-buckets-20261005`。
 - 小米平板5 Android 13 / Ubuntu 24.04 chroot 新装 Hermes Agent CLI v0.21.5，并部署 `proxy_opencode 0.6.3` 到 8791；OPC2 8791/8793、CC9 8792、平板 8791 四个上游 health 与鉴权 models 检查均返回 200。
 - 2026-10-06 平板 Hermes 收尾：暴露 PM 安装 CLI 到 `/usr/local/bin`；模型链路按约定从 Tailscale LB 内网地址切公网 `https://llm.223722.xyz/v1` 并改签**永久动态 key**（name=`xiaomipad5-hermes`，可在 `/admin/keys` 吊销）；E2E 三件套（聊天 / terminal 工具真执行 / reasoning）全过。
