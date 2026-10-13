@@ -9,6 +9,21 @@
 
 ## [Unreleased]
 
+### Fixed — zen-direct 免费层 gate（0.6.4）
+
+- **session ID 改为 descending 编码（2026-10-13 实测定位）**：opencode 1.19.0 起
+  客户端 session ID 改用 `descending()` 生成（`packages/schema/src/session-id.ts`：
+  12 hex 时间部分 = `~((ms<<12)+counter) & 0xFFFFFFFFFFFF`）；Zen 免费层随
+  inference 服务切换新增 gate，校验 `x-opencode-session` 必须为该编码且同毫秒
+  counter < 64。`zen_direct.opencode_id()` 此前忽略 `descending` 参数恒发
+  ascending ID，四桶全部 403 `FreeTierError` "OpenCode's free tier can only be
+  used from within OpenCode"（hermes 表现为整链不可用）。修复：session ID 按
+  descending 生成（counter 固定 1），request ID（`msg_`）维持 ascending。
+  消融实证：ascending→403、descending→200；counter≤63→200、≥64→403；UA 版本 /
+  `x-opencode-client` 值 / project 值 / `x-session-id` / marker 均不影响判定。
+- 新增回归测试：descending session ID 编码 + counter<64 + 时间戳 36 位回绕还原；
+  头部测试断言 session descending / request ascending。
+
 ### Ops
 
 - 2026-10-05 将杭州 ECS zen-lb 上游改为四个不同公网出口：OPC2 无线 `117.95.231.70`、OPC2 有线 `36.149.54.158`、CC9 联通 `112.83.208.241`、小米平板5 `218.93.215.38`。OPC2 有线桶用独立 systemd UID 与策略路由表 991，避免与无线桶共用出口；变更前配置保留在 ECS `edge_lb.env.before-four-buckets-20261005`。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import httpx
@@ -37,15 +38,52 @@ def test_opencode_id_format_matches_opencode_schema() -> None:
 
 
 def test_opencode_id_time_part_matches_db_pairs() -> None:
-    # Pairs taken from the local opencode.db (id prefix vs time.created ms):
+    # Pairs taken from real opencode client DBs (id prefix vs time.created ms):
     # time part == ((ms << 12) + counter) & 0xFFFFFFFFFFFF, counter starts at 1.
-    pairs = [
+    # Message ids are ascending; SESSION ids are descending since 1.19.0
+    # (schema/src/session-id.ts mints with descending()).
+    ascending_pairs = [
+        # opencode 1.18.32 session ids (ascending era), local opencode.db
         ("0e198de83001", 1790491287171),
         ("0e18e1c44001", 1790490582084),
         ("0e17f517e001", 1790489612670),
     ]
-    for time_part, created_ms in pairs:
+    for time_part, created_ms in ascending_pairs:
         assert int(time_part, 16) == ((created_ms << 12) + 1) & 0xFFFFFFFFFFFF
+    descending_pairs = [
+        # opencode 1.19.0 session ids (descending era), local opencode.db
+        ("ecc618ef6ffe", 1791867384073),
+        ("ecc5f84b6ffe", 1791867517769),
+    ]
+    for time_part, created_ms in descending_pairs:
+        assert int(time_part, 16) == (~((created_ms << 12) + 1)) & 0xFFFFFFFFFFFF
+
+
+def _unwrap_ms(low36: int, now_ms: int) -> int:
+    """Map a 36-bit-truncated ms back near now_ms (id time part loses high bits)."""
+    period = 1 << 36
+    return low36 + round((now_ms - low36) / period) * period
+
+
+def test_session_ids_are_descending_with_counter_below_64() -> None:
+    # Free-tier gate (live-verified 2026-10-13): x-opencode-session must be
+    # descending-encoded and its per-ms counter must stay below 64; ascending
+    # session ids get HTTP 403 FreeTierError.
+    for _ in range(50):
+        sid = zen_direct.opencode_id("ses_", descending=True)
+        body = sid[4:]
+        assert len(body) == 26
+        raw = int(body[:12], 16)
+        current = (~raw) & 0xFFFFFFFFFFFF  # invert back to ascending space
+        counter = current & 0xFFF
+        assert 1 <= counter < 64
+        now_ms = time.time_ns() // 1_000_000
+        assert abs(_unwrap_ms(current >> 12, now_ms) - now_ms) < 60_000
+        # request ids stay ascending (no counter limit on the gate)
+        rid = zen_direct.opencode_id("msg_")
+        assert abs(_unwrap_ms(int(rid[4:16], 16) >> 12, now_ms) - now_ms) < 60_000
+        # an ascending session id decodes differently from a descending one
+        assert zen_direct.opencode_id("ses_", descending=True) != zen_direct.opencode_id("ses_")
 
 
 # ----------------------------------------------------------------- headers
@@ -64,6 +102,14 @@ async def test_headers_reconstruct_captured_protocol() -> None:
     assert headers["x-opencode-project"] == "global"
     assert zen_direct.is_valid_opencode_id(headers["x-opencode-session"], "ses_")
     assert zen_direct.is_valid_opencode_id(headers["x-opencode-request"], "msg_")
+    # session id must be the descending encoding (2026-10-13 gate); request id ascending
+    ses_raw = int(headers["x-opencode-session"][4:16], 16)
+    ses_current = (~ses_raw) & 0xFFFFFFFFFFFF
+    assert 1 <= ses_current & 0xFFF < 64
+    now_ms = time.time_ns() // 1_000_000
+    assert abs(_unwrap_ms(ses_current >> 12, now_ms) - now_ms) < 60_000
+    req_raw = int(headers["x-opencode-request"][4:16], 16)
+    assert abs(_unwrap_ms(req_raw >> 12, now_ms) - now_ms) < 60_000
     await adapter.aclose()
 
 

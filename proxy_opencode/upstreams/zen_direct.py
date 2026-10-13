@@ -22,15 +22,21 @@ official opencode 1.18.x client sends to `https://opencode.ai/zen/v1`:
     26 chars = 12 hex chars of `(ms << 12) + counter` (low 48 bits) followed
     by 14 random chars from [0-9A-Za-z].
 
-  * Anonymous free-tier checks: the latest live ablation (2026-09-30) found
-    that stream=true and at least two OpenCode built-in tool names suffice;
-    tiny or absent system prompts passed. The earlier 2026-09-27 claim that
-    a full system marker and complete tool schemas were mandatory was
-    disproved. The adapter injects minimal schemas by default and offers
-    full captured assets only as compatibility fallback. On 2026-10-02 the
-    Zen catalogue switched to bare model IDs such as big-pickle; the old
-    opencode/big-pickle spelling returns 401. For diagnosis and present-day
-    deployment state see AGENTS.md and docs/OPERATIONS.md.
+  * Anonymous free-tier checks (live-verified 2026-10-13 against
+    opencode 1.19.0 / the inference-service cutover):
+      - `stream: true` and >= 2 tools whose names are opencode builtin
+        names are still required (unchanged from the 2026-09-30 ablation).
+      - NEW: the `x-opencode-session` header must be a *genuinely
+        opencode-shaped* session id: the 12-hex time part must be the
+        bitwise-INVERTED (descending) encoding of `(ms << 12) + counter`
+        (schema/src/session-id.ts uses `descending()`), and the counter
+        must stay below 64. Ascending session ids — what this adapter
+        emitted until 0.6.4 — are rejected with HTTP 403 FreeTierError
+        "OpenCode's free tier can only be used from within OpenCode".
+        `x-opencode-request` (msg_) stays ascending; no counter limit.
+      - The client's other headers are NOT checked: UA version, cli vs
+        desktop, x-opencode-project value, x-session-id, Accept, and the
+        marker prompt all passed either way.
 
 Everything else is a faithful OpenAI passthrough: messages/params are
 forwarded via the shared whitelist, SSE chunks are relayed as-is, and
@@ -102,6 +108,11 @@ _BRIDGE_NOTE_STANDALONE = (
 # `ZEN_TOOLS_MODE=minimal` injects two synthesized tiny schemas.
 # `captured2` restores the old 2-tool subset of the captured asset and `all`
 # the full 11-tool list, as fallbacks if the gate ever tightens again.
+#
+# A SECOND, independent gate appeared with the 2026-10-11 inference-service
+# cutover (first hit 2026-10-13): the `x-opencode-session` id must be a
+# descending-encoded opencode session id with counter < 64, else FreeTierError
+# 403. See opencode_id() and the module docstring.
 _MINIMAL_TOOL_NAMES = ("bash", "read")
 
 _MIN_INJECTED_TOOLS = 2
@@ -153,12 +164,20 @@ def opencode_id(prefix: str, *, descending: bool = False) -> str:
     """Generate an identifier exactly like opencode's Identifier.create().
 
     26 chars: 12 hex chars encoding `(ms << 12) + counter` truncated to the
-    low 48 bits, then 14 random chars drawn from [0-9A-Za-z] (byte % 62).
+    low 48 bits (bitwise-inverted when `descending`, which is how opencode
+    mints SESSION ids since 1.19.0 — see schema/src/session-id.ts), followed
+    by 14 random chars drawn from [0-9A-Za-z] (byte % 62).
+
+    Gate note (2026-10-13, live-verified): the free tier rejects a session
+    id that is ascending-encoded OR whose counter reaches 64 within the same
+    millisecond with `FreeTierError` ("can only be used from within
+    OpenCode"). Counter 1 is what a real client emits for the first id in a
+    millisecond, so always mint with counter 1.
     """
-    del descending  # opencode only uses ascending ids for sessions/messages
     now_ms = time.time_ns() // 1_000_000
     current = now_ms * 0x1000 + 1
-    time_part = format(current & 0xFFFFFFFFFFFF, "012x")
+    value = (~current) & 0xFFFFFFFFFFFF if descending else current & 0xFFFFFFFFFFFF
+    time_part = format(value, "012x")
     alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
     rand = "".join(alphabet[b % 62] for b in secrets.token_bytes(14))
     return prefix + time_part + rand
@@ -323,7 +342,11 @@ class ZenDirectAdapter:
             "User-Agent": ua,
             "x-opencode-client": "cli",
             "x-opencode-project": "global",
-            "x-opencode-session": opencode_id("ses_"),
+            # Session ids are minted DESCENDING (~((ms<<12)+counter)) since
+            # opencode 1.19.0; the free-tier gate rejects ascending session
+            # ids with FreeTierError (verified live 2026-10-13). Request ids
+            # stay ascending, matching the genuine client.
+            "x-opencode-session": opencode_id("ses_", descending=True),
         }
         if request_id:
             headers["x-opencode-request"] = opencode_id("msg_")

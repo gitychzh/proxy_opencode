@@ -9,12 +9,24 @@
 
 ## 硬约束（不可违反）
 
-1. **免费层协议事实（最近活体复测：2026-09-30；上游模型目录复核：2026-10-02）**：
+1. **免费层协议事实（最近活体复测：2026-09-30；上游模型目录复核：2026-10-02；
+   inference 切换后 gate 复测：2026-10-13）**：
    - 匿名请求实测门槛：至少 2 个工具，且其 `function.name` 属于 OpenCode 内置工具集
      （bash/edit/glob/grep/read/skill/task/todowrite/webfetch/websearch/write），并且
      `stream: true`；少于 2 个或使用两个非内置名、或 `stream: false` 均得到 403。
      当前默认 `ZEN_TOOLS_MODE=minimal` 注入两个合成最小 schema（~60 token）；
      `captured2` / `all` 是较大 schema 回退档。
+   - **session ID 必须 descending 编码（2026-10-13 实测，opencode 1.19.0）**：
+     Zen 免费层（inference 服务切换后新增的 gate）校验 `x-opencode-session`
+     是「真 opencode 客户端形状」的 ID：12 hex 时间部分须为
+     `~((ms<<12)+counter) & 0xFFFFFFFFFFFF`（`schema/src/session-id.ts` 的
+     `descending()` 编码，1.19.0 起 session ID 改用 descending；1.18.32 及以前
+     是 ascending），且同一毫秒内 counter 必须 < 64。 ascending 的 session ID
+     （0.6.3 及之前网关的行为）恒定 403 `FreeTierError` "OpenCode's free tier
+     can only be used from within OpenCode"。`x-opencode-request`（`msg_`）仍
+     为 ascending，counter 无限制。ID 时间戳的新旧（±7 天）不影响判定。
+     其余头部（UA 版本 / `cli` vs `desktop` / `x-opencode-project` 值 /
+     `x-session-id` / `Accept` / marker 提示词）均不参与判定。
    - 同次复测中，tiny prompt 或没有 system 消息也可通过；因此 system marker 不是
      已验证的门槛。默认 `ZEN_MARKER_MODE=bridge` 仍注入兼容说明，勿把“代码默认注入”
      误写成“上游强制要求”。历史实验若与这组复测冲突，以此处标注的最近实测为准。
