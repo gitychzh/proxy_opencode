@@ -210,10 +210,25 @@ class EgressPool:
 
     # ------------------------------------------------------------ lifecycle
 
+    def _proxy_for(self, spec: EgressSpec) -> httpx.Proxy | str:
+        """Build the httpx proxy for one agent.
+
+        The agents require Basic auth on CONNECT (the tailnet is private but
+        the proxy is still gated); credentials come from the shared
+        ``agent_secret`` and are injected here rather than stored in the spec,
+        so ``agent_url`` — and therefore the ``/admin/egresses`` snapshot and
+        logs — never carries a secret.
+        """
+
+        if not self._agent_secret:
+            return spec.agent_url
+        creds = (self._agent_secret, self._agent_secret)
+        return httpx.Proxy(spec.agent_url, auth=creds)
+
     async def start(self) -> None:
         for state in self._states:
             state.client = httpx.AsyncClient(
-                proxy=state.spec.agent_url,
+                proxy=self._proxy_for(state.spec),
                 trust_env=False,
                 timeout=self._timeout,
             )

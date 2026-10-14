@@ -262,6 +262,23 @@ async def test_start_and_aclose_lifecycle() -> None:
     assert pool._closed is True
 
 
+# ------------------------------------------------------------ proxy auth
+
+
+def test_proxy_for_injects_agent_credentials_without_leaking_them() -> None:
+    pool = make_pool("a")
+    spec = pool._states[0].spec  # noqa: SLF001
+    # No secret configured -> plain URL string, no auth object.
+    assert pool._proxy_for(spec) == spec.agent_url
+    authed = make_pool("a", agent_secret="s3cret")
+    proxy = authed._proxy_for(authed._states[0].spec)  # noqa: SLF001
+    assert isinstance(proxy, httpx.Proxy)
+    assert proxy.auth == ("s3cret", "s3cret")
+    # The secret must never surface in the spec/snapshot/agent_url.
+    assert "s3cret" not in spec.agent_url
+    assert "s3cret" not in str(authed.snapshot())
+
+
 # ---------------------------------------------------------------- snapshot
 
 
