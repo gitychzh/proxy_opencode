@@ -19,10 +19,15 @@ from fastapi.responses import JSONResponse
 from ..auth import build_admin_dependency
 from ..auth.keystore import KeyStore
 from ..config import Settings
+from ..egress.pool import EgressPool
 from ..errors import openai_error
 
 
-def make_router(settings: Settings, keystore: KeyStore) -> APIRouter:
+def make_router(
+    settings: Settings,
+    keystore: KeyStore,
+    egress_pool: EgressPool | None = None,
+) -> APIRouter:
     admin = build_admin_dependency(settings)
     router = APIRouter()
 
@@ -69,6 +74,17 @@ def make_router(settings: Settings, keystore: KeyStore) -> APIRouter:
     @router.get("/admin/keys")
     async def list_keys(_: str = Depends(admin)) -> dict[str, Any]:
         return {"keys": [r.public_view() for r in keystore.list()]}
+
+    @router.get("/admin/egresses")
+    async def list_egresses(_: str = Depends(admin)) -> dict[str, Any]:
+        """Egress-pool status: health, cordon, in-flight and observed IPs.
+
+        Never includes agent credentials or message content; egress names,
+        IPs and counters are the documented-safe surface.
+        """
+        if egress_pool is None:
+            return {"pool": False, "egresses": []}
+        return {"pool": True, "egresses": egress_pool.snapshot()}
 
     @router.delete("/admin/keys/{key_id}")
     async def revoke_key(key_id: str, _: str = Depends(admin)) -> JSONResponse:

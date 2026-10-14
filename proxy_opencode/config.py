@@ -154,6 +154,18 @@ class Settings:
     zen_session_id: str = ""
     zen_client_version: str = DEFAULT_ZEN_CLIENT_VERSION
     zen_bun_version: str = DEFAULT_ZEN_BUN_VERSION
+    # 0.7.x egress pool: per-bucket device agents. Format:
+    #   ZEN_EGRESS_PROXIES="name=http://<device>:10001,name2=http://<device>:10002"
+    # Optional bucket-identity prefixes (an agent reporting an IP outside the
+    # prefix is treated as unhealthy — it would silently consume another
+    # bucket's quota):
+    #   ZEN_EGRESS_EXPECT_PREFIX="opc2-wifi=117.95.231.0/24,..."
+    zen_egress_proxies: dict[str, str] = field(default_factory=dict)
+    zen_egress_expect_prefix: dict[str, str] = field(default_factory=dict)
+    # Shared secret for the agents' /healthz + /rotate endpoints (basic auth).
+    zen_egress_secret: str = ""
+    zen_egress_probe_interval_s: int = 30
+    zen_egress_cordon_s: int = 300
 
     @property
     def dev_open(self) -> bool:
@@ -171,6 +183,20 @@ class Settings:
 
 def _csv(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _parse_kv(value: str) -> dict[str, str]:
+    """Parse "name=url,name2=url2" into a dict (egress pool specs)."""
+
+    out: dict[str, str] = {}
+    for part in _csv(value):
+        key, sep, item = part.partition("=")
+        if not sep or not key.strip() or not item.strip():
+            raise ValueError(
+                f"bad key=value entry {part!r} (expected 'name=url,...')"
+            )
+        out[key.strip()] = item.strip()
+    return out
 
 
 def _parse_public_models(value: str) -> list[dict[str, str]]:
@@ -334,4 +360,13 @@ def load_settings() -> Settings:
         zen_bun_version=os.environ.get(
             "OPENCODE_ZEN_BUN_VERSION", DEFAULT_ZEN_BUN_VERSION
         ),
+        zen_egress_proxies=_parse_kv(os.environ.get("ZEN_EGRESS_PROXIES", "")),
+        zen_egress_expect_prefix=_parse_kv(
+            os.environ.get("ZEN_EGRESS_EXPECT_PREFIX", "")
+        ),
+        zen_egress_secret=os.environ.get("ZEN_EGRESS_SECRET", "").strip(),
+        zen_egress_probe_interval_s=int(
+            os.environ.get("ZEN_EGRESS_PROBE_INTERVAL_S", "30")
+        ),
+        zen_egress_cordon_s=int(os.environ.get("ZEN_EGRESS_CORDON_S", "300")),
     )

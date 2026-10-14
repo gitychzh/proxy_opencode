@@ -1,0 +1,45 @@
+# Docker 构建上下文瘦身（deploy/ecs/Dockerfile 从仓库根构建）。
+# 只把 proxy_opencode/ + pyproject.toml + README.md 送进镜像。
+.venv*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# 本地/敏感/无关内容
+.git
+.github
+cap/
+logs/
+*.log
+keys.json
+secrets.env
+.env
+.env.*
+!deploy/ecs/env.example
+scripts_local/
+phone_key/
+*.pem
+*_key
+id_ed25519*
+aliyun-cookies/
+.workbuddy-ai/
+.workbuddy/
+
+# 其它组件与文档（镜像不需要）
+tests/
+balancer/
+egress-agent/
+egress-agent-android/
+docs/
+scripts/
+deploy/
+CHANGELOG.md
+CONTRIBUTING.md
+SECURITY.md
+AGENTS.md
+*.bat
+.nvmrc
+.editorconfig

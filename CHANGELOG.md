@@ -9,6 +9,36 @@
 
 ## [Unreleased]
 
+### Added — 网关出口池 + ECS 容器（0.7.0，P2）
+
+- **出口池 `proxy_opencode/egress/pool.py`**：每桶一个 `httpx.AsyncClient`
+  （`proxy=<agent url>`、`trust_env=False`，绝不跟环境代理漂移）；least-in-flight
+  选桶；三连传输失败 cordon 冷却；上游 429（per-IP 日额度）cordon 到下一个
+  **08:00 Asia/Shanghai**（=UTC0 重置）；慢速 `GET /healthz` 探测循环记录各 agent
+  实测出口 IP，并按 `expect_prefix` 做**桶身份校验**——IP 落在前缀外即判不健康并
+  跳过（真机实测：ONT 重启后 eth 腿会回落 wifi 出口、静默偷别的桶额度）。
+  全部桶都 cordon 时仍发一个请求（排队上游优于凭空 502），与 balancer 同语义。
+- **配置**：新增 `ZEN_EGRESS_PROXIES`（`name=url,...`）、
+  `ZEN_EGRESS_EXPECT_PREFIX`（`name=cidr,...`）、`ZEN_EGRESS_SECRET`、
+  `ZEN_EGRESS_PROBE_INTERVAL_S`、`ZEN_EGRESS_CORDON_S`；`_parse_kv` 解析并
+  拒绝畸形条目。默认全空 = 不用池（单机直连行为不变）。
+- **zen-direct 租约集成**：配池后每个 chat 请求先 `acquire()` 一个桶，用该桶的
+  client 发包，并按结果 `release()`：200→成功；429→`http_429`（整日 cordon）；
+  5xx/传输失败→计入失败；**其它 4xx（400/403…）视为请求级错误、桶本身健康**
+  （与 balancer 一致，避免畸形请求把好桶 cordon 掉）。流式请求的租约在**整个流
+  结束**时才释放（`StreamRelay` 新增一次性 `on_close` 钩子），客户端中途断线也会
+  经 `aclose()` 确定性释放，不再等 GC。
+- **`/admin/egresses`**：只读快照（健康 / cordon 原因与剩余时间 / in-flight /
+  累计 / 出口 IP 与前缀是否匹配），绝不暴露 agent 凭据。未配池时返回
+  `{"pool": false}`。
+- **容器化**：`deploy/ecs/Dockerfile`（python:3.12-slim，`pip install .`，
+  非 root、只读根文件系统 + `/data` 卷 + `/tmp` tmpfs + HEALTHCHECK）、
+  `compose.yml`（只发布到 `127.0.0.1:10002`，caddy 反代）、`env.example`、
+  根 `.dockerignore`；`deploy/ecs/README.md` 补齐构建/运行/验证/回滚。
+- **测试**：`tests/test_egress_pool.py`（选桶 / cordon / 429 窗口 / 前缀校验 /
+  探测 / 生命周期 / from_settings）+ zen-direct 租约集成（流式、断线、非流式、
+  429、4xx、传输失败）+ `StreamRelay` 关闭钩子一次性 + `/admin/egresses` 路由。
+
 ### Added — egress-agent 数据面（0.7.0，P1）
 
 - **数据面落地**：`egress-agent` 的 `run` 真正起服务——单端口（10001/10002）

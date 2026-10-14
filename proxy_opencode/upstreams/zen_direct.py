@@ -56,6 +56,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..config import Settings
+from ..egress.pool import EgressPool, Lease
 from .openai_http import StreamRelay, _raw_relay_body
 
 logger = logging.getLogger("proxy_opencode.zen")
@@ -216,8 +217,13 @@ def _clean_messages(messages: list[Any]) -> list[dict[str, Any]]:
 class ZenDirectAdapter:
     name = "zen-direct"
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, pool: EgressPool | None = None) -> None:
         self._settings = settings
+        # 0.7.x: when the egress pool is configured, chat requests leave
+        # through the per-bucket device agents instead of this local client
+        # (the container itself has no free-tier quota — every bucket is a
+        # device's public IP). list_models still uses the local client.
+        self._pool = pool
         base = settings.zen_base_url
         if (urlparse(base).hostname or "") not in ("opencode.ai", "localhost", "127.0.0.1"):
             raise ValueError(
@@ -292,30 +298,82 @@ class ZenDirectAdapter:
         therefore ALWAYS streams upstream: streaming clients get the SSE
         relayed verbatim; non-streaming clients get the SSE aggregated into
         a single chat-completion JSON.
+
+        With an egress pool configured every request leases one bucket first
+        and releases it with the observed outcome, so bad buckets are
+        cordoned and least-in-flight selection spreads load across healthy
+        egress IPs.
         """
         model = self._zen_model(payload.get("model"))
         body = self._build_body(payload, model)
         body["stream"] = True
         headers = self._headers()
-
         stream = bool(payload.get("stream"))
-        req = self.client.build_request(
+
+        if self._pool is None:
+            return await self._exchange(self.client, body, headers, model, stream, None)
+        lease = await self._pool.acquire()
+        return await self._exchange(lease.client, body, headers, model, stream, lease)
+
+    async def _exchange(
+        self,
+        client: httpx.AsyncClient,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        model: str,
+        stream: bool,
+        lease: Lease | None,
+    ) -> Any:
+        """Send one upstream request and fold the outcome into the lease.
+
+        A 4xx other than 429 (400/403/… ) is a request-level rejection the
+        upstream returned through a working egress, so it releases the lease
+        as a success; only 429 (free-tier quota) and 5xx / transport failures
+        count against the bucket. Mirrors the balancer's release semantics.
+        """
+        req = client.build_request(
             "POST", "/chat/completions", json=body, headers=headers
         )
         try:
-            resp = await self.client.send(req, stream=True)
+            resp = await client.send(req, stream=True)
         except httpx.HTTPError as exc:
+            await self._release(lease, ok=False, kind="transport")
             raise ConnectionError(f"zen request failed: {exc}") from exc
         if resp.status_code != 200:
             raw = await resp.aread()
             await resp.aclose()
+            if resp.status_code == 429:
+                await self._release(lease, ok=False, kind="http_429")
+            elif resp.status_code >= 500:
+                await self._release(lease, ok=False, kind=f"http_{resp.status_code}")
+            else:
+                await self._release(lease, ok=True)
             return _raw_relay_body(resp.status_code, raw)
         if stream:
-            return StreamRelay(resp, {})
+            if lease is None:
+                return StreamRelay(resp, {})
+            pool = self._pool
+            assert pool is not None
+            held: Lease = lease
+
+            async def _released() -> None:
+                await pool.release(held, ok=True)
+
+            return StreamRelay(resp, {}, on_close=_released)
         try:
-            return await _aggregate_sse(resp, model)
+            result = await _aggregate_sse(resp, model)
+        except Exception:
+            await self._release(lease, ok=False, kind="aggregate_error")
+            raise
+        else:
+            await self._release(lease, ok=True)
+            return result
         finally:
             await resp.aclose()
+
+    async def _release(self, lease: Lease | None, *, ok: bool, kind: str = "") -> None:
+        if lease is not None and self._pool is not None:
+            await self._pool.release(lease, ok=ok, kind=kind)
 
     # ------------------------------------------------------------ internals
 

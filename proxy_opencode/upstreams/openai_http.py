@@ -7,16 +7,23 @@ UPSTREAM_API_KEY. Streaming responses are relayed byte-for-byte.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import secrets
 import time
-from typing import Any, AsyncIterator
+from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable
 
 import httpx
 
 from ..config import Settings
 
+logger = logging.getLogger("proxy_opencode.stream")
+
 _CHUNK_ID_RE = re.compile(rb'"id":"([^"]+)"')
+
+# Invoked exactly once when a relay finishes, however it finishes (stream
+# drained, upstream cut, or client disconnect closing the generator).
+CloseHook = Callable[[], Awaitable[None]]
 
 
 class StreamRelay:
@@ -35,13 +42,51 @@ class StreamRelay:
     truncation that clients already know how to handle.
     """
 
-    def __init__(self, resp: httpx.Response, usage_holder: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        resp: httpx.Response,
+        usage_holder: dict[str, Any],
+        on_close: CloseHook | None = None,
+    ) -> None:
         self.response = resp
         self.usage_holder = usage_holder
         # Set after chunks() ran: True when the terminal chunk was synthesised.
         self.stream_cut = False
+        # Called once when the relay finishes (the egress pool releases its
+        # lease then — in-flight accounting must span the whole stream).
+        self._on_close: CloseHook | None = on_close
 
     async def chunks(self) -> AsyncIterator[bytes]:
+        """Relay the upstream SSE body, running ``on_close`` exactly once.
+
+        The close hook must fire even when the consumer abandons the stream
+        (client disconnect): the route layer closes this generator explicitly,
+        which raises ``GeneratorExit`` at the current ``yield``. We therefore
+        close the inner producer deterministically and then run the hook, so
+        the egress lease is released the moment the stream ends rather than
+        whenever the garbage collector gets to it.
+        """
+        inner = self._stream()
+        try:
+            async for chunk in inner:
+                yield chunk
+        finally:
+            try:
+                await inner.aclose()
+            finally:
+                await self._close()
+
+    async def _close(self) -> None:
+        hook = self._on_close
+        if hook is None:
+            return
+        self._on_close = None
+        try:
+            await hook()
+        except Exception:  # never let bookkeeping break the relay teardown
+            logger.exception("stream relay close hook failed")
+
+    async def _stream(self) -> AsyncGenerator[bytes, None]:
         resp = self.response
         # Best-effort capture of usage from streamed chunks for logging. The
         # scan is line-buffered: a `data:` line carrying usage can be split

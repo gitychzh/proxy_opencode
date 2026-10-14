@@ -163,6 +163,24 @@ async def test_mask_passes_through_plain_lines():
     assert out == b"data: [DONE]\n\n"
 
 
+async def test_mask_closes_wrapped_stream_on_early_aclose():
+    """Client disconnect closes the masking generator; the wrapped upstream
+    (and a 0.7.x egress lease behind it) must be released deterministically."""
+    closed: list[int] = []
+
+    async def gen():
+        try:
+            yield b'data: {"model":"big-pickle"}\n\n'
+            yield b"data: [DONE]\n\n"
+        finally:
+            closed.append(1)
+
+    stream = mask_model_field(gen(), "ds41f_cus")
+    await stream.__anext__()
+    await stream.aclose()
+    assert closed == [1]
+
+
 def test_mask_json_model_drops_leaked_message_name():
     body = {
         "model": "opencode/big-pickle",

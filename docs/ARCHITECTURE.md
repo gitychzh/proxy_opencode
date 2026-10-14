@@ -79,7 +79,7 @@ agent 代理 basic auth 双保险）。
 |---|---|---|---|
 | P0 | 0.7.0a1 | 冻结方案、repo 骨架、CI 双端门禁、端口注册表、caddy 片段 | **已完成**（7474c22，含既有 CI 失败修复） |
 | P1 | 0.7.0 | egress-agent 数据面（CONNECT/healthz/rotate）+ 设备实测 | **已完成**（双桶出口/换 IP 真机验证通过） |
-| P2 | 0.7.0 | 网关 egress pool + Docker/compose，ECS:10002 起容器；四桶出口逐一实测复核 | 未开始 |
+| P2 | 0.7.0 | 网关 egress pool + Docker/compose，ECS:10002 起容器；四桶出口逐一实测复核 | 进行中（pool/容器/门禁绿，待 ECS 部署与四桶实测） |
 | P3 | 0.7.0 | catalog 全免费模型；hermes 加新 alias（旧 alias 保留） | 未开始 |
 | P4 | 0.7.1 | updater：每日 02:00 查 GitHub release（含 prerelease），分级采用 | 未开始 |
 | P5 | 0.7.2 | 换 IP：计数器窗口 + 500 触发 + ONT 重启 + IP 变更验证 + 429 兜底 | 未开始 |

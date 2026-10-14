@@ -1,21 +1,48 @@
 # ECS 新栈部署（0.7.x）
 
-容器与入口配置。**应用时机**：P2（网关 egress pool 落地后）。旧栈
-（caddy:9443 → zen-lb:7892、设备旧网关）在本目录任何配置生效前保持原样。
+容器与入口配置。**应用时机**：P2（网关 egress pool + 容器落地）。旧栈
+（caddy:9443 → zen-lb:7892、设备旧网关）在本目录任何配置生效前保持原样，
+hermes 旧 alias 不动。
 
 ## 文件
 
 | 文件 | 用途 |
 |---|---|
-| `Caddyfile.snippet` | 新客户端入口 `:10002`（两种 TLS 方案）+ 容器反代 |
-| `compose.yml` | P2 落地（网关镜像；构建/运行期零云端依赖） |
+| `Dockerfile` | 网关镜像（`python:3.12-slim` + `pip install .`，运行期零云端调用） |
+| `compose.yml` | 容器编排：发布到 `127.0.0.1:10002`，只读根文件系统 + `/data` 卷 |
+| `env.example` | 环境变量模板（含出口池）；复制为 `.env` 填真实值（`.env` 已 gitignore） |
+| `Caddyfile.snippet` | 新客户端入口 `:10002`（IP 自签 + 域名 LE 两方案）+ 容器反代 |
 | `README.md` | 本文件 |
 
-## 应用步骤（P2 时执行，先备份后改）
+## 容器构建与运行（P2）
+
+```bash
+cd deploy/ecs
+cp env.example .env          # 填 GATEWAY_API_KEYS / ADMIN_API_KEYS / ZEN_EGRESS_*
+# 构建（默认清华 TUNA pip 源；镜像源不可用时换 --build-arg PIP_INDEX_URL=...）
+docker compose build
+docker compose up -d
+docker compose logs -f zen-gw
+docker compose ps            # 期望 healthy（HEALTHCHECK 打 /healthz）
+```
+
+**构建前置**：ECS 需能访问一个 pip 源（默认 `pypi.tuna.tsinghua.edu.cn`）。
+若 docker.io 拉不到 `python:3.12-slim` 基础镜像，先配置 registry 镜像加速
+（`/etc/docker/daemon.json` 的 `registry-mirrors`）或用内网导入的基础镜像，
+再 `docker compose build`。构建在容器内完成，运行期不依赖任何云服务。
+
+**验证出口池**（容器起来后，用 ADMIN key）：
+
+```bash
+curl -s http://127.0.0.1:10002/admin/egresses \
+  -H "Authorization: Bearer $ADMIN_API_KEYS" | python3 -m json.tool
+# 每桶应 healthy=true、egress_ip 落在其 expect_prefix 内。
+```
+
+## 应用入口（caddy）
 
 ```bash
 sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%F-%H%M)
-sudo python3 -c "import yaml,sys;yaml.safe_load(open(sys.argv[1]))" /dev/null 2>/dev/null || true
 # 1) 把 Caddyfile.snippet 的内容追加进 /etc/caddy/Caddyfile
 # 2) sudo caddy validate --config /etc/caddy/Caddyfile
 # 3) sudo systemctl reload caddy        # 失败即 systemctl restart caddy 回滚
@@ -36,5 +63,12 @@ sudo python3 -c "import yaml,sys;yaml.safe_load(open(sys.argv[1]))" /dev/null 2>
 
 ## 回滚
 
-删除追加的 site 块并 `systemctl reload caddy` 即回到纯 9443 旧入口；
-容器 `docker compose down` 不影响任何旧组件。
+```bash
+cd deploy/ecs && docker compose down          # 容器退出，旧栈零影响
+# 删除 Caddyfile 里追加的 :10002 site 块并 systemctl reload caddy
+```
+
+## 日志红线
+
+容器日志经 json-file 驱动（8MB×3 轮转）。网关绝不记录消息内容、prompt 或
+任何 key（见 SECURITY.md）；`/admin/egresses` 只暴露出口名 / IP / 计数。

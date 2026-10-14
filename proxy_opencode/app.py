@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from . import __version__
 from .auth.keystore import KeyStore
 from .config import Settings, load_settings
+from .egress.pool import EgressPool
 from .errors import GatewayHttpError
 from .registry import ModelRegistry
 from .routes import admin as admin_routes
@@ -36,19 +37,38 @@ logger = logging.getLogger("proxy_opencode")
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
+    # 0.7.x: when ZEN_EGRESS_PROXIES is configured, chat requests are routed
+    # through per-bucket device agents. The pool starts in the lifespan (it
+    # opens httpx clients and a probe task) so importing this module stays
+    # side-effect free.
+    egress_pool = EgressPool.from_settings(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
-        aclose = getattr(app.state.adapter, "aclose", None)
-        if aclose is not None:
-            await aclose()
+        if egress_pool is not None:
+            await egress_pool.start()
+        try:
+            yield
+        finally:
+            aclose = getattr(app.state.adapter, "aclose", None)
+            if aclose is not None:
+                await aclose()
+            if egress_pool is not None:
+                await egress_pool.aclose()
 
     app = FastAPI(title="proxy_opencode", version=__version__, lifespan=lifespan)
     app.state.settings = settings
-    app.state.adapter = build_adapter(settings)
+    app.state.egress_pool = egress_pool
+    app.state.adapter = build_adapter(settings, pool=egress_pool)
     app.state.keystore = KeyStore(settings.key_store_path, settings.key_default_ttl_hours)
     app.state.registry = ModelRegistry(settings)
+
+    if egress_pool is not None and settings.upstream_mode != "zen-direct":
+        logger.warning(
+            "ZEN_EGRESS_PROXIES is set but UPSTREAM_MODE=%s does not use the "
+            "egress pool (only zen-direct does); the pool will idle",
+            settings.upstream_mode,
+        )
 
     logger.info(
         "gateway starting",
@@ -60,6 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "admin_keys": len(settings.admin_api_keys),
             "public_models": [m["id"] for m in settings.public_models],
             "adapter": getattr(app.state.adapter, "name", "?"),
+            "egresses": egress_pool.names() if egress_pool is not None else [],
         },
     )
 
@@ -77,7 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(
         anthropic_routes.make_router(settings, app.state.keystore, app.state.registry)
     )
-    app.include_router(admin_routes.make_router(settings, app.state.keystore))
+    app.include_router(admin_routes.make_router(settings, app.state.keystore, egress_pool))
     return app
 
 

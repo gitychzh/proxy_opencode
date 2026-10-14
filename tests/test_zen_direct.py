@@ -11,6 +11,7 @@ import pytest
 import respx
 
 from proxy_opencode.config import Settings
+from proxy_opencode.egress.pool import EgressSpec, EgressState, Lease
 from proxy_opencode.upstreams import zen_direct
 from proxy_opencode.upstreams.openai_http import StreamRelay
 from proxy_opencode.upstreams.zen_direct import ZenDirectAdapter
@@ -612,3 +613,201 @@ def test_httpx_proxy_acceptance() -> None:
     # httpx accepts the proxy form we document; keeps config honest.
     client = httpx.Client(proxy="http://127.0.0.1:7897")
     client.close()
+
+
+# ------------------------------------------------------- egress pool leases
+
+
+class _StubPool:
+    """Minimal EgressPool stand-in recording releases (0.7.x integration)."""
+
+    def __init__(self, client: httpx.AsyncClient) -> None:
+        self._client = client
+        self.releases: list[tuple[str, bool, str]] = []
+
+    async def acquire(self) -> Lease:
+        state = EgressState(spec=EgressSpec("bucket-a", "http://agent:10001"))
+        state.client = self._client
+        state.inflight += 1
+        return Lease(state)
+
+    async def release(self, lease: Lease, *, ok: bool, kind: str = "") -> None:
+        self.releases.append((lease.name, ok, kind))
+
+
+def _leased_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(base_url="https://opencode.ai/zen/v1")
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_stream_leases_egress_and_releases_on_stream_end() -> None:
+    respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+        content=b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n',
+    )
+    client = _leased_client()
+    pool = _StubPool(client)
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {
+            "model": "opencode/big-pickle",
+            "stream": True,
+            "messages": [{"role": "user", "content": "q"}],
+        }
+    )
+    assert isinstance(result, StreamRelay)
+    # the lease must stay held while the stream is live
+    assert pool.releases == []
+    _ = b"".join([c async for c in result.chunks()])
+    assert pool.releases == [("bucket-a", True, "")]
+    await client.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_stream_releases_lease_on_client_disconnect() -> None:
+    respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+        content=b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
+        b'data: {"choices":[{"delta":{"content":"b"}}]}\n\ndata: [DONE]\n\n',
+    )
+    client = _leased_client()
+    pool = _StubPool(client)
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {
+            "model": "opencode/big-pickle",
+            "stream": True,
+            "messages": [{"role": "user", "content": "q"}],
+        }
+    )
+    assert isinstance(result, StreamRelay)
+    gen = result.chunks()
+    await gen.__anext__()  # consume one chunk, then hang up
+    await gen.aclose()
+    assert pool.releases == [("bucket-a", True, "")]
+    await client.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_non_stream_releases_lease_ok() -> None:
+    respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+        content=(
+            b'data: {"id":"z","choices":[{"delta":{"content":"hi"},'
+            b'"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+        ),
+    )
+    client = _leased_client()
+    pool = _StubPool(client)
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["choices"][0]["message"]["content"] == "hi"
+    assert pool.releases == [("bucket-a", True, "")]
+    await client.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_429_cordons_the_egress() -> None:
+    respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=429, json={"error": {"message": "FreeUsageLimitError"}}
+    )
+    client = _leased_client()
+    pool = _StubPool(client)
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["__status__"] == 429
+    assert pool.releases == [("bucket-a", False, "http_429")]
+    await client.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_400_is_not_an_egress_failure() -> None:
+    # A request-level rejection rode through a working egress: release it ok.
+    respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=400, json={"error": {"message": "bad request"}}
+    )
+    client = _leased_client()
+    pool = _StubPool(client)
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["__status__"] == 400
+    assert pool.releases == [("bucket-a", True, "")]
+    await client.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_transport_error_releases_lease_as_failure() -> None:
+    respx.post("https://opencode.ai/zen/v1/chat/completions").mock(
+        side_effect=httpx.ConnectError("boom")
+    )
+    client = _leased_client()
+    pool = _StubPool(client)
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    with pytest.raises(ConnectionError):
+        await adapter.chat(
+            {
+                "model": "opencode/big-pickle",
+                "messages": [{"role": "user", "content": "q"}],
+            }
+        )
+    assert pool.releases == [("bucket-a", False, "transport")]
+    await client.aclose()
+    await adapter.aclose()
+
+
+# ------------------------------------------------------- relay close hook
+
+
+@pytest.mark.asyncio
+async def test_relay_on_close_fires_once_after_full_stream() -> None:
+    calls: list[int] = []
+
+    async def hook() -> None:
+        calls.append(1)
+
+    async def gen():
+        yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    relay = StreamRelay(httpx.Response(200, content=gen()), {}, on_close=hook)
+    out = b"".join([c async for c in relay.chunks()])
+    assert b"[DONE]" in out
+    assert calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_relay_on_close_fires_on_early_aclose() -> None:
+    calls: list[int] = []
+
+    async def hook() -> None:
+        calls.append(1)
+
+    async def gen():
+        yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    relay = StreamRelay(httpx.Response(200, content=gen()), {}, on_close=hook)
+    it = relay.chunks()
+    await it.__anext__()
+    await it.aclose()
+    assert calls == [1]

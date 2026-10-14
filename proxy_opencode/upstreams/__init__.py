@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from ..config import Settings
+from ..egress.pool import EgressPool
 from . import openai_http, opencode_serve, zen_direct
 from .openai_http import StreamRelay
 from .opencode_serve import ServeCompletion
@@ -43,11 +44,13 @@ class UpstreamAdapter(Protocol):
         ...
 
 
-def build_adapter(settings: Settings) -> UpstreamAdapter:
+def build_adapter(
+    settings: Settings, pool: EgressPool | None = None
+) -> UpstreamAdapter:
     if settings.is_opencode_serve:
         return opencode_serve.ServeAdapter(settings)
     if settings.is_zen_direct:
-        return zen_direct.ZenDirectAdapter(settings)
+        return zen_direct.ZenDirectAdapter(settings, pool=pool)
     return openai_http.OpenAIHttpAdapter(settings)
 
 

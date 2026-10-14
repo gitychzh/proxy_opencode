@@ -54,17 +54,32 @@ def rewrite_sse_line(line: bytes, public_model: str) -> bytes:
 async def mask_model_field(
     chunks: AsyncIterator[bytes], public_model: str
 ) -> AsyncIterator[bytes]:
-    """Wrap an SSE byte stream, masking the model field of every data line."""
+    """Wrap an SSE byte stream, masking the model field of every data line.
+
+    The wrapped stream is closed deterministically on teardown (client
+    disconnect closes this generator, which raises ``GeneratorExit`` at the
+    ``yield``): without an explicit ``aclose`` the upstream response — and,
+    in 0.7.x, the egress-pool lease it holds — would only be released when
+    the garbage collector got to it.
+    """
     buffer = b""
-    async for chunk in chunks:
-        if not chunk:
-            continue
-        buffer += chunk
-        while b"\n" in buffer:
-            line, buffer = buffer.split(b"\n", 1)
-            yield rewrite_sse_line(line, public_model) + b"\n"
-    if buffer:
-        yield rewrite_sse_line(buffer, public_model)
+    try:
+        async for chunk in chunks:
+            if not chunk:
+                continue
+            buffer += chunk
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                yield rewrite_sse_line(line, public_model) + b"\n"
+        if buffer:
+            yield rewrite_sse_line(buffer, public_model)
+    finally:
+        aclose = getattr(chunks, "aclose", None)
+        if aclose is not None:
+            try:
+                await aclose()
+            except Exception:  # pragma: no cover - teardown must not mask exit
+                pass
 
 
 def mask_json_model(body: dict[str, Any], public_model: str) -> dict[str, Any]:

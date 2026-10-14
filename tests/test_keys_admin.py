@@ -212,8 +212,39 @@ async def test_admin_endpoints_reject_non_admin(tmp_path):
         for headers in ({}, GW_HEADERS):
             r = await client.get("/admin/keys", headers=headers)
             assert r.status_code == 401
+            r = await client.get("/admin/egresses", headers=headers)
+            assert r.status_code == 401
         r = await client.post("/admin/keys", json={}, headers=GW_HEADERS)
         assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_admin_egresses_reports_pool_status(tmp_path):
+    app = make_app(
+        tmp_path,
+        zen_egress_proxies={"opc2-wifi": "http://100.0.0.1:10001"},
+        zen_egress_expect_prefix={"opc2-wifi": "117.95.231.0/24"},
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        r = await client.get("/admin/egresses", headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["pool"] is True
+    assert body["egresses"][0]["name"] == "opc2-wifi"
+    assert body["egresses"][0]["expect_prefix"] == "117.95.231.0/24"
+
+
+@pytest.mark.asyncio
+async def test_admin_egresses_empty_when_pool_unconfigured(tmp_path):
+    app = make_app(tmp_path)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        r = await client.get("/admin/egresses", headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    assert r.json() == {"pool": False, "egresses": []}
 
 
 @pytest.mark.asyncio
