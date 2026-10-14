@@ -38,6 +38,12 @@
 - **测试**：`tests/test_egress_pool.py`（选桶 / cordon / 429 窗口 / 前缀校验 /
   探测 / 生命周期 / from_settings）+ zen-direct 租约集成（流式、断线、非流式、
   429、4xx、传输失败）+ `StreamRelay` 关闭钩子一次性 + `/admin/egresses` 路由。
+- **Android chroot 部署模板**：`egress-agent/deploy/android-chroot-watchdog.sh`
+  ——Android 无 systemd，改用 Magisk `service.d` 守护（等 `boot_completed`、
+  幂等挂载 chroot 的 proc/sys/dev、3 次健康失败即重启）；cc9 用它在 chroot
+  Ubuntu（aarch64，自带 python3.12）里跑 Python agent，`deploy/README.md`
+  新增该路径说明。cc9 出口为 **IPv6-only**（联通 `2408:…::/64`），
+  `bind_source` 留空、靠 asyncio 地址回落，网关侧前缀校验用 IPv6 `/64`。
 
 ### Added — egress-agent 数据面（0.7.0，P1）
 

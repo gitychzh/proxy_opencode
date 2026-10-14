@@ -79,7 +79,7 @@ agent 代理 basic auth 双保险）。
 |---|---|---|---|
 | P0 | 0.7.0a1 | 冻结方案、repo 骨架、CI 双端门禁、端口注册表、caddy 片段 | **已完成**（7474c22，含既有 CI 失败修复） |
 | P1 | 0.7.0 | egress-agent 数据面（CONNECT/healthz/rotate）+ 设备实测 | **已完成**（双桶出口/换 IP 真机验证通过） |
-| P2 | 0.7.0 | 网关 egress pool + Docker/compose，ECS:10002 起容器；四桶出口逐一实测复核 | 进行中（pool/容器/门禁绿，待 ECS 部署与四桶实测） |
+| P2 | 0.7.0 | 网关 egress pool + Docker/compose，ECS:10002 起容器；各桶出口逐一实测复核 | **已完成**（opc2-wifi / opc2-eth / cc9 三桶真机跑通；pad 待凭据延后，见下） |
 | P3 | 0.7.0 | catalog 全免费模型；hermes 加新 alias（旧 alias 保留） | 未开始 |
 | P4 | 0.7.1 | updater：每日 02:00 查 GitHub release（含 prerelease），分级采用 | 未开始 |
 | P5 | 0.7.2 | 换 IP：计数器窗口 + 500 触发 + ONT 重启 + IP 变更验证 + 429 兜底 | 未开始 |
@@ -93,6 +93,32 @@ agent 代理 basic auth 双保险）。
 - ONT 重启换 IP 全链通过（36.149.54.158 → .30），但 eth 腿恢复需要
   DHCP 续租 + 策略表默认路由补回；恢复期间 uid 进程会回落 wifi 出口
   （危险：静默消耗别的桶额度）→ P5 的池必须带 `expect_prefix` 桶身份校验。
+
+### P2 实测结论（2026-10-14，ECS 容器 + 三桶真机）
+
+- **部署形态**：镜像 `zen-gw:0.7`（python:3.12-slim）在 ECS 以 `docker run`
+  运行（`compose.yml` 为等价交付物；ECS 上 docker compose 插件未装，暂用
+  `docker run`，参数与 compose 一致），发布到 `127.0.0.1:10002`，只读根 +
+  `/data` 卷，`healthy`。对外 caddy `:10002` + 安全组留待需要时启用。
+- **三桶出口逐一实测**：`/admin/egresses` 三桶 `healthy=true`、出口 IP 落在
+  各自 `expect_prefix` 内；6 并发请求 2/2/2 均匀落到三桶、全 `200`、零失败；
+  串行与非流式走 `_aggregate_sse` 聚合正常，流式 SSE 透传正常。
+  - opc2-wifi `117.95.231.70`（电信 IPv4，bind_source）、opc2-eth
+    `36.149.54.30`（移动 IPv4，uid 策略路由）、cc9
+    `2408:823c:be11:313d:…`（联通 IPv6）。
+- **cc9 用 Android chroot（Ubuntu 24.04 aarch64 + 自带 python3.12）跑 Python
+  agent**，非 Kotlin：设备端 `/opt/egress-agent/venv` + Magisk `service.d`
+  watchdog（`egress-agent-watchdog.sh`，3 次健康失败即重启；真机杀死 agent
+  后 ~90s 自动恢复已验证）。**出口是 IPv6-only**：出站连接靠 asyncio 按
+  getaddrinfo 顺序 IPv4 快速失败→回落 IPv6，实测隧道正常；`expect_prefix`
+  用 IPv6 `/64`。
+- **部署期发现并修掉的集成缺陷**（都已进测试）：① 池 client 无 `base_url`
+  时 zen_direct 相对路径 → 每个池请求报 “missing http:// protocol”；② 池
+  没给 CONNECT 带认证 → agent 407（`httpx.Proxy` 注入 secret，不进快照）；
+  ③ 设备系统 Python <3.12 且 `$HOME` venv 被 `ProtectHome` 挡 → agent 装
+  `/opt/egress-agent/venv`；④ systemd 不允许对 ExecStart 命令做变量展开。
+- **pad 桶延后**：`xiaomi-pad-5u`（Linux，218.93.215.38）缺 SSH 凭据，所有者
+  指示先做 opc2×2 + cc9 三桶，pad 以后再说（链路已通，接桶=装一个代理软件）。
 
 ## 5. 关键决策记录（ADR 摘要）
 
