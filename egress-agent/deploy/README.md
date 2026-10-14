@@ -54,6 +54,25 @@ opc2 的两台光猫共占 192.168.1.1，出口靠系统策略路由区分（与
   `Group=opc2-bucket-b`（组不存在会启动失败）。`install.sh --user opc2-bucket-b`
   会把 `/etc/egress-agent` 的属主改为该用户。
 
+## Android + chroot（cc9：无 systemd，用 Magisk service.d）
+
+Android 设备没有 systemd，上面的 `install.sh` / `egress-agent@.service` 不适用。
+cc9 的做法：chroot Ubuntu（`/data/local/chroot/ubuntu`，aarch64，自带
+python3.12）里手装 `/opt/egress-agent/venv`，然后用
+`android-chroot-watchdog.sh`（Magisk `service.d`）守护进程。
+
+* 手装：`python3 -m venv /opt/egress-agent/venv && /opt/egress-agent/venv/bin/pip install <agent 源>`，
+  配置放 `/etc/egress-agent/<实例>.json`（600）。chroot 里 pypi 可直连
+  （cc9 走 IPv6）。
+* 守护：把 `android-chroot-watchdog.sh` 顶上读 `INSTANCE` / `PORT` / `CHROOT`
+  改成实际值，拷到 `/data/adb/service.d/egress-agent-watchdog.sh`（755）；
+  开机自动拉起，3 次健康失败即重启（真机杀死 agent 后 ~90s 自愈已验证）。
+  想立即起可 `setsid sh /data/adb/service.d/egress-agent-watchdog.sh </dev/null >/dev/null 2>&1 &`。
+* **IPv6-only 出口**（cc9 联通只有 IPv6）：`bind_source` 留空，出站靠
+  asyncio 按 getaddrinfo 顺序 IPv4 快速失败→回落 IPv6；网关侧
+  `expect_prefix` 用 IPv6 `/64`。
+* 凭据只进 chroot 内 `/etc/egress-agent/*.json`。
+
 ## ONT 轮换后的恢复（P5 前置，真机实测结论）
 
 ONT 重启会把 eth 腿的 DHCP 租约与 table 991/410 的默认路由一起打掉，
