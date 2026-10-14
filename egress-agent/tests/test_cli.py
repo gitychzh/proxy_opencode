@@ -81,6 +81,7 @@ def test_bad_config_exit_code(tmp_path, capsys) -> None:
 
 def test_missing_subcommand_is_usage_error() -> None:
     import pytest
+
     from egress_agent.cli import main
 
     with pytest.raises(SystemExit) as exc:

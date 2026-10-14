@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+
 from egress_agent.config import AgentConfig, ConfigError, OntConfig
 
 

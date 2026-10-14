@@ -27,6 +27,13 @@
   updater / rotate 五个模块的 P2-P5 契约文档（行为未实现）。
 - **CI**：新增 `egress-agent` job（pytest + ruff + mypy，与网关侧同等门禁
   效力）；AGENTS.md/ACCESS.md/OPERATIONS.md 同步端口注册表与新栈状态。
+- **修复既有 CI 失败（2026-10-10 起 `test` job 每次挂在收集阶段
+  `ModuleNotFoundError: tests`）**：`tests/` 缺 `__init__.py`，console-script
+  方式（CI 的 `pytest tests/`）不带 cwd 进 sys.path，跨测试文件
+  `from tests.test_x import ...` 无法解析（此前本地 `python -m pytest`
+  掩盖了该问题）。补齐包标记后 console 与 `-m` 两种调用均 138 绿。
+- egress-agent pyproject 显式 `known-first-party = ["egress_agent"]`：
+  ruff import 分组不再随调用目录漂移（CI 从 egress-agent/ 内运行）。
 - **文档纠错**：AGENTS.md 中 opencode 源码路径补全 `packages/` 前缀
   （`packages/schema/src/session-id.ts`、`packages/schema/src/identifier.ts`）；
   上游仓库确认为 `anomalyco/opencode`（213k stars，sst 组织已更名，原记载

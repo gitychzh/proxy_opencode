@@ -39,6 +39,12 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 
+# Pin egress_agent as first-party so the import-block grouping does not flip
+# with the working directory (CI runs ruff from inside egress-agent/; devs
+# may run it from the repo root with --config).
+[tool.ruff.lint.isort]
+known-first-party = ["egress_agent"]
+
 [tool.mypy]
 python_version = "3.12"
 warn_unused_ignores = true
