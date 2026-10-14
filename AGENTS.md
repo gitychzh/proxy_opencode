@@ -19,7 +19,7 @@
    - **session ID 必须 descending 编码（2026-10-13 实测，opencode 1.19.0）**：
      Zen 免费层（inference 服务切换后新增的 gate）校验 `x-opencode-session`
      是「真 opencode 客户端形状」的 ID：12 hex 时间部分须为
-     `~((ms<<12)+counter) & 0xFFFFFFFFFFFF`（`schema/src/session-id.ts` 的
+     `~((ms<<12)+counter) & 0xFFFFFFFFFFFF`（`packages/schema/src/session-id.ts` 的
      `descending()` 编码，1.19.0 起 session ID 改用 descending；1.18.32 及以前
      是 ascending），且同一毫秒内 counter 必须 < 64。 ascending 的 session ID
      （0.6.3 及之前网关的行为）恒定 403 `FreeTierError` "OpenCode's free tier
@@ -39,10 +39,13 @@
    已失效。协议细节与诊断流程见 `docs/OPERATIONS.md`。
 2. **回环限定**：`OPENCODE_SERVE_URL` 只允许 loopback（config.py 强制校验）；
    `OPENCODE_ZEN_BASE_URL` 只允许 opencode.ai / loopback（zen_direct 校验）。
-3. **工程化**：改代码必须同步改测试与文档；`pytest tests/` +
-   `pytest balancer/tests/` + `ruff check proxy_opencode tests balancer` +
-   `mypy proxy_opencode` 全绿才可提交（CI 无条件执行这四项，别再写
-   "未安装则跳过" 之类会让门禁静默失效的守卫）；语义化版本 + CHANGELOG；
+3. **工程化**：改代码必须同步改测试与文档。门禁（CI 无条件执行，全部绿才可提交，
+   两侧任一红都拦）：
+   `pytest tests/` + `pytest balancer/tests/` +
+   `ruff check proxy_opencode tests balancer` + `mypy proxy_opencode`；
+   0.7.x 起新增 egress-agent 侧：`cd egress-agent` →
+   `pytest tests/ -q` + `ruff check egress_agent tests` + `mypy egress_agent`。
+   别再写 "未安装则跳过" 之类让门禁静默失效的守卫）；语义化版本 + CHANGELOG；
    commit 信息用 conventional commits。
 4. **日志红线**：绝不记录消息内容、prompt 或任何 key。
 
@@ -81,6 +84,18 @@ SSE 透传，死桶自动跳过。配置模板见 `balancer/run.cmd.example`；�
 `build_adapter` 里注册一行。新增客户端协议 = 在 `formats/` 加一对
 请求/响应转换器 + `routes/` 加一个薄路由（参考 responses_api.py）。
 
+### 0.7.x 新栈（P0 起，进行中；权威文档 `docs/ARCHITECTURE.md`）
+
+网关整体搬进 ECS 的 Docker 容器（唯一部署点），每个配额桶设备只跑
+`egress-agent/`（Python 设备侧出口代理：HTTP CONNECT，出口=设备自己的
+公网 IP）。入口端口统一：**设备侧 agent=10001（opc2 第二上行=10002），
+ECS 对客户端=10002（caddy→容器），10003 预留**。旧栈（9443/zen-lb/设备
+完整网关）在所有者下令退役前原样保留，hermes 旧 alias 不动。0.7.x 新增
+能力：全免费模型目录（P3）、每日 02:00 opencode GitHub release 监听含
+beta 分级采用（P4）、每桶日窗 08:00 重置计数 ≥500 自动重启光猫换 IP
+（P5，只覆盖 opc2-wifi / opc2-eth / cc9 三桶）。各阶段状态见
+`docs/ARCHITECTURE.md` §4。
+
 ### 双桶相关的硬约束（2026-09-28 实测）
 
 1. **配额按出口 IP 计**：同一台机器上跑两个网关毫无意义——出口 IP 相同，
@@ -108,7 +123,7 @@ SSE 透传，死桶自动跳过。配置模板见 `balancer/run.cmd.example`；�
   `User-Agent: opencode/1.18.32 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14`、
   `x-opencode-client: cli`、`x-opencode-project: global`、
   `x-opencode-session: ses_<26>`、`x-opencode-request: msg_<26>`。
-- 标识符算法（`schema/src/identifier.ts`）：26 字符 = `(ms<<12)+counter`
+- 标识符算法（`packages/schema/src/identifier.ts`）：26 字符 = `(ms<<12)+counter`
   的低 48 位 hex（12 字符）+ 14 字符随机（byte%62 映射 [0-9A-Za-z]）；
   已用本机 opencode.db 真机「ID/时间戳」配对逐对验证。
 - 匿名免费层：无密钥时 models 目录中 cost>0 的模型不可用，免费模型
@@ -155,9 +170,17 @@ pytest tests/ -q
 pytest balancer/tests/ -q          # LB 单测（需 httpx/uvicorn/pytest-asyncio）
 ruff check proxy_opencode tests balancer
 mypy proxy_opencode
+
+# 0.7.x egress-agent 侧（新增，与上面四门禁同等效力）
+cd egress-agent
+pip install -e '.[test,dev]'
+pytest tests/ -q
+ruff check egress_agent tests
+mypy egress_agent
 ```
 
-提交前两条 pytest 都要绿，ruff 与 mypy 也要干净（CI 会跑同样的四条）。
+提交前两条 pytest 都要绿，ruff 与 mypy 也要干净（CI 会跑同样的门禁，
+job：test / balancer / egress-agent）。
 
 端到端（需要本机已装 hermes）：见 `scripts/e2e_hermes.md`。
 

@@ -1,0 +1,14 @@
+{
+  "listener": {
+    "host": "0.0.0.0",
+    "port": 10001,
+    "username": null,
+    "password": null
+  },
+  "egress": {
+    "name": "CHANGE_ME-device-uplink",
+    "bind_source": null
+  },
+  "echo_url": "https://myip.ipip.net",
+  "onts": []
+}

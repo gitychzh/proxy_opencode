@@ -1,0 +1,19 @@
+# 0.7.x 新栈入口（追加到 /etc/caddy/Caddyfile；P2 应用）
+# 旧栈 9443/zen.223722.xyz 两个 site 保持原样，不要改动。
+
+# --- 1. IP + 自签 CA（默认，hermes 用；证书与 9443 同一对） ---
+https://:10002 {
+	tls /etc/caddy/certs/gw.crt /etc/caddy/certs/gw.key
+	reverse_proxy 127.0.0.1:10002
+	encode gzip
+}
+
+# --- 2. 域名 + LE 真证书（客户零安装；P2 验证 DNS-01 稳定性后启用） ---
+# 前置：llm.223722.xyz A 记录灰云直指 ECS IP；CF_API_TOKEN 已进 caddy 环境。
+# llm.223722.xyz:10002 {
+# 	tls {
+# 		dns cloudflare {env.CF_API_TOKEN}
+# 	}
+# 	reverse_proxy 127.0.0.1:10002
+# 	encode gzip
+# }

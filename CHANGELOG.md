@@ -9,6 +9,29 @@
 
 ## [Unreleased]
 
+### Added — 0.7.x 新架构骨架（0.7.0a1）
+
+- **架构决策**：网关整体迁入 ECS Docker 容器（唯一部署点），配额桶设备只跑
+  新增的 `egress-agent/`（Python 设备侧出口代理，HTTP CONNECT，出口=设备
+  自己的公网 IP，Zen 额度按出口 IP 隔离的原语义不变）。旧栈（9443/zen-lb/
+  设备完整网关）在所有者下令退役前原样保留，hermes 旧 alias 不动。
+  权威文档：`docs/ARCHITECTURE.md`（端口注册表 / 分期 / ADR / ONT 拓扑）。
+- **端口统一**：设备侧 agent `10001`（opc2 第二上行 `10002`），ECS 客户端
+  入口 `10002`（caddy→容器），`10003` 预留。
+- **`egress-agent`（P0 部分）**：JSON 配置（含 ONT 清单与凭据脱敏）、
+  `run/status` CLI、结构化 JSON 日志（绝不记录隧道目标与内容）；
+  `deploy/` 提供 systemd 模板单元（`egress-agent@<实例>`）、幂等安装脚本、
+  opc2 双上行 uid 策略路由说明；Windows（`deploy/windows/`）与 Android
+  Kotlin（`egress-agent-android/`，wire 契约已冻结）为占位。
+- **网关侧 `proxy_opencode/egress/` 契约桩**：pool / counters / catalog /
+  updater / rotate 五个模块的 P2-P5 契约文档（行为未实现）。
+- **CI**：新增 `egress-agent` job（pytest + ruff + mypy，与网关侧同等门禁
+  效力）；AGENTS.md/ACCESS.md/OPERATIONS.md 同步端口注册表与新栈状态。
+- **文档纠错**：AGENTS.md 中 opencode 源码路径补全 `packages/` 前缀
+  （`packages/schema/src/session-id.ts`、`packages/schema/src/identifier.ts`）；
+  上游仓库确认为 `anomalyco/opencode`（213k stars，sst 组织已更名，原记载
+  无误）。
+
 ### Fixed — 上游流静默切断（0.6.5）
 
 - **`StreamRelay` 合成终止 chunk**：2026-10-13 实测，Zen 上游 provider 会以

@@ -1,0 +1,122 @@
+# 架构总册（ARCHITECTURE）
+
+> 本文件是 **0.7.x 新栈**的唯一权威描述：网关整体搬进 ECS 的一个 Docker
+> 容器，四/五个配额桶设备只跑 `egress-agent`（设备侧出口代理）。
+>
+> **双轨并存（硬性）**：旧栈（ECS `zen-lb` + 各设备完整网关部署，入口
+> `9443`）在新栈稳定运行前**原样保留、不做任何改动**；只有项目所有者下
+> 命令后才进入退役流程（见 §7）。hermes 的旧 alias（`cusoc` → `9443`）
+> 在退役前保持不动。
+
+---
+
+## 1. 目标形态
+
+```
+hermes / codex / 客户（OpenAI 兼容客户端）
+   │ 新入口:  https://115.29.231.25:10002/v1   (IP + 自签CA, hermes 用)
+   │          https://llm.223722.xyz:10002/v1  (域名 + LE真证书, 客户零安装)
+   ▼
+ECS ┌──────────────────────────────────────────────────────────────┐
+     │ caddy :10002 (TLS) ──▶ 127.0.0.1:10002                       │
+     │ docker: zen-gw（proxy_opencode 0.7.x，本 repo 唯一部署点）    │
+     │  ├─ routes/（chat/models/responses/anthropic/admin）          │
+     │  ├─ upstreams/zen_direct.py（协议/标记/头部/聚合, 0.6.5 行为） │
+     │  ├─ sse_mask.py（流式切断合成 finish=length, 0.6.5）          │
+     │  └─ egress/                                                   │
+     │     ├─ pool.py     每出口一个 httpx client(proxy=agent)       │
+     │     │              least-inflight + cordon + /healthz 探测    │
+     │     ├─ counters.py 日窗计数(08:00 CST 重置) ≥500 → 换 IP       │
+     │     ├─ rotate.py   换 IP 编排（调 agent /rotate, 验 IP 变更） │
+     │     ├─ catalog.py  全部免费模型 + cusoc/ds41f_cus 别名        │
+     │     └─ updater.py  每日 02:00 看 opencode GitHub release      │
+     └───────┬───────────┬───────────┬───────────┬──────────────────┘
+        tailscale 100.x │           │           │
+        ┌──────────────┴┐  ┌────────┴─┐  ┌──────┴─────┐
+        ▼               ▼  ▼          ▼  ▼            ▼
+   opc2:10001(wifi)  opc2:10002(eth) pad:10001  cc9:10001
+   egress-agent      egress-agent     egress-agent egress-agent
+   （Python, 每台上行仅一个代理进程; connECT 出去=本设备公网IP）
+        │               │              │            │
+        └───────────────┴──────────────┴────────────┴──▶ opencode.ai/zen/v1
+```
+
+**为什么成立**：Zen 免费层门槛是 wire 层的（descending session ID、
+≥2 内置工具名、`stream:true`），全部由 ECS 网关铸造，与出口无关；额度
+按出口 IP 计量，agent 的 CONNECT 出口就是各设备公网 IP，四/五桶隔离原样
+保留；字节量与今天逐跳一致（ECS↔设备那段从"LB→网关 HTTP"变为"网关→
+代理 CONNECT"），带宽与移动流量零新增。
+
+## 2. 端口注册表（统一口径）
+
+| 端口 | 归属 | 说明 |
+|---|---|---|
+| **10001** | 设备侧 egress-agent | 代理端口（CONNECT + /healthz + /rotate 同端口）。opc2-wifi / pad / cc9 各一个实例 |
+| **10002** | 设备侧 egress-agent（opc2-eth） | 同一台设备第二上行专用；**同时是 ECS 对客户端入口**（caddy:10002 → 容器 127.0.0.1:10002） |
+| **10003** | 预留 | 未来第 5/6 出口或第二服务 |
+| 9443 | 旧栈入口（caddy → zen-lb:7892） | 退役前不动；hermes 旧 alias 仍在用 |
+| 7892 / 8791 / 8793 / 46667 等 | 旧栈内部端口 | 退役前不动 |
+| 40016 / 40066 | GLM-5.3 / GLM-5.3F 网关（ECS 现有服务） | 与新栈无关，不动 |
+| 8791（本机 win10） | 旧本机网关（开发/调试） | 退役前不动 |
+
+安全组：ECS 入站新增 10002（与 9443 同法）；设备侧 10001/10002 只听
+Tailscale 100.x（systemd 绑定 0.0.0.0 但靠 tailscale 网络隔离，另加
+agent 代理 basic auth 双保险）。
+
+## 3. 组件地图（repo 布局）
+
+| 路径 | 内容 | 阶段 |
+|---|---|---|
+| `proxy_opencode/egress/` | pool / counters / catalog / updater / rotate | P2-P5 逐个落地，P0 为契约桩 |
+| `egress-agent/` | Python 包：config / cli / logging（P0 真实）+ proxy / egress / health / rotate（P1） | P1 |
+| `egress-agent/deploy/` | systemd 模板单元、安装脚本、配置模板、opc2 双上行 uid 路由说明 | P0 |
+| `egress-agent-android/` | Kotlin 原生版占位（wire 契约已冻结） | P6 |
+| `deploy/ecs/` | Dockerfile/compose（P2）、caddy 10002 片段（含 LE DNS-01 说明） | P0/P2 |
+
+## 4. 分期与状态
+
+| 阶段 | 版本 | 内容 | 状态 |
+|---|---|---|---|
+| P0 | 0.7.0a1 | 冻结方案、repo 骨架、CI 双端门禁、端口注册表、caddy 片段 | **进行中** |
+| P1 | 0.7.0 | egress-agent 数据面（CONNECT/healthz/rotate）+ 设备实测 | 未开始 |
+| P2 | 0.7.0 | 网关 egress pool + Docker/compose，ECS:10002 起容器；四桶出口逐一实测复核 | 未开始 |
+| P3 | 0.7.0 | catalog 全免费模型；hermes 加新 alias（旧 alias 保留） | 未开始 |
+| P4 | 0.7.1 | updater：每日 02:00 查 GitHub release（含 prerelease），分级采用 | 未开始 |
+| P5 | 0.7.2 | 换 IP：计数器窗口 + 500 触发 + ONT 重启 + IP 变更验证 + 429 兜底 | 未开始 |
+| P6 | 0.8.0 | Windows agent 转正、Android Kotlin 版、文档浓缩定稿、旧栈退役（等命令） | 未开始 |
+
+## 5. 关键决策记录（ADR 摘要）
+
+| 决策 | 结论 | 理由 |
+|---|---|---|
+| agent 语言 | ubuntu/windows=**Python**；android=**Kotlin**（占位） | 稳定优先、成熟优先；现有设备全部可跑 Python（含 Android chroot） |
+| 第三方依赖 | 用成熟库不自造轮子：HTTP 解析=aiohttp，ONT 重启=requests；唯独 CONNECT 双工管道自写 ~100 行 | proxy.py 评估后弃用：过重且源地址绑定能力不明确；依赖全部 pip 装本机，运行期零云端调用 |
+| TLS/证书 | IP 入口沿用自签 CA（hermes 已 pin，零成本）；客户入口=域名 + LE 真证书（DNS-01，A 记录灰云直指 ECS） | 公共 CA 不签裸 IP；域名走 CF 隧道会绕海外（实测慢 10 倍），灰云直连 ECS 后是国内直连 |
+| 计数器语义 | 每出口、日窗 [08:00, 08:00+1d) Asia/Shanghai（=UTC0 重置）；窗内 ≥500 触发换 IP；换完计数清零（新 IP=新额度桶） | 上游 per-IP 日配额 UTC0 重置；用户确认的语义 |
+| 429 兜底 | `FreeUsageLimitError` 且 `Retry-After > 3600s` = per-IP 日耗尽 → 立即换 IP（绕过 500 阈值） | 实测两层分类：短窗软限流（等/小值）vs 日耗尽（>3600s，换 IP 立即恢复） |
+| updater 分级 | T1 自动（prompt 资产/UA 版本）；T2 冒烟后自动（算法常量，含全测试+真实请求）；T3 只报告 | 0.6.4 事故的教训：协议常量变化必须冒烟闸门 |
+| 出口绑定 | Linux `socket.bind((source,0))`；opc2 eth 实例复用现有 uid 策略路由（`User=opc2-bucket-b`） | 与旧 opc2-eth 网关同一机制，生产已验证 |
+
+## 6. 可换 IP 的三个桶（ONT）— 拓扑与凭据去向
+
+| 桶 | 出口 | ONT | 型号 | 控制方式 | 重启验证 |
+|---|---|---|---|---|---|
+| opc2-eth | 36.149.54.x 移动 | 192.168.1.1（enp12s0 进） | 华为 V173-50 | 纯 HTTP 四步（agent `rotate` P1 实现） | 生产已验证 36.149.54.237→.180；恢复 ~80s + PPPoE ~40s |
+| opc2-wifi | 117.95.231.70 电信 | 192.168.1.1（wlx 经中兴路由 192.168.2.1 进） | 华为 HG8020C | 同框架登录可行；重启 API 需现场复刻页面 JS 提交（P5 验证） | 待 P5 验证 |
+| cc9 | 2408: 联通 IPv6 | 192.168.3.1（型号/凭据待勘查） | 待定 | 大概率同华为 API（P5 勘查） | 待 P5 验证 |
+| pad / win10 | 218.93.215.38 / 111.55.73.65 | — | — | 本期不做换 IP | — |
+
+**凭据铁律**：ONT 账号口令只写设备上的 `/etc/egress-agent/<实例>.json`
+（600），**不进 repo**；`egress-agent status` 输出按构造脱敏。型号/拓扑
+（非密）记录在本表。
+
+**迁移项**：opc2 现有"ONT 每日 7 次定时重启"cron 在新换 IP 逻辑上线
+时停掉（P5），否则双重换 IP。
+
+## 7. 验收与退役判据
+
+* 每阶段：pytest（两侧）+ ruff + mypy 全绿才推进；P1/P2/P5 有设备真机
+  验证项，P3 结尾必须**本机 hermes 走 10002 全模型链路 e2e**。
+* 退役（等所有者命令）：新栈连续稳定运行约定天数 → 逐项执行退役清单
+  （停 zen-lb、停设备旧网关 venv、停 opc2 ONT cron、摘 9443 hermes
+  alias、清残留备份），每项可单独回滚。

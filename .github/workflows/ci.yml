@@ -46,3 +46,32 @@ jobs:
 
       - name: Run balancer tests
         run: pytest balancer/tests/ -q
+
+  # The 0.7.x stack splits the gateway (this repo, containerised on the ECS)
+  # from the device-side egress-agent (egress-agent/, Python). Both sides
+  # carry the same "all gates green or no commit" rule, so the agent gets
+  # its own job instead of piggybacking on the gateway's dependencies.
+  egress-agent:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: egress-agent
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.13"
+          cache: pip
+
+      - name: Install agent with test + dev deps
+        run: pip install -e '.[test,dev]'
+
+      - name: Ruff
+        run: ruff check egress_agent tests
+
+      - name: Mypy
+        run: mypy egress_agent
+
+      - name: Run agent tests
+        run: pytest tests/ -q

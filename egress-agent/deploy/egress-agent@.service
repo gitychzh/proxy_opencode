@@ -1,0 +1,23 @@
+[Unit]
+Description=egress-agent (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=EGRESS_AGENT_CONFIG=/etc/egress-agent/%i.json
+ExecStart=/usr/bin/python3 -m egress_agent run --config ${EGRESS_AGENT_CONFIG}
+Restart=on-failure
+RestartSec=5
+
+# Hardening: the agent needs no capabilities, no home, no /tmp.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/egress-agent
+StateDirectory=egress-agent
+LogsDirectory=egress-agent
+
+[Install]
+WantedBy=multi-user.target
