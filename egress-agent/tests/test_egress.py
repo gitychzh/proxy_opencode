@@ -37,7 +37,9 @@ def test_interface_address_loopback_linux() -> None:
 def test_interface_address_ioctl_failure_returns_none() -> None:
     if sys.platform != "linux":
         pytest.skip("ioctl path is Linux-only")
-    with mock.patch("egress_agent.egress.fcntl.ioctl", side_effect=OSError):
+    import fcntl  # the module is imported lazily inside interface_address
+
+    with mock.patch.object(fcntl, "ioctl", side_effect=OSError):
         assert interface_address("nope0") is None
 
 
