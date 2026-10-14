@@ -231,6 +231,11 @@ class ZenDirectAdapter:
                 f"(got {base!r}; use UPSTREAM_MODE=openai for arbitrary hosts)"
             )
         proxy = settings.zen_proxy or None
+        # Absolute upstream base, used to build request URLs. The pool's
+        # per-egress clients carry no base_url (they exist only to route through
+        # a device proxy), so upstream paths must be absolute or httpx raises
+        # "Request URL is missing an 'http://' or 'https://' protocol".
+        self._base = base.rstrip("/")
         self.client = httpx.AsyncClient(
             base_url=base,
             timeout=httpx.Timeout(float(settings.zen_timeout_s), connect=15.0),
@@ -332,7 +337,7 @@ class ZenDirectAdapter:
         count against the bucket. Mirrors the balancer's release semantics.
         """
         req = client.build_request(
-            "POST", "/chat/completions", json=body, headers=headers
+            "POST", f"{self._base}/chat/completions", json=body, headers=headers
         )
         try:
             resp = await client.send(req, stream=True)

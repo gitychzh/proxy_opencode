@@ -636,7 +636,10 @@ class _StubPool:
 
 
 def _leased_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(base_url="https://opencode.ai/zen/v1")
+    # The real pool builds per-egress clients WITHOUT a base_url (they exist
+    # only to route through a device proxy), so upstream paths must be
+    # absolute. Keep this client base_url-less to guard that invariant.
+    return httpx.AsyncClient()
 
 
 @respx.mock
