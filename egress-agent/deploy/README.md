@@ -48,11 +48,11 @@ opc2 的两台光猫共占 192.168.1.1，出口靠系统策略路由区分（与
   sudo systemctl edit egress-agent@eth     # 加入：
   # [Service]
   # User=opc2-bucket-b
-  # Group=opc2-bucket-b
   ```
 
-  同时 `/etc/egress-agent` 与日志目录需要对该用户可读/可写
-  （`install.sh --user opc2-bucket-b` 会处理好属主）。
+  `opc2-bucket-b` 无同名组（gid=1000），systemd 会用其主组；**不要**写
+  `Group=opc2-bucket-b`（组不存在会启动失败）。`install.sh --user opc2-bucket-b`
+  会把 `/etc/egress-agent` 的属主改为该用户。
 
 ## ONT 轮换后的恢复（P5 前置，真机实测结论）
 
