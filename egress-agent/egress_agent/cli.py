@@ -7,13 +7,19 @@ P0 status: config loading + ``status`` + logging wiring are real and tested;
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import logging
+import signal
 import sys
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .config import AgentConfig, ConfigError
 from .logging_setup import setup_logging
+
+log = logging.getLogger("egress_agent.cli")
 
 EXIT_OK = 0
 EXIT_CONFIG_ERROR = 2
@@ -104,21 +110,76 @@ def main(argv: list[str] | None = None) -> int:
         if args.check:
             print(json.dumps({"ok": True, "config": config.summary()}, ensure_ascii=False))
             return EXIT_OK
-        print(
-            "egress-agent: the data plane (proxy/health/rotate) lands in P1",
-            file=sys.stderr,
-        )
-        return EXIT_NOT_IMPLEMENTED
+        return asyncio.run(_serve(config))
 
     if args.command == "rotate":
-        print(
-            "egress-agent: rotate lands in P5 (ONT driver exists from P1)",
-            file=sys.stderr,
-        )
-        return EXIT_NOT_IMPLEMENTED
+        try:
+            config = _load(args)
+        except ConfigError as exc:
+            print(f"egress-agent: config error: {exc}", file=sys.stderr)
+            return EXIT_CONFIG_ERROR
+        return asyncio.run(_rotate(config, ont=args.ont, wait=args.wait))
 
     parser.error(f"unknown command {args.command!r}")
     return EXIT_CONFIG_ERROR  # pragma: no cover - argparse exits
+
+
+async def build_agent(config: AgentConfig) -> tuple[Any, Any, "asyncio.Task[None]"]:
+    """Build the running agent pieces (server + state + probe loop)."""
+
+    from .health import HealthState, egress_probe_loop
+    from .proxy import ProxyServer
+
+    state = HealthState(
+        egress_name=config.egress.name,
+        bind_source=config.egress.bind_source,
+        echo_url=config.echo_url,
+    )
+    server = ProxyServer(config, state)
+    await server.start()
+    probe_task = asyncio.create_task(egress_probe_loop(state))
+    return server, state, probe_task
+
+
+async def _serve(config: AgentConfig) -> int:
+    """Run the proxy + health + control plane until SIGTERM/SIGINT."""
+
+    server, state, probe_task = await build_agent(config)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except (NotImplementedError, ValueError):  # not all platforms
+            pass
+    try:
+        await stop.wait()
+    finally:
+        probe_task.cancel()
+        await server.close()
+        log.info("agent stopped", extra={"egress": state.egress_name})
+    return EXIT_OK
+
+
+async def _rotate(config: AgentConfig, ont: str | None, wait: bool) -> int:
+    from .rotate import restart_ont
+
+    onts = list(config.onts)
+    if ont:
+        onts = [o for o in onts if o.name == ont]
+        if not onts:
+            print(json.dumps({"ok": False, "detail": f"unknown ont {ont!r}"}))
+            return EXIT_CONFIG_ERROR
+    if not onts:
+        print(json.dumps({"ok": False, "detail": "no onts configured"}))
+        return EXIT_CONFIG_ERROR
+    results = []
+    for item in onts:
+        result = await restart_ont(item, wait=wait)
+        results.append(result.as_dict())
+    ok = all(r["ok"] for r in results)
+    print(json.dumps({"ok": ok, "results": results}, ensure_ascii=False))
+    return EXIT_OK if ok else EXIT_CONFIG_ERROR
 
 
 if __name__ == "__main__":  # pragma: no cover

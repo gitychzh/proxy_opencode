@@ -54,7 +54,9 @@ class ListenerConfig:
     password: str | None = None
 
     def __post_init__(self) -> None:
-        if not 1 <= self.port <= 65535:
+        # port 0 = ephemeral (OS assigns); systemd units always pin a real
+        # port, tests use 0 to stay collision-free.
+        if not 0 <= self.port <= 65535:
             raise ConfigError(f"listener.port out of range: {self.port}")
         if (self.username is None) != (self.password is None):
             raise ConfigError("listener.username/password must be set together")

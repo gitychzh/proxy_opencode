@@ -77,13 +77,22 @@ agent 代理 basic auth 双保险）。
 
 | 阶段 | 版本 | 内容 | 状态 |
 |---|---|---|---|
-| P0 | 0.7.0a1 | 冻结方案、repo 骨架、CI 双端门禁、端口注册表、caddy 片段 | **进行中** |
-| P1 | 0.7.0 | egress-agent 数据面（CONNECT/healthz/rotate）+ 设备实测 | 未开始 |
+| P0 | 0.7.0a1 | 冻结方案、repo 骨架、CI 双端门禁、端口注册表、caddy 片段 | **已完成**（7474c22，含既有 CI 失败修复） |
+| P1 | 0.7.0 | egress-agent 数据面（CONNECT/healthz/rotate）+ 设备实测 | **已完成**（双桶出口/换 IP 真机验证通过） |
 | P2 | 0.7.0 | 网关 egress pool + Docker/compose，ECS:10002 起容器；四桶出口逐一实测复核 | 未开始 |
 | P3 | 0.7.0 | catalog 全免费模型；hermes 加新 alias（旧 alias 保留） | 未开始 |
 | P4 | 0.7.1 | updater：每日 02:00 查 GitHub release（含 prerelease），分级采用 | 未开始 |
 | P5 | 0.7.2 | 换 IP：计数器窗口 + 500 触发 + ONT 重启 + IP 变更验证 + 429 兜底 | 未开始 |
 | P6 | 0.8.0 | Windows agent 转正、Android Kotlin 版、文档浓缩定稿、旧栈退役（等命令） | 未开始 |
+
+### P1 实测结论（2026-10-14，opc2 真机）
+
+- agent 出口绑定：wifi 用 `bind_source`（源 IP）可行；**eth 必须用 uid 996
+  策略路由**（与旧网关同机制，systemd `User=opc2-bucket-b`），bind_source
+  会让连接直接失败。
+- ONT 重启换 IP 全链通过（36.149.54.158 → .30），但 eth 腿恢复需要
+  DHCP 续租 + 策略表默认路由补回；恢复期间 uid 进程会回落 wifi 出口
+  （危险：静默消耗别的桶额度）→ P5 的池必须带 `expect_prefix` 桶身份校验。
 
 ## 5. 关键决策记录（ADR 摘要）
 
@@ -96,6 +105,8 @@ agent 代理 basic auth 双保险）。
 | 429 兜底 | `FreeUsageLimitError` 且 `Retry-After > 3600s` = per-IP 日耗尽 → 立即换 IP（绕过 500 阈值） | 实测两层分类：短窗软限流（等/小值）vs 日耗尽（>3600s，换 IP 立即恢复） |
 | updater 分级 | T1 自动（prompt 资产/UA 版本）；T2 冒烟后自动（算法常量，含全测试+真实请求）；T3 只报告 | 0.6.4 事故的教训：协议常量变化必须冒烟闸门 |
 | 出口绑定 | Linux `socket.bind((source,0))`；opc2 eth 实例复用现有 uid 策略路由（`User=opc2-bucket-b`） | 与旧 opc2-eth 网关同一机制，生产已验证 |
+| ONT 轮换后恢复 | ONT 重启会打掉 eth 的 DHCP 租约与策略表默认路由；恢复 = dhclient 续租 + 补默认路由 + 删 dhclient 多装的抢占路由（幂等脚本，P5 落 `post_rotate_cmd`） | 2026-10-14 真机实测踩通 |
+| 桶身份校验 | 池按 `expect_prefix` 校验 agent 上报的出口 IP；不符（如 eth 掉线回落 wifi 出口）立即 cordon | 防“静默偷别的桶额度”，真机实测该回落真实存在 |
 
 ## 6. 可换 IP 的三个桶（ONT）— 拓扑与凭据去向
 

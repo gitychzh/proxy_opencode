@@ -63,6 +63,11 @@ def test_port_out_of_range() -> None:
         AgentConfig.from_mapping({"listener": {"port": 70000}})
 
 
+def test_port_zero_means_ephemeral() -> None:
+    cfg = AgentConfig.from_mapping({"listener": {"port": 0}})
+    assert cfg.listener.port == 0
+
+
 def test_auth_must_be_paired() -> None:
     with pytest.raises(ConfigError, match="must be set together"):
         AgentConfig.from_mapping({"listener": {"username": "u"}})

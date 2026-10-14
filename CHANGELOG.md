@@ -9,6 +9,35 @@
 
 ## [Unreleased]
 
+### Added — egress-agent 数据面（0.7.0，P1）
+
+- **数据面落地**：`egress-agent` 的 `run` 真正起服务——单端口（10001/10002）
+  同时提供 ① HTTP CONNECT 隧道（asyncio 双工泵、源地址绑定、计数器）；
+  ② `GET /healthz`（出口 IP 实测自报，网关池的健康与 IP 核验依据）；
+  ③ `POST /rotate`（Basic 认证，接受 `Proxy-Authorization` 或
+  `Authorization`——网关按普通 REST 调它，curl `-u` 曾因只发 Authorization
+  被 407 空响应骗过，现两种头都认）。
+- **ONT 重启驱动**（华为四步纯 HTTP：GetRandCount→login.cgi→cmccdevicereset.asp
+  取 onttoken→set.cgi ResetBoard），含 BOM 剥离、`Waiting` 登录判据、
+  畸形 `CookieHttp=sid:...:Language:chinese:id=1` 的**显式 Cookie 转发**
+  （strict cookie jar 会丢它——curl 生产脚本能用的真正原因，mock 测试已
+  固化该行为：不带正确 Cookie 拿不到 onttoken）。
+- **工程硬化**：预绑定 socket（绕开 loop 的 getaddrinfo 执行器）；
+  **有界关闭**（关机 grace 3s + abort + 1s，永远不被卡死的 handler 拖住
+  systemd 重启）；测试全面改用临时端口（port 0）+ 内存级 pump 测试
+  （`test_pump.py`，零套接字，确定性覆盖中继/EOF/异常拆除语义）。
+- **真机验证（opc2）**：wifi 实例出口 117.95.231.70（电信）、eth 实例出口
+  36.149.54.158（移动，靠既有 uid 996 策略路由，**不靠源地址绑定**——
+  bind_source 在默认路由走 wifi 的机器上反而发不出包，部署文档已改正）；
+  经代理的真实 Zen 请求双桶均 200；**真光猫重启换 IP 成功**
+  （36.149.54.158 → 36.149.54.30，移动线路动态 IP）。
+- **换 IP 的三个实测坑（已纳入 P5 设计）**：① ONT 重启后 eth 网卡丢 DHCP
+  租约，dhclient 续租又会装一条抢占性默认路由、且策略表默认路由会被清
+  —— 恢复动作必须幂等且 checklist 化；② 网卡掉线期间 uid 进程会**回落
+  到 wifi 出口**（偷另一个桶的额度！）→ 池必须按 `expect_prefix` 校验桶
+  身份，不符即 cordon；③ 旋转 wait 必须包含“网卡恢复+IP 就位”，不只是
+  ONT web 恢复。`post_rotate_cmd` 配置项随之加入设计。
+
 ### Added — 0.7.x 新架构骨架（0.7.0a1）
 
 - **架构决策**：网关整体迁入 ECS Docker 容器（唯一部署点），配额桶设备只跑

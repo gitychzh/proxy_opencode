@@ -39,6 +39,23 @@ egress-agent status --config /etc/egress-agent/agent.json        # secret-free
 egress-agent run --check --config /etc/egress-agent/agent.json   # validate only
 ```
 
+## Runtime (one port, three duties)
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `CONNECT host:port` | Proxy-Authorization (if configured) | The gateway's egress tunnels |
+| `GET /healthz` | none (no secrets in payload) | egress name + observed egress IP + counters |
+| `POST /rotate` | Authorization **or** Proxy-Authorization | reboot the configured ONT |
+
+```bash
+# gateway-facing smoke test (Authorization, like the pool calls it)
+curl -sS -X POST -u user:pass -H 'Content-Type: application/json' \
+  -d '{"ont":"v173-50","wait":false}' http://<device>:10001/rotate
+```
+
+Device install notes (PyPI slow on CN networks → prefer a local mirror;
+the opc2 dual-uplink uid-routing gotchas): [`deploy/README.md`](deploy/README.md).
+
 ## Local development
 
 ```bash
