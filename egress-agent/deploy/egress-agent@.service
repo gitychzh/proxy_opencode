@@ -6,11 +6,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 # The unit runs a dedicated venv under /opt so it works with ProtectHome=true
-# (a venv in a user's $HOME would be hidden from the service). Override
-# EGRESS_AGENT_VENV with a drop-in if a host installs elsewhere.
+# (a venv in a user's $HOME would be hidden from the service). A host that
+# installs elsewhere overrides ExecStart with a systemd drop-in.
 Environment=EGRESS_AGENT_CONFIG=/etc/egress-agent/%i.json
-Environment=EGRESS_AGENT_VENV=/opt/egress-agent/venv
-ExecStart=${EGRESS_AGENT_VENV}/bin/python -m egress_agent run --config ${EGRESS_AGENT_CONFIG}
+ExecStart=/opt/egress-agent/venv/bin/python -m egress_agent run --config ${EGRESS_AGENT_CONFIG}
 Restart=on-failure
 RestartSec=5
 
