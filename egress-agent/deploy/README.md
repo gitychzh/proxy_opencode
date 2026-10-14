@@ -14,9 +14,24 @@
 | `egress-agent@pad`  | `/etc/egress-agent/pad.json`  | 10001 | pad 上行 |
 | `egress-agent@cc9`  | `/etc/egress-agent/cc9.json`  | 10001 | cc9 上行 |
 
+> 安装：`sudo ./install.sh <instance> [--user <u>] [--python <3.12 解释器>] [--pip-index <url>]`。
+> 它把 agent 装进 `/opt/egress-agent/venv`（不依赖系统 python 版本，也不受
+> `ProtectHome=true` 影响），安装模板单元，并建好 `/etc/egress-agent` 与
+> `/var/log/egress-agent`。装完手动放真实配置再 `enable --now`。
+
 ```bash
+sudo ./install.sh wifi --python /opt/python3.12/bin/python3.12
+sudo ./install.sh eth  --user opc2-bucket-b --python /opt/python3.12/bin/python3.12
+sudo systemctl enable --now egress-agent@wifi
+sudo cp config.example.json /etc/egress-agent/wifi.json   # 填真实值
+sudo systemctl enable --now egress-agent@eth
+sudo cp config.example.json /etc/egress-agent/eth.json     # 填真实值
 sudo systemctl enable --now egress-agent@wifi egress-agent@eth
 ```
+
+真实配置在 `/etc/egress-agent/<实例>.json`（权限 600，含 ONT 口令与 CONNECT
+认证）；`listener.username/password` 与网关的 `ZEN_EGRESS_SECRET` 保持一致
+（网关用该 secret 作 CONNECT 的 Basic 凭据）。
 
 ## opc2 双上行（uid 策略路由）
 
