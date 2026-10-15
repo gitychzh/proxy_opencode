@@ -98,16 +98,36 @@ def test_empty_pool_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_acquire_picks_least_inflight_and_ties_by_name() -> None:
+async def test_acquire_picks_least_inflight_with_round_robin_ties() -> None:
     pool = make_pool("a", "b")
     mark_healthy(pool)
     l1 = await pool.acquire()
-    assert l1.name == "a"  # tie -> deterministic by name
+    assert l1.name == "a"  # all idle -> rotation starts at the first bucket
     l2 = await pool.acquire()
     assert l2.name == "b"  # a now has one in flight
     await pool.release(l1, ok=True)
     l3 = await pool.acquire()
     assert l3.name == "a"
+
+
+@pytest.mark.asyncio
+async def test_acquire_round_robins_idle_buckets() -> None:
+    """Sequential traffic must spread across buckets, not pin to one.
+
+    Least-in-flight alone ties when every bucket is idle; the old
+    name-based tie-break always returned the alphabetically-first bucket
+    and drained its per-IP daily quota first (found in the 2026-10-15 ECS
+    e2e, where 40 sequential requests all hit ``cc9``).
+    """
+
+    pool = make_pool("a", "b", "c")
+    mark_healthy(pool)
+    seen: list[str] = []
+    for _ in range(6):
+        lease = await pool.acquire()
+        seen.append(lease.name)
+        await pool.release(lease, ok=True)  # idle again -> pure rotation
+    assert seen == ["a", "b", "c", "a", "b", "c"]
 
 
 @pytest.mark.asyncio

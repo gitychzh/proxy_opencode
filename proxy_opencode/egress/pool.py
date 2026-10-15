@@ -8,9 +8,12 @@ module owns:
 * one ``httpx.AsyncClient`` per egress with ``proxy=<agent url>`` and
   ``trust_env=False`` (ambient HTTP_PROXY poison is a measured failure
   mode — see the zen_direct client comment);
-* least-in-flight selection among healthy egresses, with bounded
-  saturation behaviour (when every bucket is saturated the request still
-  proceeds — queueing upstream beats inventing a 502);
+* least-in-flight selection among healthy egresses with round-robin
+  tie-breaking (mirrors the balancer) — the ties are the common case for
+  sequential traffic, and breaking them by name pinned every request to
+  one bucket until its daily quota drained; bounded saturation behaviour
+  (when every bucket is saturated the request still proceeds — queueing
+  upstream beats inventing a 502);
 * cordon rules: three consecutive transport failures cordon an egress for
   a cooldown; a hard upstream 429 (per-IP daily quota) cordons it until
   the next daily window reset;
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import itertools
 import logging
 import time
 from dataclasses import dataclass, field
@@ -165,7 +169,7 @@ def seconds_to_window_reset() -> float:
 
 
 class EgressPool:
-    """Least-in-flight selection with health probing and cordon rules."""
+    """Least-in-flight selection (round-robin ties) + health probes/cordons."""
 
     def __init__(
         self,
@@ -187,6 +191,8 @@ class EgressPool:
         self._failure_threshold = failure_threshold
         self._probe_task: asyncio.Task[None] | None = None
         self._closed = False
+        # Round-robin cursor for tie-breaking (see acquire).
+        self._rr = itertools.count()
 
     @classmethod
     def from_settings(cls, settings: object) -> "EgressPool | None":
@@ -253,12 +259,22 @@ class EgressPool:
     # -------------------------------------------------------------- leasing
 
     async def acquire(self) -> Lease:
-        """Pick the healthy egress with the least in-flight work."""
+        """Pick the healthy egress with the least in-flight work.
+
+        Ties are the common case (sequential traffic leaves every bucket
+        idle), and they are broken by rotation rather than by name — the
+        name-based order this replaced pinned every sequential request to
+        the alphabetically-first bucket and drained its per-IP daily quota
+        first (observed in the 2026-10-15 ECS e2e). The rotation is applied
+        before the stable least-inflight sort, exactly like the balancer.
+        """
 
         now = time.monotonic()
         ready = [s for s in self._states if not s.cordoned(now) and s.healthy]
-        pool = ready or list(self._states)
-        state = min(pool, key=lambda s: (s.inflight, s.spec.name))
+        usable = ready or list(self._states)
+        offset = next(self._rr) % len(usable)
+        rotated = usable[offset:] + usable[:offset]
+        state = min(rotated, key=lambda s: s.inflight)
         state.inflight += 1
         if not ready and state.cordoned(now):
             # Everything is cordoned/saturated: queue upstream rather than

@@ -9,6 +9,17 @@
 
 ## [Unreleased]
 
+### Fixed — 出口池顺序选桶钉死在单桶（真机发现，2026-10-15）
+
+- **`egress/pool.py` 选桶改为轮询均摊**：原实现是
+  `min(pool, key=lambda s: (s.inflight, s.spec.name))`——顺序请求（每次在途
+  都归零）会**恒定命中字母序最前的桶**。ECS 真机 e2e 里 40 个顺序请求全打到
+  `cc9`（其余桶 `total=0`），等于先把 `cc9` 的 per-IP 日额度耗光再 failover，
+  与“多桶均摊”的设计意图相悖。现与 balancer 完全一致：先用
+  `itertools.count()` 轮转候选顺序，再做**稳定**的 least-inflight 排序
+  （`min(rotated, key=inflight)`）——空闲时轮询均摊、并发时仍走最闲的桶。
+  新增 `test_acquire_round_robins_idle_buckets`（3 桶连续 6 次 = a,b,c,a,b,c）。
+
 ### Added — 网关出口池 + ECS 容器（0.7.0，P2）
 
 - **出口池 `proxy_opencode/egress/pool.py`**：每桶一个 `httpx.AsyncClient`

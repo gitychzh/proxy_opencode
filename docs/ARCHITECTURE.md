@@ -25,7 +25,7 @@ ECS ┌────────────────────────�
      │  ├─ sse_mask.py（流式切断合成 finish=length, 0.6.5）          │
      │  └─ egress/                                                   │
      │     ├─ pool.py     每出口一个 httpx client(proxy=agent)       │
-     │     │              least-inflight + cordon + /healthz 探测    │
+     │     │          least-inflight(rr) + cordon + /healthz 探测    │
      │     ├─ counters.py 日窗计数(08:00 CST 重置) ≥500 → 换 IP       │
      │     ├─ rotate.py   换 IP 编排（调 agent /rotate, 验 IP 变更） │
      │     ├─ catalog.py  全部免费模型 + cusoc/ds41f_cus 别名        │
@@ -119,6 +119,23 @@ agent 代理 basic auth 双保险）。
   `/opt/egress-agent/venv`；④ systemd 不允许对 ExecStart 命令做变量展开。
 - **pad 桶延后**：`xiaomi-pad-5u`（Linux，218.93.215.38）缺 SSH 凭据，所有者
   指示先做 opc2×2 + cc9 三桶，pad 以后再说（链路已通，接桶=装一个代理软件）。
+
+### P2 追加实测（2026-10-15，ECS 本机作为第 4 桶 + 选桶轮询修正）
+
+- **ECS 本机也是第 4 个配额桶**：ECS 上装 `egress-agent@ecs`（systemd，
+  venv `/opt/egress-agent/venv`，config `/etc/egress-agent/ecs.json`），监听
+  **`172.17.0.1:10001`**——docker bridge 网关 IP，容器经它到达（**不是**
+  `127.0.0.1`），出口即 ECS 公网 IP `115.29.231.25`（`expect_prefix` 为 `/32`）；
+  容器 `.env` 追加 `ecs=http://172.17.0.1:10001`。`/admin/egresses` 四桶全绿。
+- **顺序选桶钉死单桶（已修，见 CHANGELOG）**：`/admin/egresses` 暴露顺序请求
+  全部落在 `cc9`（其余桶 `total=0`）——原 `min(inflight, name)` 在“全空闲”这个
+  顺序请求的常态下恒取字母序最前的桶。改为 balancer 同款
+  `itertools.count()` 轮转 + 稳定 least-inflight；24 并发复测四桶分摊、全 200。
+- **部署坑：CRLF 污染 agent 凭据**：`/etc/egress-agent/<实例>.json` 若从一个
+  CRLF 文本生成，Basic 凭据尾部会带一个 `\r`（`len` 比预期多 1），与容器里的
+  干净 secret 不等 → agent 对每个 CONNECT 回 **407** → 池记为 `transport`
+  失败 → 502（真机表现：该桶 5 次请求 4 次 502）。**建 agent 配置时用 LF 源，
+  并校验凭据长度**（`install.sh` 本身不写凭据，是手写步骤踩到的）。
 
 ## 5. 关键决策记录（ADR 摘要）
 
