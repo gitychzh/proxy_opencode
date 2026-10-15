@@ -1,14 +1,14 @@
 # 运维手册（当前事实）
 
-> 现状快照：2026-10-14。本文只记录当前部署状态、操作方法和仍未解决的风险。
+> 现状快照：2026-10-16。本文只记录当前部署状态、操作方法和仍未解决的风险。
 > 版本历史与已关闭问题看 `CHANGELOG.md`；设备地址和登录方式看 `ACCESS.md`；
-> 架构与安全红线看 `AGENTS.md`。历史实验文档已合并或删除，避免将旧拓扑当作现状。
+> 协议事实与安全红线看 `AGENTS.md`。历史实验文档已合并或删除，避免将旧拓扑当作现状。
 >
-> **0.7.x 新栈（P0 起）**：网关将整体迁入 ECS Docker 容器、桶设备只跑
-> `egress-agent` 出口代理，端口统一 10001/10002/10003，与本文其余章节
-> 描述的旧栈**并存**。新栈的权威文档是 `docs/ARCHITECTURE.md`（含端口
-> 注册表、分期状态、ONT 换 IP 拓扑）；旧栈在所有者下令退役前保持原样，
-> 本文旧章节继续有效。
+> **两栈并存**：0.7.x 新栈（网关进 ECS Docker 容器、桶设备只跑 `egress-agent`
+> 出口代理，客户端入口 `https://115.29.231.25:10002/v1`）**已部署**，权威文档是
+> `docs/ARCHITECTURE.md`（含端口注册表、分期状态、ONT 换 IP 拓扑）。本文 §1–§6
+> 描述的旧栈（`llm.223722.xyz` + `9443` + zen-lb + 四桶完整网关）与之并存，在所有者
+> 下令退役前保持原样、继续有效。
 
 ## 0. 2026-10-13 事故：免费层 session ID gate（已解决）
 
@@ -31,18 +31,22 @@ ascending。已部署 win10-local + 四桶，经公网 LB 7/7 实测 200。
 counter 阈值实测为 63/64。诊断脚本存放于本机
 `%TEMP%\opencode\ablate*.py`（未入库，仅一次性取证）。
 
-## 1. 当前架构
+## 1. 当前架构（旧栈：公网 LB + 四桶完整网关）
 
 ```text
 客户端
-  -> https://llm.223722.xyz/v1 (Cloudflare)
+  -> https://llm.223722.xyz/v1 (Cloudflare)     # 或 IP 直连 https://115.29.231.25:9443/v1
   -> cloudflared 隧道 zen-gw
   -> 杭州 ECS 上的 zen-lb :7892
   -> Tailscale 上的各 proxy_opencode 桶 :8791 / :8792
   -> OpenCode Zen
 ```
 
-对外模型为 `ds41f_cus`，上游 Zen 模型 ID 使用裸 ID `big-pickle`。四个桶按各自出口 IP 独立计额度；LB 做 least-connection 分发、失败重试及额度冷却。ECS/Tailscale 地址、服务及凭据位置见 `ACCESS.md`，不要把真实密钥写入仓库。
+本节描述的是**旧栈**。0.7.x 新栈（网关进 ECS Docker 容器、桶设备只跑
+`egress-agent`，客户端入口 `https://115.29.231.25:10002/v1`）与之并存，权威描述见
+`docs/ARCHITECTURE.md`。
+
+旧栈对外模型为 `ds41f_cus`，上游 Zen 模型 ID 使用裸 ID `big-pickle`。四个桶按各自出口 IP 独立计额度；LB 做 least-connection 分发、失败重试及额度冷却。ECS/Tailscale 地址、服务及凭据位置见 `ACCESS.md`，不要把真实密钥写入仓库。
 
 ## 2. 部署与最近状态
 
@@ -85,11 +89,11 @@ python scripts/e2e_protocols.py
 
 提交前四项门禁必须全绿；`scripts/e2e_protocols.py` 使用 mock upstream 做协议端到端验证。真实 Hermes 推理是额外的环境测试，通常会消耗上游额度。
 
-## 4. 协议与排障纪律
+## 4. 排障纪律
 
-- 免费层最新复测边界：匿名请求须 `stream: true` 且包含至少两个 OpenCode 内置工具名；默认 `ZEN_TOOLS_MODE=minimal` 注入最小 schema。最近复测显示 tiny prompt / 无 system 消息也能通过，system marker 不是已验证的强制门槛。详细表述以 `AGENTS.md` 为准。
-- Zen 免费额度按出口 IP 和 UTC 日期独立计量，UTC 0 点重置。`FreeUsageLimitError` 才是上游额度信号；TLS/传输错误需重试并单独诊断。
-- Zen 目录已改用裸模型 ID（`big-pickle`）；`opencode/big-pickle` 旧拼写返回 401。`opencode-serve` 使用其自身模型命名空间，不要与 zen-direct 混淆。
+免费层协议事实（`stream: true` + ≥2 个内置工具名、descending session ID、429 判读、
+裸模型 ID）的**唯一权威表述在 `AGENTS.md`**，本节不重复，只列旧栈链路上的排障要点：
+
 - SSE 公网链路出现断流时，先区分 Cloudflare/网络超时、LB 到桶问题和桶到 Zen 问题。LB 日志的 `ttfb` 覆盖 LB→桶→Zen 首字节；`total` 是整流回传时间。
 - 不要用真实用户密钥做批量探测；不要把请求正文、prompt 或 key 写入日志。配额探测工具使用临时 key 并在结束后吊销。
 
@@ -167,6 +171,13 @@ python scripts/e2e_protocols.py
    跑通 `balancer/tests/` 后再部署；变更后立即用 `/healthz` 与一次真实 chat 验证，并保留
    `edge_lb.env` 与 `lb.py` 备份以便回滚。
 
-## 7. 未实施的架构想法（不是现状）
+## 7. 单网关 + 多出口槽位：已落地为 0.7.x 新栈
 
-曾评估用杭州 ECS 上的单网关 + 多出口槽位替代四台异构机器各跑完整网关，另开独立入口先灰度、保留现有 `llm.223722.xyz` 回滚路径。该方案**未部署**：涉及出口独立性、SSH 转发稳定性、ECS 资源、鉴权隔离与恢复演练；不能将旧 `llm2.223722.xyz` 计划中的命令或端口当作当前部署操作。若重启该评估，先验证当前资源、访问权限与合规要求，再在不影响现网的环境做试验。
+曾评估用杭州 ECS 上的单网关 + 多出口槽位替代四台异构机器各跑完整网关。该方案
+**已落地**为 0.7.x 新栈：网关进 ECS Docker 容器，桶设备只跑 `egress-agent`，客户端
+入口 `https://115.29.231.25:10002/v1`。权威描述（端口注册表、分期状态、ADR、ONT
+换 IP 拓扑）见 `docs/ARCHITECTURE.md`，客户端接法与证书见 `ACCESS.md` §0.1 / §7。
+
+旧栈（`llm.223722.xyz` + `9443` + zen-lb + 四桶完整网关）与新栈并存，在所有者下令
+退役前继续作为回滚路径保留。历史文档里记的 `llm2.223722.xyz` 计划命令与端口**不是**
+新栈的操作步骤，勿混用。

@@ -1,5 +1,13 @@
 # AGENTS.md — 本仓库的维护约定（给所有 agent 的必读说明）
 
+> **文档地图（同一事实只在一处维护，其余引用而非复制）**：
+> 本文件 = 协议事实与安全红线（**改代码前必读**）；
+> `docs/ARCHITECTURE.md` = 0.7.x 新栈权威描述（端口注册表 / 分期 / ADR / ONT 拓扑）；
+> `docs/OPERATIONS.md` = 当前部署状态与排障；
+> `docs/ACCESS.md` = 地址、访问方式与凭据去向（不含凭据值）；
+> `docs/engineering-constraints.md` = 工程化基线；
+> `README.md` = 对外说明与配置表；`CHANGELOG.md` = 版本历史。
+
 ## 这个项目是什么
 
 `proxy_opencode`：一个 OpenAI 兼容（`/v1/chat/completions`、`/v1/models`）的

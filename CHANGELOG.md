@@ -185,6 +185,12 @@
 
 ### Docs
 
+- 文档收敛（2026-10-16）：明确「同一事实只在一处维护」并新增文档地图（`AGENTS.md` 顶部）。
+  具体：① 修正 `OPERATIONS.md` §7——原文称「单网关 + 多出口槽位」为**未部署的设想**，
+  实为已落地的 0.7.x 新栈，改为指向 `ARCHITECTURE.md`；② `OPERATIONS.md` §4 删去与
+  `AGENTS.md` 重复的协议事实，只留旧栈链路排障要点；③ 端口注册表以 `ARCHITECTURE.md` §2
+  为唯一来源，`ACCESS.md` §0.1 改为指针；④ `README.md` 补 0.7.x 新栈入口
+  `https://115.29.231.25:10002/v1` 与文档索引里的 `ARCHITECTURE.md`。
 - 记录杭州 ECS 直连入口被阿里云按**域名**（HTTP `Host` / TLS `SNI`，**不限端口**）拦截的根因，
   以及「IP 直连 + 不发送 SNI」的绕行方案：`docs/ACCESS.md` §7（服务端配置、证书信任、客户端接法）、
   `docs/OPERATIONS.md` §5.2（探测矩阵与推导）。opc2 的 Hermes 默认入口已切到

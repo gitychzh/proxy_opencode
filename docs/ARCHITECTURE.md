@@ -137,6 +137,12 @@ agent 代理 basic auth 双保险）。
   失败 → 502（真机表现：该桶 5 次请求 4 次 502）。**建 agent 配置时用 LF 源，
   并校验凭据长度**（`install.sh` 本身不写凭据，是手写步骤踩到的）。
 
+### 当前新栈公开目录（过渡态，2026-10-15）
+
+新栈当前用 `PUBLIC_MODELS` 环境变量直接登记客户端可见名，尚未走 P3 的 catalog
+代码：`cus1/deepseek-V4.1-Flash` 与 `ds41f_cus`，二者都指向上游裸 ID `big-pickle`。
+P3（catalog 全免费模型）落地后改由代码统一管理，届时以 catalog 的默认值为准。
+
 ## 5. 关键决策记录（ADR 摘要）
 
 | 决策 | 结论 | 理由 |

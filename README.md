@@ -47,9 +47,10 @@ curl -H "Authorization: Bearer dev-local-key" -H "Content-Type: application/json
 
 ## 三种协议接口（v0.6.0 起）
 
-对外只暴露一个模型 `ds41f_cus`（DeepSeek V4.1 Flash），客户端请求任意模型名
-都会透明路由到它，且响应（JSON 与流式 SSE）中的模型字段一律改写为
-`ds41f_cus`——上游真实模型名不出网关。
+默认对外只暴露一个模型 `ds41f_cus`（DeepSeek V4.1 Flash）：客户端请求任意模型名
+都会透明路由到它，响应（JSON 与流式 SSE）中的模型字段一律改写为公开名——上游
+真实模型名不出网关。公开目录由 `PUBLIC_MODELS` 配置，可登记多个名字；0.7.x 新栈
+即登记了 `cus1/deepseek-V4.1-Flash` + `ds41f_cus`（见下节）。
 
 | 接口 | 客户端 | 认证方式 |
 | --- | --- | --- |
@@ -120,6 +121,25 @@ Tailscale 分发到四个桶；具体节点状态、运行方式和已知风险�
 LB 为每个上游单独改写 `Authorization`，支持 least-connection 调度、失败前的重试、
 SSE 透传及按桶配额冷却。健康检查当前包含上游明细；公开入口因此存在内部拓扑信息
 可见的风险，详见运维手册。
+
+## 0.7.x 新栈（当前部署路径）
+
+0.7.x 把网关整体搬进 **ECS 上的一个 Docker 容器**，各配额桶设备只跑
+`egress-agent`（设备侧 HTTP CONNECT 代理，出口 = 设备自己的公网 IP）。客户端入口为
+**`https://115.29.231.25:10002/v1`**（IP 直连 + 自签 CA；为何必须用 IP 而非域名见
+`docs/ACCESS.md` §7）。
+
+```text
+客户端 ─TLS:10002─▶ ECS caddy ─▶ zen-gw 容器（proxy_opencode 0.7.x）
+                                   │  egress pool：least-inflight + 空闲轮转；
+                                   │  按 expect_prefix 校验桶身份，429/传输失败 cordon
+                                   ▼  CONNECT 到各设备 egress-agent :10001 / :10002
+                                 opencode.ai（Zen 免费层）
+```
+
+新栈与旧栈（`llm.223722.xyz` + `9443` + `balancer/lb.py` + 四桶完整网关）**并存**，
+旧栈在所有者下令退役前保持原样。端口注册表、分期状态与 ONT 换 IP 拓扑见
+`docs/ARCHITECTURE.md`；设备侧代理见 `egress-agent/README.md`。
 
 ## 语义与边界
 
@@ -212,6 +232,7 @@ uvicorn --factory proxy_opencode.app:create_app_from_env --host 127.0.0.1 --port
 | 文档 | 内容 |
 | --- | --- |
 | `AGENTS.md` | 项目架构、开发约定、协议事实与安全红线（**改代码前必读**） |
+| `docs/ARCHITECTURE.md` | **0.7.x 新栈权威描述**：端口注册表、分期状态、ADR、ONT 拓扑 |
 | `docs/OPERATIONS.md` | 当前部署状态、操作命令、排障证据与有效待办 |
 | `docs/ACCESS.md` | 设备地址、访问方式、凭据存放位置（不含真实凭据） |
 | `docs/engineering-constraints.md` | 工程化基线与合规红线 |
