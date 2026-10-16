@@ -477,6 +477,49 @@ def test_counter_snapshot_roundtrips_rotation_epoch() -> None:
         assert not reloaded.should_rotate_on_429("a", None, now=t0 + 30.0)
 
 
+def test_legacy_snapshot_without_epoch_recovers_cooldown() -> None:
+    """Pre-epoch snapshots: parse last_rotation_at back into an epoch.
+
+    2026-10-17 live case — the deploy restart loaded a snapshot that only
+    had the formatted timestamp, and the failed-rotation retry stayed
+    blocked for the rest of the window despite the cooldown long elapsed.
+    """
+
+    import json as _json
+    import os as _os
+    import tempfile
+
+    from proxy_opencode.egress.pool import window_tz
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _os.path.join(tmp, "counts.json")
+        t0 = time.time()
+        legacy_at = datetime.fromtimestamp(t0 - 1200.0, tz=window_tz).isoformat(
+            timespec="seconds"
+        )
+        with open(path, "w", encoding="utf-8") as fh:
+            _json.dump(
+                {
+                    "version": 1,
+                    "buckets": {
+                        "a": {
+                            "window_start": 0.0,
+                            "count": 0,
+                            "triggered": True,
+                            "rotations": 1,
+                            "last_rotation_ok": False,
+                            "last_rotation_at": legacy_at,
+                            "last_rotation_detail": "agent rotate refused: x",
+                        }
+                    },
+                },
+                fh,
+            )
+        reloaded = EgressCounters({"a": 500}, retry_cooldown_s=60.0, snapshot_path=path)
+        # 1200s > 60s cooldown since the parsed failure time.
+        assert reloaded.should_rotate_on_429("a", None, now=t0)
+
+
 @respx.mock
 @pytest.mark.asyncio
 async def test_agent_failure_reported_and_no_state_change() -> None:

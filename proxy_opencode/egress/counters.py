@@ -314,6 +314,21 @@ class EgressCounters:
                 )
             except (TypeError, ValueError):
                 continue
+            # Snapshots written before last_rotation_epoch existed carry
+            # only the formatted timestamp: parse it back so the
+            # failed-rotation retry cooldown survives the upgrade
+            # (2026-10-17 live case: eth's failed rotation, epoch absent).
+            if (
+                rec.last_rotation_ok is False
+                and rec.last_rotation_epoch == 0.0
+                and rec.last_rotation_at
+            ):
+                try:
+                    rec.last_rotation_epoch = datetime.fromisoformat(
+                        rec.last_rotation_at
+                    ).timestamp()
+                except ValueError:
+                    pass
             self._records[str(name)] = rec
         # Rows from previous windows are stale; drop their counts so a
         # restart just after 08:00 does not resurrect yesterday's total.
