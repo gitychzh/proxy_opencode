@@ -4,8 +4,9 @@
 #   cp env.example .env      # 填入真实凭据（.env 已 gitignore，绝不提交）
 #   docker compose up -d --build
 #
-# 只把 10002 发布到宿主机 loopback，由 caddy:10002 反代对外（见
-# Caddyfile.snippet）。容器本身不暴露公网端口。
+# 宿主机发布到 loopback **10010**：caddy 监听 :10002 反代到 127.0.0.1:10010（见
+# Caddyfile.snippet）。不得直接绑宿主 10002——那是 caddy 的端口，发布即冲突
+# （2026-10-16 部署实测）。容器本身不暴露公网端口。
 services:
   zen-gw:
     build:
@@ -22,7 +23,7 @@ services:
       # 动态 key 库落在挂载卷里（容器只读根文件系统）。
       KEY_STORE_PATH: /data/keys.json
     ports:
-      - "127.0.0.1:10002:10002"
+      - "127.0.0.1:10010:10002"
     volumes:
       - ./data:/data
     # 只读根文件系统 + 可写 /tmp 与 /data：缩小攻击面，重启不丢 key 库。
