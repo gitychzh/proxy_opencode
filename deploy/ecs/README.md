@@ -39,6 +39,16 @@ curl -s http://127.0.0.1:10002/admin/egresses \
 # 每桶应 healthy=true、egress_ip 落在其 expect_prefix 内。
 ```
 
+**手动换一次 IP**（P5，仅限配置了光猫的桶；自动触发走
+`ZEN_EGRESS_ROTATION` 阈值/硬 429，二者共用同一编排）：
+
+```bash
+curl -s -X POST http://127.0.0.1:10002/admin/egresses/opc2-eth/rotate \
+  -H "Authorization: Bearer $ADMIN_API_KEYS"
+# 返回 {"started": true}；再查 /admin/egresses 的 counters.last_rotation_*。
+# 重启光猫约 80s 恢复 + 30-40s PPPoE 回拨，最后成败以 last_rotation 为准。
+```
+
 ## 应用入口（caddy）
 
 ```bash

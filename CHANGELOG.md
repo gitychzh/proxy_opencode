@@ -9,6 +9,42 @@
 
 ## [Unreleased]
 
+### Added — P5 自动换 IP：日窗计数 + ONT 重启编排（ECS 侧，2026-10-16）
+
+- **计数器 `egress/counters.py`**：每桶日窗 `[08:00, 08:00+1d)` Asia/Shanghai
+  （= 上游 per-IP 配额 UTC0 重置）计数，08:00 全部归零、跨窗不结转；每桶阈值
+  触发**每窗口恰好一次**换 IP；成功换 IP（新 IP=新配额桶）后计数归零重计。
+  状态 JSON 快照（`ZEN_EGRESS_COUNTS_PATH`，容器用 `/data` 卷）跨重启存活，
+  加载时丢弃旧窗口数据、容忍损坏文件；文件与快照绝不包含凭据/消息内容。
+- **编排 `egress/rotate.py`**：网关持有触发并执行——标记 rotating（选桶跳过，
+  在途请求自然收尾）→ `POST {agent}/rotate`（Basic 共享密钥）→ 轮询
+  `/healthz` 等 IP **变化且落在该桶 `expect_prefix` 内**（同 IP 重发=失败，
+  变到前缀外（eth 腿回落 wifi 的实测形态）=失败并拒绝采纳，均大声记录；
+  管理员可经 admin API 再触发）→ 成功后清理 cordon（含配额 cordon）并入账
+  新 IP。每桶同时至多一个轮换任务。
+- **429 兜底（ADR 冻结语义）**：上游 429 且 `Retry-After > 3600s`
+  （per-IP 日耗尽的实测判据，短值属软限流）→ 绕过阈值立即换 IP。
+  `zen_direct` 现在把 Retry-After 解析（RFC 7231 秒数/HTTP-date）随
+  release 传入池。
+- **池接口扩展**：`release(..., retry_after_s=...)`；release 后回调
+  `ReleaseObserver`（异常吞掉不影响请求路径）；`acquire` 跳过 rotating 桶
+  （全池 rotating 才兜底）；`mark_rotating` / `apply_rotation_success` /
+  snapshot 增加 `rotating` 字段。
+- **配置**：`ZEN_EGRESS_ROTATION`（`name=阈值,...`，只列配置了光猫的桶，
+  留空=整体关闭；三桶口径 opc2-eth(移动)/opc2-wifi(电信)/cc9(联通)）、
+  `ZEN_EGRESS_COUNTS_PATH`（计数快照落 `/data/egress_counts.json`）。
+- **管理接口**：`/admin/egresses` 快照新增 `counters` 字段（窗口起止、
+  计数/阈值/触发位、换 IP 历史结果）；新增
+  `POST /admin/egresses/{name}/rotate`（管理员 key）手动触发一次轮换。
+- **测试**：`tests/test_egress_rotation.py` 25 例（窗口数学/滚动归零、
+  阈值一次性与 reset 重臂、持久化与损坏容忍、硬 429 旁路边界、轮换成功/
+  同 IP 失败/前缀违背/agent 拒绝/关停取消、选桶跳过 rotating、observer
+  透传、admin 快照+404/400/401、zen_direct 429 携带 Retry-After 全绿）；
+  `test_keys_admin` 同步 payload 形状。
+- **部署注意**：启用 `ZEN_EGRESS_ROTATION` 时必须停掉 opc2 现有"ONT 每日
+  7 次定时重启" cron（双重换 IP）；opc2-wifi / cc9 的光猫重启 API 尚需
+  现场接入（`deploy/ecs/env.example` 已给出三桶口径）。
+
 ### Fixed — 出口池顺序选桶钉死在单桶（真机发现，2026-10-15）
 
 - **`egress/pool.py` 选桶改为轮询均摊**：原实现是

@@ -244,7 +244,7 @@ async def test_admin_egresses_empty_when_pool_unconfigured(tmp_path):
     ) as client:
         r = await client.get("/admin/egresses", headers=ADMIN_HEADERS)
     assert r.status_code == 200
-    assert r.json() == {"pool": False, "egresses": []}
+    assert r.json() == {"pool": False, "egresses": [], "counters": {}}
 
 
 @pytest.mark.asyncio

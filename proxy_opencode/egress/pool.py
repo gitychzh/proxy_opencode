@@ -33,13 +33,31 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Protocol
 
 import httpx
 
 # The upstream's daily quota window resets at UTC 00:00 == 08:00 Asia/Shanghai.
 _WINDOW_TZ = timezone(timedelta(hours=8))
+# Public alias for the fixed-offset window timezone (shared with counters;
+# counters must agree with the pool on "one window down to the second").
+window_tz = _WINDOW_TZ
 
 logger = logging.getLogger("proxy_opencode.egress")
+
+
+class ReleaseObserver(Protocol):
+    """Hook invoked by ``EgressPool.release`` after each lease release.
+
+    Implemented by ``egress.rotate.EgressRotator`` (P5) to fold completed
+    requests into the daily-window counters and to trigger ONT rotations.
+    Synchronous by design: the observer may spawn tasks, but must never
+    block or fail the release path (exceptions are swallowed + logged).
+    """
+
+    def on_release(
+        self, name: str, *, ok: bool, kind: str, retry_after_s: float | None
+    ) -> None: ...
 
 
 class EgressSpec:
@@ -96,6 +114,9 @@ class EgressState:
     cordoned_until: float = 0.0
     cordon_reason: str = ""
     healthy: bool = False
+    # P5 rotation: true while the ONT reboot orchestrator drives this
+    # egress ("selection skips it; in-flight requests finish or die").
+    rotating: bool = False
     egress_ip: str | None = None
     egress_ip_at: str | None = None
     last_probe_at: float = 0.0
@@ -119,6 +140,7 @@ class EgressState:
             "total": self.total,
             "failures": self.failures,
             "last_error": self.last_error,
+            "rotating": self.rotating,
             "egress_ip": self.egress_ip,
             "egress_ip_at": self.egress_ip_at,
             "expect_prefix": self.spec.expect_prefix,
@@ -180,6 +202,7 @@ class EgressPool:
         probe_interval_s: float = 30.0,
         cordon_s: float = 300.0,
         failure_threshold: int = 3,
+        observer: ReleaseObserver | None = None,
     ) -> None:
         if not specs:
             raise ValueError("EgressPool requires at least one egress spec")
@@ -189,6 +212,7 @@ class EgressPool:
         self._probe_interval_s = probe_interval_s
         self._cordon_s = cordon_s
         self._failure_threshold = failure_threshold
+        self._observer = observer
         self._probe_task: asyncio.Task[None] | None = None
         self._closed = False
         # Round-robin cursor for tie-breaking (see acquire).
@@ -270,8 +294,16 @@ class EgressPool:
         """
 
         now = time.monotonic()
-        ready = [s for s in self._states if not s.cordoned(now) and s.healthy]
-        usable = ready or list(self._states)
+        ready = [
+            s
+            for s in self._states
+            if not s.cordoned(now) and s.healthy and not s.rotating
+        ]
+        # Last resort excludes rotating egresses too: their ONT is mid-reboot
+        # and every data connection they accept dies with it. Only when the
+        # entire pool is rotating fall back to them (queueing upstream).
+        non_rotating = [s for s in self._states if not s.rotating]
+        usable = ready or non_rotating or list(self._states)
         offset = next(self._rr) % len(usable)
         rotated = usable[offset:] + usable[:offset]
         state = min(rotated, key=lambda s: s.inflight)
@@ -285,7 +317,58 @@ class EgressPool:
             )
         return Lease(state)
 
-    async def release(self, lease: Lease, *, ok: bool, kind: str = "") -> None:
+    # ------------------------------------------------------- rotation (P5)
+
+    def attach_release_observer(self, observer: ReleaseObserver) -> None:
+        """Register the release observer (builders wire the rotator late)."""
+
+        self._observer = observer
+
+    def find(self, name: str) -> EgressState | None:
+        return next((s for s in self._states if s.spec.name == name), None)
+
+    def mark_rotating(self, name: str, rotating: bool) -> bool:
+        """Flag an egress as driving an ONT rotation; selection skips it."""
+
+        state = self.find(name)
+        if state is None or state.rotating is bool(rotating):
+            return False
+        state.rotating = bool(rotating)
+        return True
+
+    def apply_rotation_success(self, name: str, ip: str, ip_at: str = "") -> bool:
+        """Fold a verified rotation outcome into the egress state.
+
+        The new IP was observed on ``/healthz`` inside the bucket prefix by
+        the rotator, so the state is trustworthy here: clear any cordon
+        (including the per-IP daily-quota one — the fresh IP has its own
+        fresh quota) and mark the egress healthy immediately, without
+        waiting for the next slow probe.
+        """
+
+        state = self.find(name)
+        if state is None:
+            return False
+        previous = state.egress_ip
+        now = time.monotonic()
+        state.egress_ip = ip
+        if ip_at:
+            state.egress_ip_at = ip_at
+        state.last_probe_ok = True
+        state.last_probe_at = now
+        state.healthy = True
+        state.failures = 0
+        state.cordoned_until = 0.0
+        state.cordon_reason = ""
+        logger.info(
+            "egress rotation complete: new egress IP live",
+            extra={"egress": name, "previous_ip": previous, "current_ip": ip},
+        )
+        return True
+
+    async def release(
+        self, lease: Lease, *, ok: bool, kind: str = "", retry_after_s: float | None = None
+    ) -> None:
         """Release a lease and fold its outcome into cordon accounting."""
 
         state = lease.state
@@ -311,6 +394,9 @@ class EgressPool:
                     "reset_at": datetime.fromtimestamp(
                         next_window_reset(), tz=_WINDOW_TZ
                     ).isoformat(),
+                    "retry_after_s": round(retry_after_s, 1)
+                    if retry_after_s is not None
+                    else None,
                 },
             )
         elif state.failures >= self._failure_threshold:
@@ -320,6 +406,17 @@ class EgressPool:
                 "egress cordoned after repeated failures",
                 extra={"egress": state.spec.name, "reason": state.cordon_reason},
             )
+        if self._observer is not None:
+            try:
+                self._observer.on_release(
+                    state.spec.name, ok=ok, kind=kind, retry_after_s=retry_after_s
+                )
+            except Exception:
+                # Counter/rotation bookkeeping must never break the release
+                # path; the probe loop keeps serving state independently.
+                logger.exception(
+                    "release observer failed", extra={"egress": state.spec.name}
+                )
 
     # --------------------------------------------------------------- probes
 

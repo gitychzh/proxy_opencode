@@ -49,8 +49,10 @@ import json
 import logging
 import secrets
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlparse
 
 import httpx
@@ -214,6 +216,40 @@ def _clean_messages(messages: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _retry_after_seconds(
+    headers: "Mapping[str, str] | httpx.Headers | None",
+) -> float | None:
+    """Parse an upstream 429's Retry-After into seconds.
+
+    RFC 7231 allows integer seconds or an HTTP-date. The value feeds the
+    P5 rotation trigger's measured classification: > 3600s means the
+    per-IP daily quota is exhausted (short values are soft throttling).
+    Unparseable/absent → None (treated as "no classification available").
+    """
+
+    if headers is None:
+        return None
+    raw = headers.get("retry-after")
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+
+
 class ZenDirectAdapter:
     name = "zen-direct"
 
@@ -348,7 +384,12 @@ class ZenDirectAdapter:
             raw = await resp.aread()
             await resp.aclose()
             if resp.status_code == 429:
-                await self._release(lease, ok=False, kind="http_429")
+                await self._release(
+                    lease,
+                    ok=False,
+                    kind="http_429",
+                    retry_after_s=_retry_after_seconds(resp.headers),
+                )
             elif resp.status_code >= 500:
                 await self._release(lease, ok=False, kind=f"http_{resp.status_code}")
             else:
@@ -376,9 +417,18 @@ class ZenDirectAdapter:
         finally:
             await resp.aclose()
 
-    async def _release(self, lease: Lease | None, *, ok: bool, kind: str = "") -> None:
+    async def _release(
+        self,
+        lease: Lease | None,
+        *,
+        ok: bool,
+        kind: str = "",
+        retry_after_s: float | None = None,
+    ) -> None:
         if lease is not None and self._pool is not None:
-            await self._pool.release(lease, ok=ok, kind=kind)
+            await self._pool.release(
+                lease, ok=ok, kind=kind, retry_after_s=retry_after_s
+            )
 
     # ------------------------------------------------------------ internals
 

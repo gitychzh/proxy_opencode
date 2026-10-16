@@ -20,6 +20,7 @@ from ..auth import build_admin_dependency
 from ..auth.keystore import KeyStore
 from ..config import Settings
 from ..egress.pool import EgressPool
+from ..egress.rotate import EgressRotator
 from ..errors import openai_error
 
 
@@ -27,6 +28,7 @@ def make_router(
     settings: Settings,
     keystore: KeyStore,
     egress_pool: EgressPool | None = None,
+    egress_rotator: EgressRotator | None = None,
 ) -> APIRouter:
     admin = build_admin_dependency(settings)
     router = APIRouter()
@@ -79,12 +81,48 @@ def make_router(
     async def list_egresses(_: str = Depends(admin)) -> dict[str, Any]:
         """Egress-pool status: health, cordon, in-flight and observed IPs.
 
-        Never includes agent credentials or message content; egress names,
-        IPs and counters are the documented-safe surface.
+        With P5 rotation configured the per-bucket counters/rotation state
+        rides along. Never includes agent credentials or message content;
+        egress names, IPs and counters are the documented-safe surface.
         """
         if egress_pool is None:
-            return {"pool": False, "egresses": []}
-        return {"pool": True, "egresses": egress_pool.snapshot()}
+            return {"pool": False, "egresses": [], "counters": {}}
+        payload: dict[str, Any] = {"pool": True, "egresses": egress_pool.snapshot()}
+        if egress_rotator is not None:
+            payload["counters"] = egress_rotator.counters.snapshot()
+        else:
+            payload["counters"] = {}
+        return payload
+
+    @router.post("/admin/egresses/{name}/rotate")
+    async def rotate_egress(name: str, _: str = Depends(admin)) -> Any:
+        """Manually trigger one ONT rotation for a configured bucket.
+
+        For the device-side work this exists for: field-testing the
+        wifi/cc9 ONT flows and recovering a bucket whose IP was re-issued
+        unchanged. Threshold- and hard-429-triggers go through the same
+        path; at most one rotation per bucket runs at a time.
+        """
+        if egress_pool is None or egress_pool.find(name) is None:
+            return openai_error(
+                404,
+                f"Egress {name!r} not found (pool disabled or unknown name).",
+                err_type="invalid_request_error",
+            )
+        if egress_rotator is None or not egress_rotator.rotatable(name):
+            return openai_error(
+                400,
+                f"Egress {name!r} is not configured for rotation "
+                "(missing ZEN_EGRESS_ROTATION entry).",
+                err_type="invalid_request_error",
+            )
+        task = egress_rotator.request_rotation(name, trigger="admin")
+        if task is None:
+            return JSONResponse(
+                status_code=200,
+                content={"started": False, "name": name, "already_rotating": True},
+            )
+        return {"started": True, "name": name}
 
     @router.delete("/admin/keys/{key_id}")
     async def revoke_key(key_id: str, _: str = Depends(admin)) -> JSONResponse:

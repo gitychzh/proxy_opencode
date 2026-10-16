@@ -82,8 +82,27 @@ agent 代理 basic auth 双保险）。
 | P2 | 0.7.0 | 网关 egress pool + Docker/compose，ECS:10002 起容器；各桶出口逐一实测复核 | **已完成**（opc2-wifi / opc2-eth / cc9 三桶真机跑通；pad 待凭据延后，见下） |
 | P3 | 0.7.0 | catalog 全免费模型；hermes 加新 alias（旧 alias 保留） | 未开始 |
 | P4 | 0.7.1 | updater：每日 02:00 查 GitHub release（含 prerelease），分级采用 | 未开始 |
-| P5 | 0.7.2 | 换 IP：计数器窗口 + 500 触发 + ONT 重启 + IP 变更验证 + 429 兜底 | 未开始 |
+| P5 | 0.7.2 | 换 IP：计数器窗口 + 500 触发 + ONT 重启 + IP 变更验证 + 429 兜底 | **ECS 侧已完成**（2026-10-16；wifi/cc9 设备侧 API 待真机接入，见下） |
 | P6 | 0.8.0 | Windows agent 转正、Android Kotlin 版、文档浓缩定稿、旧栈退役（等命令） | 未开始 |
+
+### P5 现状（2026-10-16，ECS 侧代码完成，设备侧待真机）
+
+- **已实现**（`proxy_opencode/egress/counters.py` + `rotate.py`，25 个新测试全绿）：
+  每桶日窗 `[08:00, 08:00+1d)` Asia/Shanghai 计数（窗口自动滚动归零）；
+  阈值（`ZEN_EGRESS_ROTATION`，逐桶配置，如 `opc2-eth=500`）触发**每窗口恰好
+  一次**换 IP；上游 429 且 `Retry-After > 3600s`（per-IP 日耗尽实测判据）
+  **绕过阈值立即换 IP**；编排流程=标记 rotating（选桶跳过、在途请求自然
+  收尾）→ `POST {agent}/rotate` → 轮询 `/healthz` 等 IP **变化且落在
+  `expect_prefix` 内**（同 IP 重发/腿回落都判失败，大声记录）→ 成功后清
+  cordon（含配额 cordon）、计数归零重计。计数器状态 JSON 快照
+  （`ZEN_EGRESS_COUNTS_PATH`，容器 `/data` 卷）跨重启存活。
+- **`/admin/egresses`** 快照新增 `counters` 字段；新增
+  `POST /admin/egresses/{name}/rotate`（管理员 key）= 手动触发，用于现场
+  调试 wifi/cc9 光猫 API 与"IP 被重发同值"后的补一枪。
+- **设备侧遗留**（agent /rotate 契约网关已就绪，等真机）：opc2-wifi
+  HG8020C 重启 API 需现场复刻页面 JS 提交；cc9 光猫型号/凭据待勘查。
+  opc2 现有"ONT 每日 7 次定时重启" cron 必须在启用 `ZEN_EGRESS_ROTATION`
+  时停掉，否则双重换 IP。
 
 ### P1 实测结论（2026-10-14，opc2 真机）
 
@@ -162,8 +181,8 @@ P3（catalog 全免费模型）落地后改由代码统一管理，届时以 cat
 | 桶 | 出口 | ONT | 型号 | 控制方式 | 重启验证 |
 |---|---|---|---|---|---|
 | opc2-eth | 36.149.54.x 移动 | 192.168.1.1（enp12s0 进） | 华为 V173-50 | 纯 HTTP 四步（agent `rotate` P1 实现） | 生产已验证 36.149.54.237→.180；恢复 ~80s + PPPoE ~40s |
-| opc2-wifi | 117.95.231.70 电信 | 192.168.1.1（wlx 经中兴路由 192.168.2.1 进） | 华为 HG8020C | 同框架登录可行；重启 API 需现场复刻页面 JS 提交（P5 验证） | 待 P5 验证 |
-| cc9 | 2408: 联通 IPv6 | 192.168.3.1（型号/凭据待勘查） | 待定 | 大概率同华为 API（P5 勘查） | 待 P5 验证 |
+| opc2-wifi | 117.95.231.70 电信 | 192.168.1.1（wlx 经中兴路由 192.168.2.1 进） | 华为 HG8020C | 同框架登录可行；重启 API 需现场复刻页面 JS 提交后生效（agent `/rotate` 契约已就绪） | 待设备侧接入 |
+| cc9 | 2408: 联通 IPv6 | 192.168.3.1（型号/凭据待勘查） | 待定 | 大概率同华为 API（agent `/rotate` 契约已就绪；先勘查） | 待设备侧接入 |
 | pad / win10 | 218.93.215.38 / 111.55.73.65 | — | — | 本期不做换 IP | — |
 
 **凭据铁律**：ONT 账号口令只写设备上的 `/etc/egress-agent/<实例>.json`

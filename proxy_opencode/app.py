@@ -23,6 +23,7 @@ from . import __version__
 from .auth.keystore import KeyStore
 from .config import Settings, load_settings
 from .egress.pool import EgressPool
+from .egress.rotate import EgressRotator
 from .errors import GatewayHttpError
 from .registry import ModelRegistry
 from .routes import admin as admin_routes
@@ -42,6 +43,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # opens httpx clients and a probe task) so importing this module stays
     # side-effect free.
     egress_pool = EgressPool.from_settings(settings)
+    # P5: with rotation thresholds configured, the rotator rides on the
+    # pool's release path (counters -> threshold / hard-429 -> ONT reboot).
+    egress_rotator = None
+    if egress_pool is not None:
+        egress_rotator = EgressRotator.from_settings(settings, egress_pool)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -53,12 +59,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             aclose = getattr(app.state.adapter, "aclose", None)
             if aclose is not None:
                 await aclose()
+            if egress_rotator is not None:
+                await egress_rotator.aclose()
             if egress_pool is not None:
                 await egress_pool.aclose()
 
     app = FastAPI(title="proxy_opencode", version=__version__, lifespan=lifespan)
     app.state.settings = settings
     app.state.egress_pool = egress_pool
+    app.state.egress_rotator = egress_rotator
     app.state.adapter = build_adapter(settings, pool=egress_pool)
     app.state.keystore = KeyStore(settings.key_store_path, settings.key_default_ttl_hours)
     app.state.registry = ModelRegistry(settings)
@@ -98,7 +107,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(
         anthropic_routes.make_router(settings, app.state.keystore, app.state.registry)
     )
-    app.include_router(admin_routes.make_router(settings, app.state.keystore, egress_pool))
+    app.include_router(
+        admin_routes.make_router(
+            settings, app.state.keystore, egress_pool, egress_rotator
+        )
+    )
     return app
 
 

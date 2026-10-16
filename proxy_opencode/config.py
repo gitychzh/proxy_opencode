@@ -166,6 +166,15 @@ class Settings:
     zen_egress_secret: str = ""
     zen_egress_probe_interval_s: int = 30
     zen_egress_cordon_s: int = 300
+    # P5 IP rotation: per-bucket daily request threshold. Only listed
+    # buckets rotate (those whose agent has an ONT configured); empty =
+    # the whole rotation feature is off.
+    #   ZEN_EGRESS_ROTATION="opc2-eth=500,opc2-wifi=500,cc9=500"
+    zen_egress_rotation: dict[str, int] = field(default_factory=dict)
+    # Counters/rotation JSON snapshot for restart survival (container has
+    # a /data volume for exactly this); empty = in-memory only.
+    #   ZEN_EGRESS_COUNTS_PATH="/data/egress_counts.json"
+    zen_egress_counts_path: str = ""
 
     @property
     def dev_open(self) -> bool:
@@ -196,6 +205,26 @@ def _parse_kv(value: str) -> dict[str, str]:
                 f"bad key=value entry {part!r} (expected 'name=url,...')"
             )
         out[key.strip()] = item.strip()
+    return out
+
+
+def _parse_kv_int(value: str) -> dict[str, int]:
+    """Parse "name=500,..." into an int dict (rotation thresholds)."""
+
+    out: dict[str, int] = {}
+    for part in _csv(value):
+        key, sep, item = part.partition("=")
+        try:
+            num = int(item) if sep else 0
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"bad integer entry {part!r} (expected 'name=500,...')"
+            ) from exc
+        if not sep or not key.strip() or num <= 0:
+            raise ValueError(
+                f"bad integer entry {part!r} (expected 'name=<positive int>,...')"
+            )
+        out[key.strip()] = num
     return out
 
 
@@ -369,4 +398,8 @@ def load_settings() -> Settings:
             os.environ.get("ZEN_EGRESS_PROBE_INTERVAL_S", "30")
         ),
         zen_egress_cordon_s=int(os.environ.get("ZEN_EGRESS_CORDON_S", "300")),
+        zen_egress_rotation=_parse_kv_int(os.environ.get("ZEN_EGRESS_ROTATION", "")),
+        zen_egress_counts_path=os.environ.get(
+            "ZEN_EGRESS_COUNTS_PATH", ""
+        ).strip(),
     )

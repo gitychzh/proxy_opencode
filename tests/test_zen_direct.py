@@ -631,7 +631,15 @@ class _StubPool:
         state.inflight += 1
         return Lease(state)
 
-    async def release(self, lease: Lease, *, ok: bool, kind: str = "") -> None:
+    async def release(
+        self,
+        lease: Lease,
+        *,
+        ok: bool,
+        kind: str = "",
+        retry_after_s: float | None = None,
+    ) -> None:
+        self._retry_after = retry_after_s
         self.releases.append((lease.name, ok, kind))
 
 
