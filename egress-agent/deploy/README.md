@@ -54,6 +54,27 @@ opc2 的两台光猫共占 192.168.1.1，出口靠系统策略路由区分（与
   `Group=opc2-bucket-b`（组不存在会启动失败）。`install.sh --user opc2-bucket-b`
   会把 `/etc/egress-agent` 的属主改为该用户。
 
+## opc2 策略路由自愈（2026-10-16 设备落地）
+
+两个 provision 单元（`proxy_opencode-opc2b-route.service` = 表 991/rule 29991
+uid 996；`proxyopencode-wired-egress.service` = 表 410/rules 1040+1050
+uid 997）是 RemainingAfterExit boot oneshot：上游事件（ONT 重启、租约巡检等）
+把规则/表默认路由吐掉后无人补，uid 996 的 eth agent 会**静默回落 wifi（电信）
+出口**——唯一可见症状是池侧 `expect_prefix` 校验的 identity mismatch。固化
+自愈（设备上已安装）：
+
+```
+/etc/systemd/system/opc2-policy-routes-keep.service   # oneshot：restart 两个 provision 单元
+/etc/systemd/system/opc2-policy-routes-keep.timer     # OnBootSec=2min + OnUnitActiveSec=10min
+systemctl enable --now opc2-policy-routes-keep.timer
+```
+
+restart 语义保证幂等（ExecStop 删规则/flush 410 → ExecStart `route
+replace` + `rule add`），实测无规则堆积。ONT（V173-50）重启或 P5 触发的 eth
+轮换之后，路由恢复窗口 ≤10min；enp12s0 租约由 systemd-networkd
+（`05-workbuddy-enp12s0-dhcp.network`）自动续，"dhclient 四步恢复"仅保留为
+历史应急路径（见下节）。首次 P5 真实轮换仍应人工盯一次全流程（P5 验收项）。
+
 ## Android + chroot（cc9：无 systemd，用 Magisk service.d）
 
 Android 设备没有 systemd，上面的 `install.sh` / `egress-agent@.service` 不适用。

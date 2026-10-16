@@ -99,12 +99,12 @@ type %USERPROFILE%\proxy_opencode\gateway_runtime.err.log
 ## 4. ubuntu-26 桶（= opc2 救援机）
 
 ```bash
-ssh -p 2222 opc2_uname@100.109.57.26        # 本次已验证密码认证；密钥认证需另行确认
+ssh -p 2222 opc2_uname@100.109.57.26        # 密码认证（2026-10-02/03）与默认密钥免密（2026-10-16）均实测可用
 ```
 
 | 项 | 值 |
 |---|---|
-| SSH | Tailscale `100.109.57.26:2222`，用户 `opc2_uname`；2026-10-02/03 已验证密码认证可用。不要在仓库记录密码；端口 22 不通 |
+| SSH | Tailscale `100.109.57.26:2222`，用户 `opc2_uname`；密码认证（2026-10-02/03）与默认密钥免密（2026-10-16）均实测可用。不要在仓库记录密码；端口 22 不通 |
 | 守护 | systemd `proxy_opencode.service`（`enabled` + `Restart=always`，开机自启） |
 | 网关目录 | `~/proxy_opencode`（桶部署） |
 | Hermes 模型链路 | `~/.hermes/config.yaml` 默认 `ds41f_cus` → `https://115.29.231.25:9443/v1`（IP 直连，见 §7）；CF 入口作备用。2026-10-03 one-shot 通过 |

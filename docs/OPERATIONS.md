@@ -61,6 +61,31 @@ counter 阈值实测为 63/64。诊断脚本存放于本机
 
 2026-10-05 已将 LB 池切换为两个 OPC2 不同公网出口 + CC9 + 小米平板5，共四桶。旧 `win10-local` / `owin10` 不在当前 LB 池；ECS 上保留变更前配置备份 `/opt/proxy_opencode/edge_lb.env.before-four-buckets-20261005`。四个新目标均通过 Bearer 桶间 key 的 `GET /v1/models`（HTTP 200），并已在 Hermes/负载均衡链路上完成真实 chat 检查。
 
+### 2.1 0.7.x 新栈部署与最近状态（2026-10-16 idx 全绿）
+
+- **ECS**：`/opt/zen-gw/src`（deploy 快照，非 git 树）`docker compose up -d
+  --build` 成功；宿主 `127.0.0.1:10010 → 容器 10002`，caddy `:10002` 反代
+  10010。healthz ok。`/data` 属主 uid 10002（eventlog 写失败自动禁用，权限
+  修复后必须重建容器）。
+- **出口桶（统一 IPv4 前缀，四桶全 healthy）**：opc2-wifi
+  `180.117.204.212`（ISP 已漂移，前缀响应更新为 `180.117.204.0/24`）、
+  opc2-eth `36.149.54.30`（移动有线，见下方事故修复）、cc9
+  `112.83.208.127`（联通改走 IPv4，前缀 `112.83.208.0/24`）、ecs
+  `115.29.231.25/32`。
+- **公网入口 smoke（Windows → https://115.29.231.25:10002）**：/v1/models 仅
+  公开别名；`/v1/models_cus?key=` 全免费裸 ID 目录（无 key → 401）；chat
+  别名 / 裸 ID 200；错 model 404 / 缺 model 400 / 错 key 401——全部符合
+  预期。
+- **opc2 有线腿事故（已修复）**：旧栈策略路由 provision 单元（991/uid 996、
+  410/uid 997）为 boot oneshot，规则与表默认路由被上游事件吐掉后 eth agent
+  回落 wifi 出口（180.117.204.212），被池身份校验连续拦截。修复：重跑两个
+  provision 单元（uid 996 出口恢复 36.149.54.30）+ 加装
+  `opc2-policy-routes-keep.timer`（开机 2min + 每 10min 幂等重放，覆盖 ONT
+  重启 / P5 eth 轮换后的恢复窗口 ≤10min）。eventlog `identity_mismatch`
+  于修复后终止，转为 `egress_ip_observed` 迁移事件。
+- 已知非问题：healthz 版本串仍显示 `0.7.0a1`（陈旧显示）；`llm.223722.xyz:10002`
+  域名入口未配置，IP 字面量入口可用。
+
 ## 3. 验证与常用操作
 
 ```bash

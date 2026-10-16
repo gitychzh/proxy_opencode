@@ -198,19 +198,22 @@ agent 代理 basic auth 双保险）。
 （600），**不进 repo**；`egress-agent status` 输出按构造脱敏。型号/拓扑
 （非密）记录在本表。
 
-**迁移项（opc2 ONT 定时重启 cron 清理，2026-10-16 复查）**：仓库内已确认
-**零代码残留**——`cron|crontab|schedule|定时重启|ont_reboot` 全仓 grep 仅命中
-文档与 dependabot 的无关词；该"每日 7 次定时重启"是 opc2 设备侧的 **crontab
-条目**，不在 repo。启用 `ZEN_EGRESS_ROTATION`（P5）前须手工停用，否则双重换 IP：
-
-```bash
-ssh opc2                      # 步骤见 docs/ACCESS.md §opc2
-crontab -l                    # 找到 ONT 重启条目（含 restart/reboot 之类字样）
-crontab -e                    # 删除该行保存（立即生效，无需重启服务）
-```
-
-停用后 P5 编排是唯一负责重启 ONT 的组件（阈值触发 / 硬 429 触发 /
+**迁移项（opc2 ONT 定时重启 cron 清理，2026-10-16 设备复核=闭环，无需动作）**：
+设备侧 opc2_uname / root 两份 crontab、`/etc/cron.d/*` 与全部 systemd timers
+均无 ONT 重启条目——该"每日 7 次"cron 已不存在，无需清理。P5 编排
+（`ZEN_EGRESS_ROTATION`）是唯一负责重启 ONT 的组件（阈值触发 / 硬 429 触发 /
 admin 手动触发，事件全落 `ZEN_EGRESS_EVENT_LOG`）。
+
+**opc2 有线腿策略路由自愈（2026-10-16 排障落地）**：旧栈 provision 单元
+`proxy_opencode-opc2b-route.service`（表 991 + rule 29991 uid 996）与
+`proxyopencode-wired-egress.service`（表 410 + rules 1040/1050 uid 997）为
+boot oneshot——上游事件（ONT 重启 / 租约巡检等）吐掉规则与表默认路由后
+无人补，uid 996 的 eth agent 会静默回落 wifi（电信）出口，仅靠池的
+`expect_prefix` 身份校验拦截（本日 65 条 `identity_mismatch` 后修复）。设备上
+已加装 `opc2-policy-routes-keep.timer`（开机 2min 起、此后每 10min restart
+两个 provision 单元幂等重放；实测 restart 前后 uidrange 996/997 规则各恰
+1 条、无堆积，uid 996 出口恢复 36.149.54.30 并与 `36.149.54.0/24` 匹配）。
+该 timer 覆盖 ONT 重启与 P5 eth 轮换后的恢复窗口（≤10min）。
 
 ## 7. 验收与退役判据
 
