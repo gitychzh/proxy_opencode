@@ -25,6 +25,24 @@
   用户拍板"只留电信/移动/联通三桶"),`ZEN_EGRESS_PROXIES` 删 ecs 行;
   `opc2-eth` 前缀放宽为 `36.149.54.0/24,223.68.27.0/24`。
 
+### Changed — P5 计数器接线修复 + 失败轮换冷却重试(2026-10-17)
+
+- **计数 bug(为什么 500 阈值从不触发)**:`pool.release()` 对成功请求
+  `if ok: …; return` 提前返回,跳过了 observer——`counters.record()` 只在
+  `on_release` 的 ok 分支里,于是全天 200 之下所有桶 count 恒为 0,阈值触发
+  形同虚设(实测快照 count=0 全桶)。修复:ok 路径也通知 observer
+  (`_notify_observer` 统一收口),部署后实测 count 开始累加。
+- **失败轮换冷却重试**:原设计一次轮换失败即把 `triggered` 锁到窗口结束
+  (2026-10-17 凌晨三桶全部中招:wifi/cc9 无 ONT 配置、eth 前缀误判)。
+  现在 `should_rotate_on_429` 在 `last_rotation_ok=False` 且
+  `ROTATION_RETRY_COOLDOWN_S=900s` 冷却经过后允许重试,防 ONT 连环重启。
+- **旧快照兼容**:升级前快照无 `last_rotation_epoch` 字段,重启后冷却失效;
+  load() 从 `last_rotation_at` 字符串解析回 epoch。
+- 光猫驱动现状:agent 仅有移动 Huawei 驱动(cmccdevicereset 四步,
+  eth 真机验证过);电信 HG8020C(agent 现场探测确认,wlx 源绑定可达,
+  同华为框架 GetRandCount/login.cgi 但凭据走手工 Cookie 头
+  `SubmitType=Login`)与联通烽火 HG6142A-C(须手机侧取证)待凭据 + 页面复刻。
+
 ### Changed — P5 硬 429 兜底补全:无 Retry-After 头也触发自动换 IP(2026-10-17)
 
 - **现场**:2026-10-16 深夜 opc2-wifi / opc2-eth / cc9 三桶先后被上游配额
