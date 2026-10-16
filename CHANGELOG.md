@@ -9,7 +9,7 @@
 
 ## [Unreleased]
 
-### Added — P3 免费模型目录 + 隐藏 /v1/models1 + 结构化出口事件日志（2026-10-16）
+### Added — P3 免费模型目录 + 隐藏 /v1/models_cus + 结构化出口事件日志（2026-10-16）
 
 - **免费模型发现 `egress/catalog.py`**：每 10 分钟拉
   `GET {zen}/models`（TTL 循环 + 失败 5 分钟退避 + 不可达时静态回退
@@ -24,7 +24,15 @@
   `.env` 的 `PUBLIC_MODELS` 覆盖一切：要兼容 hermes 旧名就在 env 里继续
   保留 `ds41f_cus`，独立于本默认值。相关测试/scripts/README/env.example
   同步改名。
-- **隐藏端点 `GET /v1/models1`**：展示全部免费模型裸 ID 的**唯一**路径，
+- **Changed — 模型 ID 严格校验（owner 指令 2026-10-16）**：`resolve` 不再
+  静默回落默认上游——未知 ID → 404 `model_not_found`（OpenAI 信封；
+  anthropic 路由用其原生信封，`error_style` 传参），缺失/空 model →
+  新增 `UnknownModelError`；`new_call` 捕获并抛 `GatewayHttpError` 由
+  app 级 handler 直接应答，不进适配器。严格仅作用于**客户端输入**
+  （resolve）；响应侧 `public_id` 对未知 echo 仍回别名（掩码语义不变，
+  不能因上游回显异常而 500/404）。测试：未知→404、缺失→400、
+  各协议适配 route 全覆盖（test_gateway_routes / test_registry_mask）。
+- **隐藏端点 `GET /v1/models_cus`**：展示全部免费模型裸 ID 的**唯一**路径，
   鉴权接受 Bearer 或 `?key=<网关或管理员 key>`（浏览器可直接打开；
   该 `?key=` 形式仅此端点支持，协议路由仍只认头字段）。带
   `metadata: {source, refreshed_at, stale}`；zen-direct 模式限定（其余
@@ -41,8 +49,8 @@
   `free_catalog_refreshed`、`window_rollover`（08:00 日窗归零）。
   事件仅含桶名/IP/计数/时间——不含消息内容与凭据；`logsetup` 白名单
   同步补齐 egress 侧结构化字段（此前 JSON 模式下多个 extra 被静默丢弃）。
-- **测试**：`tests/test_catalog_models1.py`（free 判定含标记优先级、
-  透进集合种子与降级回退、models1 三种鉴权形态 + 404 限定 +
+- **测试**：`tests/test_catalog_models_cus.py`（free 判定含标记优先级、
+  透进集合种子与降级回退、models_cus 三种鉴权形态 + 404 限定 +
   `/v1/models` 不漏免费 ID）、`tests/test_egress_eventlog.py`（事件
   时间线含 IP 前后对照、失败形态、尺寸轮转、I/O 故障降级）。
 

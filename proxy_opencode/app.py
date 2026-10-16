@@ -80,7 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.adapter = build_adapter(settings, pool=egress_pool)
     app.state.keystore = KeyStore(settings.key_store_path, settings.key_default_ttl_hours)
     app.state.registry = ModelRegistry(settings)
-    # P3: the hidden /v1/models1 endpoint's data source. Each refresh also
+    # P3: the hidden /v1/models_cus endpoint's data source. Each refresh also
     # seeds the registry's free-passthrough set, so chat accepts every free
     # id verbatim while /v1/models keeps serving only the masked alias.
     free_catalog: ZenFreeCatalog | None = None

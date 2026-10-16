@@ -83,7 +83,10 @@ async def test_no_rate_limit_burst():
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
-        body = {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "hi"}]}
+        body = {
+            "model": "deepseek-ai/deepseek-v4.1-flash",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
         # Genuinely concurrent: all five requests are in flight at once, so a
         # hidden burst counter would trip here and not with sequential calls.
         codes = await asyncio.gather(*[
@@ -102,7 +105,7 @@ async def test_chat_non_stream():
         resp = await client.post(
             "/v1/chat/completions",
             json={
-                "model": "opencode/big-pickle",
+                "model": "deepseek-ai/deepseek-v4.1-flash",
                 "messages": [{"role": "user", "content": "hi"}],
                 "reasoning_effort": "medium",
             },
@@ -118,6 +121,45 @@ async def test_chat_non_stream():
 
 
 @pytest.mark.asyncio
+async def test_unknown_model_rejected_404():
+    """Owner contract (2026-10-16): the model id must be exactly right —
+    unknown ids answer 404 model_not_found instead of silently serving
+    the default upstream."""
+    app, fake = make_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/v1/chat/completions",
+            json={"model": "totally-made-up-model",
+                  "messages": [{"role": "user", "content": "hi"}]},
+            headers=GW_HEADERS,
+        )
+    assert resp.status_code == 404
+    err = resp.json()["error"]
+    assert err["code"] == "model_not_found"
+    assert "totally-made-up-model" in err["message"]
+    assert "/v1/models_cus" in err["message"]
+    # Never reached the adapter.
+    assert fake.last_payload is None
+
+
+@pytest.mark.asyncio
+async def test_missing_model_rejected_400():
+    app, _ = make_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+            headers=GW_HEADERS,
+        )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "model_required"
+
+
+@pytest.mark.asyncio
 async def test_chat_synthetic_stream():
     app, _ = make_app()
     async with httpx.AsyncClient(
@@ -126,7 +168,7 @@ async def test_chat_synthetic_stream():
         resp = await client.post(
             "/v1/chat/completions",
             json={
-                "model": "opencode/big-pickle",
+                "model": "deepseek-ai/deepseek-v4.1-flash",
                 "messages": [{"role": "user", "content": "hi"}],
                 "stream": True,
             },
@@ -171,7 +213,7 @@ async def test_payload_dump_disabled_by_default(tmp_path):
     ) as client:
         await client.post(
             "/v1/chat/completions",
-            json={"model": "opencode/big-pickle",
+            json={"model": "deepseek-ai/deepseek-v4.1-flash",
                   "messages": [{"role": "user", "content": "hi"}]},
             headers=GW_HEADERS,
         )
@@ -187,7 +229,7 @@ async def test_payload_dump_writes_raw_body(tmp_path):
         await client.post(
             "/v1/chat/completions",
             json={
-                "model": "opencode/big-pickle",
+                "model": "deepseek-ai/deepseek-v4.1-flash",
                 "messages": [{"role": "user", "content": "hi"}],
                 "metadata": {"junk": "stripped-later-by-whitelist"},
             },
@@ -209,17 +251,18 @@ async def test_payload_dump_covers_all_three_protocols(tmp_path):
     ) as client:
         await client.post(
             "/v1/chat/completions",
-            json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": "deepseek-ai/deepseek-v4.1-flash",
+                  "messages": [{"role": "user", "content": "hi"}]},
             headers=GW_HEADERS,
         )
         await client.post(
             "/v1/responses",
-            json={"model": "m", "input": "hi"},
+            json={"model": "deepseek-ai/deepseek-v4.1-flash", "input": "hi"},
             headers=GW_HEADERS,
         )
         await client.post(
             "/v1/messages",
-            json={"model": "m", "max_tokens": 16,
+            json={"model": "deepseek-ai/deepseek-v4.1-flash", "max_tokens": 16,
                   "messages": [{"role": "user", "content": "hi"}]},
             headers=GW_HEADERS,
         )

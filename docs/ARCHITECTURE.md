@@ -167,7 +167,7 @@ agent 代理 basic auth 双保险）。
   （`allowAnonymous`/`cost`/`pricing`；缺标记时按 `-free` 后缀 + `big-pickle`）
   过滤免费模型，喂给 registry 的透传集合——聊天接口对这些裸 ID 原样放行、
   响应原样回显。
-- **`/v1/models1`（隐藏端点）**：唯一展示全部免费模型裸 ID 的地方；鉴权接受
+- **`/v1/models_cus`（隐藏端点）**：唯一展示全部免费模型裸 ID 的地方；鉴权接受
   Bearer 或 `?key=`（浏览器直接打开）。**标准 `/v1/models` 保持只列公开
   别名**，不要再造 models/model 等普通变体端点（防被模型扫描 agent 捕获）。
 

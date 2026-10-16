@@ -108,7 +108,8 @@ async def test_dynamic_key_can_chat(tmp_path):
     ) as client:
         resp = await client.post(
             "/v1/chat/completions",
-            json={"model": "ds41f_cus", "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": "deepseek-ai/deepseek-v4.1-flash",
+                  "messages": [{"role": "user", "content": "hi"}]},
             headers={"Authorization": f"Bearer {rec.key}"},
         )
     assert resp.status_code == 200
@@ -126,7 +127,8 @@ async def test_expired_key_rejected_401(tmp_path):
     ) as client:
         resp = await client.post(
             "/v1/chat/completions",
-            json={"model": "ds41f_cus", "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": "deepseek-ai/deepseek-v4.1-flash",
+                  "messages": [{"role": "user", "content": "hi"}]},
             headers={"Authorization": f"Bearer {rec.key}"},
         )
     assert resp.status_code == 401
@@ -154,7 +156,8 @@ async def test_admin_key_is_permanent_and_can_chat(tmp_path):
     ) as client:
         resp = await client.post(
             "/v1/chat/completions",
-            json={"model": "ds41f_cus", "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": "deepseek-ai/deepseek-v4.1-flash",
+                  "messages": [{"role": "user", "content": "hi"}]},
             headers=ADMIN_HEADERS,
         )
     assert resp.status_code == 200
@@ -180,7 +183,8 @@ async def test_admin_create_list_revoke(tmp_path):
         # Minted key works for chat.
         r2 = await client.post(
             "/v1/chat/completions",
-            json={"model": "ds41f_cus", "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": "deepseek-ai/deepseek-v4.1-flash",
+                  "messages": [{"role": "user", "content": "hi"}]},
             headers={"Authorization": f"Bearer {created['key']}"},
         )
         assert r2.status_code == 200
@@ -197,7 +201,8 @@ async def test_admin_create_list_revoke(tmp_path):
         assert r4.status_code == 200
         r5 = await client.post(
             "/v1/chat/completions",
-            json={"model": "ds41f_cus", "messages": [{"role": "user", "content": "hi"}]},
+            json={"model": "deepseek-ai/deepseek-v4.1-flash",
+                  "messages": [{"role": "user", "content": "hi"}]},
             headers={"Authorization": f"Bearer {created['key']}"},
         )
         assert r5.status_code == 401

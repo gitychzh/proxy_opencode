@@ -114,6 +114,7 @@ def make_router(
             settings,
             registry,
             log_message="anthropic messages completion",
+            error_style="anthropic",
         )
         adapter = request.app.state.adapter
         result = await dispatch(

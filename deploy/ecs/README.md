@@ -65,11 +65,11 @@ tail -f deploy/ecs/data/egress_events.jsonl
 大小轮转 5MB×2（同目录 `.1`/`.2`）。事件只含桶名/IP/计数/时间，无凭据与
 消息内容（红线）。
 
-**免费模型浏览（P3，/v1/models1）**：全部免费模型裸 ID 的唯一展示端点，
+**免费模型浏览（P3，/v1/models_cus）**：全部免费模型裸 ID 的唯一展示端点，
 浏览器直接打开（IP 入口需先信任自签 CA / 或用域名入口）：
 
 ```
-https://115.29.231.25:10002/v1/models1?key=<网关或管理员KEY>
+https://115.29.231.25:10002/v1/models_cus?key=<网关或管理员KEY>
 ```
 
 鉴权接受 `?key=` 或 Bearer；不要给该端点再造普通名字的别名（models/model

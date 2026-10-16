@@ -134,7 +134,12 @@ async def test_chat_unhandled_adapter_error_returns_500(caplog):
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
             resp = await client.post(
-                "/v1/chat/completions", json={}, headers={"Authorization": "Bearer gw-key"}
+                "/v1/chat/completions",
+                json={
+                    "model": "deepseek-ai/deepseek-v4.1-flash",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                headers={"Authorization": "Bearer gw-key"},
             )
     assert resp.status_code == 500
     assert resp.json()["error"]["type"] == "api_error"

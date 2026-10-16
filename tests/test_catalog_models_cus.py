@@ -1,11 +1,11 @@
-"""P3 catalog + hidden /v1/models1 endpoint + free-model passthrough.
+"""P3 catalog + hidden /v1/models_cus endpoint + free-model passthrough.
 
 Contract under test (owner requirement, 2026-10-16):
 * free ids are discovered from the live Zen catalogue (explicit markers
   when present, `-free` suffix / big-pickle otherwise);
 * they pass through chat VERBATIM (resolve + response echo), while the
   standard /v1/models keeps serving ONLY the masked public alias;
-* /v1/models1 is the ONLY path listing all free ids, accepts Bearer OR
+* /v1/models_cus is the ONLY path listing all free ids, accepts Bearer OR
   ``?key=`` (browser friendly), 401 without a key, 404 outside zen-direct.
 """
 
@@ -116,7 +116,7 @@ async def test_catalog_degraded_falls_back_to_static_list():
     assert metadata["refreshed_at"] is None
 
 
-# ---------------------------------------------------------- models1 endpoint
+# ---------------------------------------------------------- models_cus endpoint
 
 
 def make_app(tmp_path, mode: str = "zen-direct", **kw):
@@ -134,7 +134,7 @@ def make_app(tmp_path, mode: str = "zen-direct", **kw):
 
 
 @pytest.mark.asyncio
-async def test_models1_lists_all_free_ids_with_query_key(tmp_path):
+async def test_models_cus_lists_all_free_ids_with_query_key(tmp_path):
     app = make_app(tmp_path)
     with respx.mock:
         respx.get("https://opencode.ai/zen/v1/models").respond(json=MOCK_UPSTREAM)
@@ -142,7 +142,7 @@ async def test_models1_lists_all_free_ids_with_query_key(tmp_path):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
-            resp = await client.get("/v1/models1?key=gw-key")
+            resp = await client.get("/v1/models_cus?key=gw-key")
     assert resp.status_code == 200
     body = resp.json()
     ids = [m["id"] for m in body["data"]]
@@ -156,17 +156,17 @@ async def test_models1_lists_all_free_ids_with_query_key(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_models1_accepts_bearer_and_rejects_missing_key(tmp_path):
+async def test_models_cus_accepts_bearer_and_rejects_missing_key(tmp_path):
     app = make_app(tmp_path)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         ok = await client.get(
-            "/v1/models1", headers={"Authorization": "Bearer gw-key"}
+            "/v1/models_cus", headers={"Authorization": "Bearer gw-key"}
         )
-        denied = await client.get("/v1/models1")
-        bad = await client.get("/v1/models1?key=wrong-key")
-        admin = await client.get("/v1/models1?key=adm-key")
+        denied = await client.get("/v1/models_cus")
+        bad = await client.get("/v1/models_cus?key=wrong-key")
+        admin = await client.get("/v1/models_cus?key=adm-key")
     assert ok.status_code == 200
     assert denied.status_code == 401
     assert bad.status_code == 401
@@ -175,8 +175,8 @@ async def test_models1_accepts_bearer_and_rejects_missing_key(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_models1_hidden_and_not_in_models(tmp_path):
-    """Standard /v1/models must NOT enumerate free ids — models1 only."""
+async def test_models_cus_hidden_and_not_in_models(tmp_path):
+    """Standard /v1/models must NOT enumerate free ids — models_cus only."""
     app = make_app(tmp_path)
     with respx.mock:
         respx.get("https://opencode.ai/zen/v1/models").respond(json=MOCK_UPSTREAM)
@@ -194,10 +194,10 @@ async def test_models1_hidden_and_not_in_models(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_models1_404_outside_zen_direct(tmp_path):
+async def test_models_cus_404_outside_zen_direct(tmp_path):
     app = make_app(tmp_path, mode="opencode-serve", opencode_server_password="pw")
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
-        resp = await client.get("/v1/models1?key=gw-key")
+        resp = await client.get("/v1/models_cus?key=gw-key")
     assert resp.status_code == 404

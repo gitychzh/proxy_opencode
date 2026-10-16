@@ -26,8 +26,8 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from ..config import Settings
-from ..errors import openai_error
-from ..registry import ModelRegistry
+from ..errors import GatewayHttpError, openai_error
+from ..registry import ModelRegistry, UnknownModelError
 from ..upstreams.fields import filter_payload
 from ..upstreams.opencode_serve import ServeError, WaitTimeoutError
 
@@ -144,10 +144,21 @@ def new_call(
     registry: ModelRegistry,
     *,
     log_message: str = "chat completion",
+    error_style: str = "openai",
 ) -> ChatCall:
-    """Resolve the model alias, whitelist-filter and build the call context."""
+    """Resolve the model alias, whitelist-filter and build the call context.
+
+    Strict model validation (owner requirement): an id outside the public
+    alias + free-passthrough set fails here with a protocol-shaped 404
+    (`model_not_found`), a missing/empty id with a 400. Raises
+    `GatewayHttpError` so the app-level handler answers directly.
+    """
     requested = str(payload.get("model") or "")
-    payload["model"] = registry.resolve(requested)
+    try:
+        upstream = registry.resolve(requested)
+    except UnknownModelError as exc:
+        raise GatewayHttpError(_model_error_response(requested, error_style)) from exc
+    payload["model"] = upstream
     public_model = registry.public_id(requested)
     payload = filter_payload(payload, settings.reasoning_passthrough)
     return ChatCall(
@@ -158,6 +169,38 @@ def new_call(
         client=request.client.host if request.client else "-",
         started=time.perf_counter(),
         log_message=log_message,
+    )
+
+
+def _model_error_response(requested: str, error_style: str) -> JSONResponse:
+    """404/400 for an invalid model id in the protocol's own envelope."""
+
+    if not requested.strip():
+        message = (
+            "Request must include a 'model' id the gateway serves: the "
+            "public alias from /v1/models or a free id from /v1/models_cus."
+        )
+        if error_style == "anthropic":
+            return anthropic_style_error(400, "invalid_request_error", message)
+        return openai_error(400, message, "invalid_request_error", "model_required")
+    message = (
+        f"The model '{requested}' does not exist on this gateway; use the "
+        "public alias from /v1/models or a free id from /v1/models_cus."
+    )
+    if error_style == "anthropic":
+        return anthropic_style_error(404, "invalid_request_error", message)
+    return openai_error(404, message, "invalid_request_error", "model_not_found")
+
+
+def anthropic_style_error(status: int, err_type: str, message: str) -> JSONResponse:
+    """Anthropic error envelope (same shape as routes.anthropic_api).
+
+    Inlined here to keep the import graph routes -> pipeline one-way.
+    """
+
+    return JSONResponse(
+        status_code=status,
+        content={"type": "error", "error": {"type": err_type, "message": message}},
     )
 
 

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from proxy_opencode.config import Settings
-from proxy_opencode.registry import ModelRegistry
+from proxy_opencode.registry import ModelRegistry, UnknownModelError
 from proxy_opencode.sse_mask import (
     mask_json_model,
     mask_model_field,
@@ -38,10 +40,14 @@ def test_resolve_maps_any_requested_model_to_upstream():
     # the historical "opencode/…" spelling is no longer a valid upstream id.
     assert reg.resolve(ALIAS) == "big-pickle"
     assert reg.resolve("big-pickle") == "big-pickle"
-    # Unknown ids resolve transparently to the default upstream.
-    assert reg.resolve("gpt-4o") == "big-pickle"
-    assert reg.resolve("") == "big-pickle"
-    assert reg.resolve(None) == "big-pickle"
+    # STRICT (owner 2026-10-16): unknown ids are rejected, not silently
+    # resolved to the default upstream.
+    with pytest.raises(UnknownModelError):
+        reg.resolve("gpt-4o")
+    with pytest.raises(UnknownModelError):
+        reg.resolve("")
+    with pytest.raises(UnknownModelError):
+        reg.resolve(None)
 
 
 def test_public_id_masks_every_upstream_echo():
@@ -53,7 +59,7 @@ def test_public_id_masks_every_upstream_echo():
 
 
 def test_free_passthrough_echoes_verbatim():
-    """P3: ids served by /v1/models1 round-trip unchanged — masking keeps
+    """P3: ids served by /v1/models_cus round-trip unchanged — masking keeps
     rewriting everything else (the alias, unknown echoes)."""
     reg = make_registry()
     reg.set_free_ids(["space-bunny-free", "cat-jam-free", "big-pickle"])
@@ -63,15 +69,17 @@ def test_free_passthrough_echoes_verbatim():
     # Entries still win over the free set (the alias stays masked).
     assert reg.resolve(ALIAS) == "big-pickle"
     assert reg.public_id("big-pickle") == ALIAS
-    # Unknown non-free ids still fall back to the default upstream.
-    assert reg.resolve("claude-opus-5") == "big-pickle"
+    # Unknown non-free ids are rejected under the strict contract.
+    with pytest.raises(UnknownModelError):
+        reg.resolve("claude-opus-5")
 
 
 def test_set_free_ids_ignores_blank_entries():
     reg = make_registry()
     reg.set_free_ids(["a-free", "", "  "])
     assert reg.resolve("a-free") == "a-free"
-    assert reg.resolve("") == "big-pickle"
+    with pytest.raises(UnknownModelError):
+        reg.resolve("")
 
 
 def test_mask_off_is_passthrough():

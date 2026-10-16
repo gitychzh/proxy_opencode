@@ -8,7 +8,7 @@ experience contract for this gateway is:
   stays masked in the standard ``/v1/models`` response — scanners of that
   standard path must not enumerate the real upstream ids;
 * every OTHER free model passes through verbatim: the full free-id list
-  is served ONLY by the hidden ``/v1/models1`` endpoint (the trailing "1"
+  is served ONLY by the hidden ``/v1/models_cus`` endpoint (the ``_cus``
   is the contract — do not add stray variants of the path, the point is
   that model-scanning agents probing standard paths find nothing).
 
@@ -170,7 +170,7 @@ class ZenFreeCatalog:
         ).isoformat(timespec="seconds")
 
     def body(self) -> dict[str, Any]:
-        """OpenAI-shaped list body for the hidden /v1/models1 endpoint."""
+        """OpenAI-shaped list body for the hidden /v1/models_cus endpoint."""
 
         ids = self.ids()
         return {

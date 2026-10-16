@@ -6,7 +6,7 @@ model field is rewritten back to the public id — so the upstream model name
 never leaks through the *masked* paths.
 
 Exception — free-model passthrough (P3): the full free-model list is served
-only by the hidden ``/v1/models1`` endpoint, and a client that deliberately
+only by the hidden ``/v1/models_cus`` endpoint, and a client that deliberately
 names a free upstream id (learned there) gets it passed through verbatim,
 including the echoed ``model`` field. Masking still applies to everything
 else, so scanning agents on the standard paths can never enumerate upstream
@@ -18,6 +18,20 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from .config import Settings
+
+
+class UnknownModelError(Exception):
+    """Client-supplied model id outside the alias + free-passthrough set.
+
+    Owner requirement (2026-10-16): the model id must be exactly right —
+    unknown ids are rejected (404) instead of silently resolving to the
+    default upstream. Response-side masking (`public_id`) is NOT strict:
+    unknown upstream echoes must still be masked, not failed.
+    """
+
+    def __init__(self, requested: Any) -> None:
+        self.requested = requested
+        super().__init__(str(requested or "<missing model>"))
 
 
 class ModelRegistry:
@@ -75,10 +89,11 @@ class ModelRegistry:
     def resolve(self, requested: Any) -> str:
         """Any client-requested model id -> the upstream model to call.
 
-        Public alias entries win (masking), then the free-model passthrough
-        set (verbatim ids served via /v1/models1), and unknown ids fall
-        back to the default public model's upstream: the gateway always
-        serves something instead of 404-ing on a stale catalog.
+        STRICT (owner requirement): the id must be one of the public
+        alias entries or the free-passthrough set (ids served  by
+        /v1/models_cus); anything else raises `UnknownModelError` so the
+        pipeline can answer 404 instead of silently serving the default
+        model for a typo'd request.
         """
         if not self.enabled:
             return str(requested or "")
@@ -88,7 +103,7 @@ class ModelRegistry:
                 return e["upstream"]
         if raw in self._free_ids:
             return raw
-        return self.default_upstream
+        raise UnknownModelError(raw)
 
     def public_id(self, model: Any) -> str:
         """Any upstream/echoed model id -> the public id shown to users.

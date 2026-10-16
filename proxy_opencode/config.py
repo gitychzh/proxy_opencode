@@ -33,7 +33,7 @@ DEFAULT_ZEN_MODELS = ("big-pickle",)
 DEFAULT_PUBLIC_MODELS = (
     # 2026-10-16: the alias says what the model is (big-pickle IS DeepSeek
     # V4.1 Flash upstream). The full free-model list lives in the hidden
-    # /v1/models1 endpoint; the standard /v1/models must stay masked.
+    # /v1/models_cus endpoint; the standard /v1/models must stay masked.
     "deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle",
 )
 

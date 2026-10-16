@@ -23,12 +23,12 @@ def make_router(
     auth = build_auth_dependency(settings, keystore)
     router = APIRouter()
 
-    async def _models1_key(request: Request) -> str:
-        """models1 auth: Bearer header OR ``?key=`` (browser friendly).
+    async def _models_cus_key(request: Request) -> str:
+        """models_cus auth: Bearer header OR ``?key=`` (browser friendly).
 
         A browser paste cannot set an Authorization header, so the hidden
         catalog accepts the gateway/admin key via the ``key`` query param
-        as well. This dependency is models1-only on purpose — the main
+        as well. This dependency is models_cus-only on purpose — the main
         protocol routes must stay header-only (keys never land in URLs
         there, and proxies log full URLs).
         """
@@ -49,23 +49,23 @@ def make_router(
         return token
 
     @router.get(
-        "/v1/models1",
+        "/v1/models_cus",
         response_model=None,
         include_in_schema=False,
     )
-    async def list_models1(request: Request, _k: str = Depends(_models1_key)) -> Any:
+    async def list_models_cus(request: Request, _k: str = Depends(_models_cus_key)) -> Any:
         """Hidden full free-model catalog (P3).
 
-        Deliberately NOT under /v1/models, /v1/model or any standard
-        spelling: the standard path must keep serving only the masked
-        public alias so model-scanning agents find nothing. The trailing
-        "1" IS the contract — never alias it to something normal.
+        Deliberately NOT under /v1/models or any standard spelling: the
+        standard path must keep serving only the masked public alias so
+        model-scanning agents find nothing. The ``_cus`` suffix IS the
+        contract — never alias it to a standard-looking name.
         """
 
         catalog = getattr(request.app.state, "free_catalog", None)
         if catalog is None:
             return openai_error(
-                404, "models1 catalog is available only in zen-direct mode."
+                404, "models_cus catalog is available only in zen-direct mode."
             )
         return catalog.body()
 
