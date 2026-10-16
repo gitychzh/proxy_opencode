@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from .. import __version__
 from ..auth import build_auth_dependency
+from ..auth.core import _bearer_token, _reject, classify_key
 from ..auth.keystore import KeyStore
 from ..config import Settings
 from ..errors import openai_error
@@ -21,6 +22,52 @@ def make_router(
 ) -> APIRouter:
     auth = build_auth_dependency(settings, keystore)
     router = APIRouter()
+
+    async def _models1_key(request: Request) -> str:
+        """models1 auth: Bearer header OR ``?key=`` (browser friendly).
+
+        A browser paste cannot set an Authorization header, so the hidden
+        catalog accepts the gateway/admin key via the ``key`` query param
+        as well. This dependency is models1-only on purpose — the main
+        protocol routes must stay header-only (keys never land in URLs
+        there, and proxies log full URLs).
+        """
+
+        if settings.dev_open:
+            return (
+                _bearer_token(request)
+                or request.query_params.get("key", "").strip()
+                or "dev-open"
+            )
+        token = (
+            _bearer_token(request)
+            or request.query_params.get("key", "").strip()
+        )
+        _, valid = classify_key(token, settings, keystore)
+        if not valid:
+            raise _reject("invalid_key", request)
+        return token
+
+    @router.get(
+        "/v1/models1",
+        response_model=None,
+        include_in_schema=False,
+    )
+    async def list_models1(request: Request, _k: str = Depends(_models1_key)) -> Any:
+        """Hidden full free-model catalog (P3).
+
+        Deliberately NOT under /v1/models, /v1/model or any standard
+        spelling: the standard path must keep serving only the masked
+        public alias so model-scanning agents find nothing. The trailing
+        "1" IS the contract — never alias it to something normal.
+        """
+
+        catalog = getattr(request.app.state, "free_catalog", None)
+        if catalog is None:
+            return openai_error(
+                404, "models1 catalog is available only in zen-direct mode."
+            )
+        return catalog.body()
 
     @router.get("/healthz")
     async def healthz(request: Request) -> dict[str, Any]:

@@ -44,7 +44,7 @@ import httpx
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UPSTREAM_MODEL = "big-pickle"               # what the mock echoes as "model"
 LEAKED_DISPLAY_NAME = "Space Bunny"          # what the mock smuggles in delta.name
-PUBLIC_MODEL = "ds41f_cus"                   # what clients must see
+PUBLIC_MODEL = "deepseek-ai/deepseek-v4.1-flash"  # what clients must see
 
 GATEWAY_KEY = "e2e-gateway-key"
 ADMIN_KEY = "e2e-admin-key"

@@ -9,6 +9,50 @@
 
 ## [Unreleased]
 
+### Added — P3 免费模型目录 + 隐藏 /v1/models1 + 结构化出口事件日志（2026-10-16）
+
+- **免费模型发现 `egress/catalog.py`**：每 10 分钟拉
+  `GET {zen}/models`（TTL 循环 + 失败 5 分钟退避 + 不可达时静态回退
+  `OPENCODE_ZEN_MODELS`），按上游显式标记（`allowAnonymous` / `cost` /
+  `pricing` 全零）过滤，缺失标记时按上游命名约定 `-free` 后缀 + `big-pickle`；
+  实测 2026-10-16 匿名目录即此形态（`space-bunny-free`、
+  `deepseek-v4.1-flash-free` 等）。每次刷新把免费裸 ID 喂给 registry 的
+  **透传集合**：聊天接口对这些 ID 原样放行、响应 `model` 原样回显
+  （`registry.resolve/public_id` 先查别名、再查免费集合、最后回落默认上游）。
+- **默认公开别名改为 `deepseek-ai/deepseek-v4.1-flash` → `big-pickle`**
+  （`DEFAULT_PUBLIC_MODELS`；big-pickle 即 DeepSeek V4.1 Flash）。生产
+  `.env` 的 `PUBLIC_MODELS` 覆盖一切：要兼容 hermes 旧名就在 env 里继续
+  保留 `ds41f_cus`，独立于本默认值。相关测试/scripts/README/env.example
+  同步改名。
+- **隐藏端点 `GET /v1/models1`**：展示全部免费模型裸 ID 的**唯一**路径，
+  鉴权接受 Bearer 或 `?key=<网关或管理员 key>`（浏览器可直接打开；
+  该 `?key=` 形式仅此端点支持，协议路由仍只认头字段）。带
+  `metadata: {source, refreshed_at, stale}`；zen-direct 模式限定（其余
+  模式 404）；OpenAPI schema 隐藏。**标准 `/v1/models` 保持只列公开
+  别名**——禁止再造 models/model 等普通变体端点（防扫描 agent 捕获），
+  测试锁定该契约。
+- **事件日志 `egress/eventlog.py`**（`ZEN_EGRESS_EVENT_LOG`，如
+  `/data/egress_events.jsonl`）：一行一 JSON 事件、UTC 时间戳、确定性
+  尺寸轮转（5MB × 保留 2 份）、写失败自动禁用不抛异常。全链路事件齐备：
+  `rotation_requested/started/succeeded/failed/cancelled`（含前后 IP、
+  触发原因、耗时）、`rotation_applied`/`egress_ip_observed`（探测到的
+  IP 变化，前后对照）、`cordon`（429 配额 / 连续失败）、
+  `egress_recovered`、`identity_mismatch`、`request_on_cordoned_bucket`、
+  `free_catalog_refreshed`、`window_rollover`（08:00 日窗归零）。
+  事件仅含桶名/IP/计数/时间——不含消息内容与凭据；`logsetup` 白名单
+  同步补齐 egress 侧结构化字段（此前 JSON 模式下多个 extra 被静默丢弃）。
+- **测试**：`tests/test_catalog_models1.py`（free 判定含标记优先级、
+  透进集合种子与降级回退、models1 三种鉴权形态 + 404 限定 +
+  `/v1/models` 不漏免费 ID）、`tests/test_egress_eventlog.py`（事件
+  时间线含 IP 前后对照、失败形态、尺寸轮转、I/O 故障降级）。
+
+### Not-a-code-change — "每日 7 次定时重启" cron 排查结论（2026-10-16）
+
+- 全仓 grep（`cron|crontab|schedule|定时重启|ont_reboot`）：**无任何
+  定时重启代码存在**——它是 opc2 设备侧 crontab 条目，非仓库代码，无需
+  删除文件。停用只需设备上 `crontab -e` 删掉 ONT 重启行（命令序列记录于
+  `docs/ARCHITECTURE.md` §6 迁移项）；启用 P5 前必须停用（双重换 IP）。
+
 ### Added — P5 自动换 IP：日窗计数 + ONT 重启编排（ECS 侧，2026-10-16）
 
 - **计数器 `egress/counters.py`**：每桶日窗 `[08:00, 08:00+1d)` Asia/Shanghai

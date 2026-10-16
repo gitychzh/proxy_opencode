@@ -88,7 +88,7 @@ def test_empty_assistant_turn_is_dropped():
     which the chat upstream rejects with HTTP 400."""
     payload = to_chat_payload(
         {
-            "model": "ds41f_cus",
+            "model": "deepseek-ai/deepseek-v4.1-flash",
             "max_tokens": 64,
             "messages": [
                 {"role": "user", "content": "hi"},
@@ -115,10 +115,10 @@ def test_chat_to_anthropic_body_text():
         "choices": [{"message": {"content": "pong"}, "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 3, "completion_tokens": 2},
     }
-    out = chat_to_anthropic_body(chat, "ds41f_cus")
+    out = chat_to_anthropic_body(chat, "deepseek-ai/deepseek-v4.1-flash")
     assert out["type"] == "message"
     assert out["role"] == "assistant"
-    assert out["model"] == "ds41f_cus"
+    assert out["model"] == "deepseek-ai/deepseek-v4.1-flash"
     assert out["content"] == [{"type": "text", "text": "pong"}]
     assert out["stop_reason"] == "end_turn"
     assert out["usage"] == {"input_tokens": 3, "output_tokens": 2}
@@ -142,7 +142,7 @@ def test_chat_to_anthropic_body_tool_use():
             }
         ]
     }
-    out = chat_to_anthropic_body(chat, "ds41f_cus")
+    out = chat_to_anthropic_body(chat, "deepseek-ai/deepseek-v4.1-flash")
     assert out["stop_reason"] == "tool_use"
     tool = out["content"][0]
     assert tool["type"] == "tool_use"
@@ -167,7 +167,7 @@ async def _collect_events(chunks: list[bytes]) -> list[tuple[str, dict]]:
 
     events = []
     buffer = b""
-    async for piece in stream_anthropic_events(gen(), "ds41f_cus"):
+    async for piece in stream_anthropic_events(gen(), "deepseek-ai/deepseek-v4.1-flash"):
         buffer += piece
         while b"\n\n" in buffer:
             block, buffer = buffer.split(b"\n\n", 1)
@@ -419,7 +419,7 @@ async def test_messages_endpoint_non_stream_and_x_api_key(tmp_path):
         resp = await client.post(
             "/v1/messages",
             json={
-                "model": "ds41f_cus",
+                "model": "deepseek-ai/deepseek-v4.1-flash",
                 "max_tokens": 64,
                 "messages": [{"role": "user", "content": "hello"}],
             },
@@ -428,7 +428,7 @@ async def test_messages_endpoint_non_stream_and_x_api_key(tmp_path):
         assert resp.status_code == 200
         body = resp.json()
         assert body["type"] == "message"
-        assert body["model"] == "ds41f_cus"
+        assert body["model"] == "deepseek-ai/deepseek-v4.1-flash"
         text_block = next(b for b in body["content"] if b["type"] == "text")
         assert text_block["text"] == "pong"
 
@@ -468,7 +468,7 @@ async def test_serve_completion_is_logged_exactly_once(tmp_path, caplog):
         ) as client:
             resp = await client.post(
                 "/v1/messages",
-                json={"model": "ds41f_cus", "max_tokens": 32,
+                json={"model": "deepseek-ai/deepseek-v4.1-flash", "max_tokens": 32,
                       "messages": [{"role": "user", "content": "hi"}]},
                 headers={"x-api-key": "gw-key"},
             )

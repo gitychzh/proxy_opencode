@@ -20,12 +20,15 @@ def make_registry(**kw) -> ModelRegistry:
 # ---------------------------------------------------------------- registry
 
 
+ALIAS = "deepseek-ai/deepseek-v4.1-flash"
+
+
 def test_default_catalogue_has_single_public_model():
     reg = make_registry()
     assert reg.enabled
     cat = reg.catalog()
     ids = [m["id"] for m in cat["data"]]
-    assert ids == ["ds41f_cus"]
+    assert ids == [ALIAS]
     assert cat["data"][0]["display_name"] == "DeepSeek V4.1 Flash"
 
 
@@ -33,7 +36,7 @@ def test_resolve_maps_any_requested_model_to_upstream():
     reg = make_registry()
     # 2026-10-02: the live zen catalogue switched to bare ids ("big-pickle");
     # the historical "opencode/…" spelling is no longer a valid upstream id.
-    assert reg.resolve("ds41f_cus") == "big-pickle"
+    assert reg.resolve(ALIAS) == "big-pickle"
     assert reg.resolve("big-pickle") == "big-pickle"
     # Unknown ids resolve transparently to the default upstream.
     assert reg.resolve("gpt-4o") == "big-pickle"
@@ -43,10 +46,32 @@ def test_resolve_maps_any_requested_model_to_upstream():
 
 def test_public_id_masks_every_upstream_echo():
     reg = make_registry()
-    assert reg.public_id("big-pickle") == "ds41f_cus"
-    assert reg.public_id("opencode/big-pickle") == "ds41f_cus"
-    assert reg.public_id("whatever-upstream-echoes") == "ds41f_cus"
-    assert reg.public_id("ds41f_cus") == "ds41f_cus"
+    assert reg.public_id("big-pickle") == ALIAS
+    assert reg.public_id("opencode/big-pickle") == ALIAS
+    assert reg.public_id("whatever-upstream-echoes") == ALIAS
+    assert reg.public_id(ALIAS) == ALIAS
+
+
+def test_free_passthrough_echoes_verbatim():
+    """P3: ids served by /v1/models1 round-trip unchanged — masking keeps
+    rewriting everything else (the alias, unknown echoes)."""
+    reg = make_registry()
+    reg.set_free_ids(["space-bunny-free", "cat-jam-free", "big-pickle"])
+    assert reg.resolve("space-bunny-free") == "space-bunny-free"
+    assert reg.resolve(" cat-jam-free ") == "cat-jam-free"
+    assert reg.public_id("space-bunny-free") == "space-bunny-free"
+    # Entries still win over the free set (the alias stays masked).
+    assert reg.resolve(ALIAS) == "big-pickle"
+    assert reg.public_id("big-pickle") == ALIAS
+    # Unknown non-free ids still fall back to the default upstream.
+    assert reg.resolve("claude-opus-5") == "big-pickle"
+
+
+def test_set_free_ids_ignores_blank_entries():
+    reg = make_registry()
+    reg.set_free_ids(["a-free", "", "  "])
+    assert reg.resolve("a-free") == "a-free"
+    assert reg.resolve("") == "big-pickle"
 
 
 def test_mask_off_is_passthrough():

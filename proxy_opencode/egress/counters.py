@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from .eventlog import EVENTS
 from .pool import next_window_reset, window_tz
 
 logger = logging.getLogger("proxy_opencode.egress.counters")
@@ -291,6 +292,13 @@ class EgressCounters:
             # Daily rollover at 08:00: every counter restarts from zero.
             # The burst cannot span the reset (it is metered per-IP and the
             # upstream resets its own counters at UTC 00:00 anyway).
+            EVENTS.emit(
+                "window_rollover",
+                egress=name,
+                ended_window=rec.window_start,
+                final_count=rec.count,
+                rotations=rec.rotations,
+            )
             rec.window_start = win
             rec.count = 0
             rec.triggered = False

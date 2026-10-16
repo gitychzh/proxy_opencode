@@ -22,7 +22,7 @@ def test_instructions_and_string_input():
         {
             "instructions": "be brief",
             "input": "hello",
-            "model": "ds41f_cus",
+            "model": "deepseek-ai/deepseek-v4.1-flash",
         }
     )
     assert payload["messages"] == [
@@ -93,9 +93,9 @@ def test_chat_to_responses_body_text():
         ],
         "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
     }
-    out = chat_to_responses_body(chat, "ds41f_cus")
+    out = chat_to_responses_body(chat, "deepseek-ai/deepseek-v4.1-flash")
     assert out["object"] == "response"
-    assert out["model"] == "ds41f_cus"
+    assert out["model"] == "deepseek-ai/deepseek-v4.1-flash"
     assert out["status"] == "completed"
     assert out["output"][-1]["type"] == "message"
     assert out["output"][-1]["content"][0]["text"] == "pong"
@@ -123,7 +123,7 @@ def test_chat_to_responses_body_tool_calls():
             }
         ],
     }
-    out = chat_to_responses_body(chat, "ds41f_cus")
+    out = chat_to_responses_body(chat, "deepseek-ai/deepseek-v4.1-flash")
     fn = [o for o in out["output"] if o["type"] == "function_call"][0]
     assert fn["call_id"] == "call_9"
     assert fn["name"] == "f"
@@ -148,7 +148,7 @@ async def _collect_events(chunks: list[bytes]) -> list[tuple[str, dict]]:
 
     events = []
     buffer = b""
-    async for piece in stream_responses_events(gen(), "ds41f_cus"):
+    async for piece in stream_responses_events(gen(), "deepseek-ai/deepseek-v4.1-flash"):
         buffer += piece
         while b"\n\n" in buffer:
             block, buffer = buffer.split(b"\n\n", 1)
@@ -185,7 +185,7 @@ async def test_stream_event_sequence_text_only():
     assert names[-1] == "response.completed"
 
     completed = dict(events[-1][1])["response"]
-    assert completed["model"] == "ds41f_cus"
+    assert completed["model"] == "deepseek-ai/deepseek-v4.1-flash"
     assert completed["usage"]["output_tokens"] == 2
     text_item = [o for o in completed["output"] if o["type"] == "message"][0]
     assert text_item["content"][0]["text"] == "hello"
@@ -381,7 +381,7 @@ async def test_responses_endpoint_streams_masked_events(tmp_path):
     ) as client:
         resp = await client.post(
             "/v1/responses",
-            json={"model": "ds41f_cus", "input": "hello", "stream": True},
+            json={"model": "deepseek-ai/deepseek-v4.1-flash", "input": "hello", "stream": True},
             headers={"Authorization": "Bearer gw-key"},
         )
     assert resp.status_code == 200
@@ -412,13 +412,13 @@ async def test_responses_endpoint_non_stream(tmp_path):
     ) as client:
         resp = await client.post(
             "/v1/responses",
-            json={"model": "ds41f_cus", "input": "hello"},
+            json={"model": "deepseek-ai/deepseek-v4.1-flash", "input": "hello"},
             headers={"Authorization": "Bearer gw-key"},
         )
     assert resp.status_code == 200
     body = resp.json()
     assert body["object"] == "response"
-    assert body["model"] == "ds41f_cus"
+    assert body["model"] == "deepseek-ai/deepseek-v4.1-flash"
     assert body["output"][-1]["content"][0]["text"] == "pong"
 
 
@@ -447,7 +447,7 @@ async def test_serve_completion_is_logged_exactly_once(tmp_path, caplog):
         ) as client:
             resp = await client.post(
                 "/v1/responses",
-                json={"model": "ds41f_cus", "input": "hello"},
+                json={"model": "deepseek-ai/deepseek-v4.1-flash", "input": "hello"},
                 headers={"Authorization": "Bearer gw-key"},
             )
     assert resp.status_code == 200
@@ -463,7 +463,7 @@ def test_orphan_tool_message_degrades_to_user():
     relaying them verbatim made upstream 400 (invalid_request_error)."""
     payload = to_chat_payload(
         {
-            "model": "ds41f_cus",
+            "model": "deepseek-ai/deepseek-v4.1-flash",
             "input": [
                 {"type": "message", "role": "user", "content": "run ls"},
                 {"type": "message", "role": "tool", "content": "file1.txt"},
@@ -478,7 +478,7 @@ def test_orphan_tool_message_degrades_to_user():
 def test_tool_message_with_call_id_stays_tool():
     payload = to_chat_payload(
         {
-            "model": "ds41f_cus",
+            "model": "deepseek-ai/deepseek-v4.1-flash",
             "input": [
                 {"type": "function_call", "call_id": "call_9",
                  "name": "t", "arguments": "{}"},
@@ -499,7 +499,7 @@ def test_reasoning_only_input_never_yields_empty_messages():
     rejected the request outright."""
     payload = to_chat_payload(
         {
-            "model": "ds41f_cus",
+            "model": "deepseek-ai/deepseek-v4.1-flash",
             "input": [{"type": "reasoning", "summary": [{"text": "hmm"}]}],
         }
     )

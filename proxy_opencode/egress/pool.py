@@ -37,6 +37,8 @@ from typing import Protocol
 
 import httpx
 
+from .eventlog import EVENTS
+
 # The upstream's daily quota window resets at UTC 00:00 == 08:00 Asia/Shanghai.
 _WINDOW_TZ = timezone(timedelta(hours=8))
 # Public alias for the fixed-offset window timezone (shared with counters;
@@ -315,6 +317,11 @@ class EgressPool:
                 "no healthy egress; using cordoned bucket",
                 extra={"egress": state.spec.name, "reason": state.cordon_reason},
             )
+            EVENTS.emit(
+                "request_on_cordoned_bucket",
+                egress=state.spec.name,
+                cordon_reason=state.cordon_reason[:120],
+            )
         return Lease(state)
 
     # ------------------------------------------------------- rotation (P5)
@@ -364,6 +371,12 @@ class EgressPool:
             "egress rotation complete: new egress IP live",
             extra={"egress": name, "previous_ip": previous, "current_ip": ip},
         )
+        EVENTS.emit(
+            "rotation_applied",
+            egress=name,
+            ip_from=previous,
+            ip_to=ip,
+        )
         return True
 
     async def release(
@@ -399,12 +412,25 @@ class EgressPool:
                     else None,
                 },
             )
+            EVENTS.emit(
+                "cordon",
+                egress=state.spec.name,
+                cordon_reason="free_quota_exhausted",
+                retry_after_s=retry_after_s,
+                egress_ip=state.egress_ip,
+            )
         elif state.failures >= self._failure_threshold:
             state.cordoned_until = now + self._cordon_s
             state.cordon_reason = f"{state.failures} consecutive failures ({kind})"
             logger.warning(
                 "egress cordoned after repeated failures",
                 extra={"egress": state.spec.name, "reason": state.cordon_reason},
+            )
+            EVENTS.emit(
+                "cordon",
+                egress=state.spec.name,
+                cordon_reason=state.cordon_reason[:120],
+                egress_ip=state.egress_ip,
             )
         if self._observer is not None:
             try:
@@ -461,6 +487,16 @@ class EgressPool:
                         "current": ip,
                     },
                 )
+                # The probe loop is the IPs' source of truth: any change
+                # (rotation, ISP re-issuing, the eth leg flapping) lands
+                # here with the before/after pair for the audit trail.
+                EVENTS.emit(
+                    "egress_ip_observed",
+                    egress=state.spec.name,
+                    previous=state.egress_ip,
+                    current=ip,
+                    matches_prefix=state.spec.matches_prefix(ip),
+                )
             state.egress_ip = ip
             state.egress_ip_at = str(payload.get("egress_ip_at") or "")
         identity_ok = state.spec.matches_prefix(state.egress_ip)
@@ -476,10 +512,17 @@ class EgressPool:
                     "expect_prefix": state.spec.expect_prefix,
                 },
             )
+            EVENTS.emit(
+                "identity_mismatch",
+                egress=state.spec.name,
+                egress_ip=state.egress_ip,
+                expect_prefix=state.spec.expect_prefix,
+            )
         if state.healthy and state.failures > 0 and not state.cordoned(now):
             state.failures = 0
             state.cordon_reason = ""
             logger.info("egress recovered", extra={"egress": state.spec.name})
+            EVENTS.emit("egress_recovered", egress=state.spec.name)
 
     # ---------------------------------------------------------------- views
 

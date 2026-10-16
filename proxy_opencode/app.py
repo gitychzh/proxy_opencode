@@ -22,6 +22,8 @@ from fastapi.responses import JSONResponse
 from . import __version__
 from .auth.keystore import KeyStore
 from .config import Settings, load_settings
+from .egress.catalog import ZenFreeCatalog
+from .egress.eventlog import EVENTS
 from .egress.pool import EgressPool
 from .egress.rotate import EgressRotator
 from .errors import GatewayHttpError
@@ -38,6 +40,9 @@ logger = logging.getLogger("proxy_opencode")
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
+    # Structured egress event sink (JSONL on the ECS host): everything the
+    # egress layer emits afterwards lands in this one file. Empty = off.
+    EVENTS.configure(settings.zen_egress_event_log)
     # 0.7.x: when ZEN_EGRESS_PROXIES is configured, chat requests are routed
     # through per-bucket device agents. The pool starts in the lifespan (it
     # opens httpx clients and a probe task) so importing this module stays
@@ -51,6 +56,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        if free_catalog is not None:
+            await free_catalog.start()
         if egress_pool is not None:
             await egress_pool.start()
         try:
@@ -59,6 +66,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             aclose = getattr(app.state.adapter, "aclose", None)
             if aclose is not None:
                 await aclose()
+            if free_catalog is not None:
+                await free_catalog.aclose()
             if egress_rotator is not None:
                 await egress_rotator.aclose()
             if egress_pool is not None:
@@ -71,6 +80,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.adapter = build_adapter(settings, pool=egress_pool)
     app.state.keystore = KeyStore(settings.key_store_path, settings.key_default_ttl_hours)
     app.state.registry = ModelRegistry(settings)
+    # P3: the hidden /v1/models1 endpoint's data source. Each refresh also
+    # seeds the registry's free-passthrough set, so chat accepts every free
+    # id verbatim while /v1/models keeps serving only the masked alias.
+    free_catalog: ZenFreeCatalog | None = None
+    if settings.upstream_mode == "zen-direct":
+        free_catalog = ZenFreeCatalog(
+            settings.zen_base_url,
+            api_key=settings.zen_api_key,
+            registry=app.state.registry,
+            fallback_ids=settings.zen_models,
+        )
+    app.state.free_catalog = free_catalog
 
     if egress_pool is not None and settings.upstream_mode != "zen-direct":
         logger.warning(

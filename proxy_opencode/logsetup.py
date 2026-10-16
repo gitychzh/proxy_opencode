@@ -44,6 +44,26 @@ FIELDS = (
     "ttl_hours",
     "path",
     "shape",
+    # 0.7.x egress / P5 rotation observability
+    "egress",
+    "egresses",
+    "egress_ip",
+    "egress_ip_at",
+    "expect_prefix",
+    "previous",
+    "current",
+    "reset_at",
+    "retry_after_s",
+    "count",
+    "threshold",
+    "trigger",
+    "detail",
+    "ok",
+    "error",
+    "ip_from",
+    "ip_to",
+    "elapsed_s",
+    "cordon_reason",
 )
 
 _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"

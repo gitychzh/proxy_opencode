@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from .counters import EgressCounters
+from .eventlog import EVENTS
 from .pool import EgressPool, EgressSpec
 
 logger = logging.getLogger("proxy_opencode.egress.rotate")
@@ -171,6 +172,7 @@ class EgressRotator:
                 "rotation already running", extra={"egress": name, "trigger": trigger}
             )
             return None
+        EVENTS.emit("rotation_requested", egress=name, trigger=trigger)
         self._counters.note_rotation_started(name)
         self._pool.mark_rotating(name, True)
         self._tasks[name] = asyncio.get_running_loop().create_task(
@@ -196,6 +198,9 @@ class EgressRotator:
                     self._counters.note_rotation_result(
                         name, ok=False, detail="cancelled at gateway shutdown"
                     )
+                    EVENTS.emit(
+                        "rotation_cancelled", egress=name, detail="gateway shutdown"
+                    )
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.error(
                         "rotation task failed at shutdown",
@@ -214,6 +219,8 @@ class EgressRotator:
                 name=name, ok=False, trigger=trigger, detail="unknown egress"
             )
         started = time.monotonic()
+        state0 = state.egress_ip
+        EVENTS.emit("rotation_started", egress=name, trigger=trigger, ip_from=state0)
         outcome = await self._rotate_flow(state.spec, trigger)
         outcome.elapsed_s = time.monotonic() - started
         if outcome.ok:
@@ -221,6 +228,23 @@ class EgressRotator:
             # New IP = fresh quota bucket: restart the counter inside the
             # current window, so the *new* address gets its own threshold.
             self._counters.reset(name)
+            EVENTS.emit(
+                "rotation_succeeded",
+                egress=name,
+                trigger=trigger,
+                ip_from=outcome.ip_from or state0,
+                ip_to=outcome.ip_to,
+                elapsed_s=round(outcome.elapsed_s, 1),
+            )
+        else:
+            EVENTS.emit(
+                "rotation_failed",
+                egress=name,
+                trigger=trigger,
+                ip_from=outcome.ip_from or state0,
+                detail=outcome.detail[:200],
+                elapsed_s=round(outcome.elapsed_s, 1),
+            )
         self._counters.note_rotation_result(name, ok=outcome.ok, detail=outcome.detail)
         self._pool.mark_rotating(name, False)
         return outcome

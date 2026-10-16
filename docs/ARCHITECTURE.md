@@ -28,7 +28,8 @@ ECS ┌────────────────────────�
      │     │          least-inflight(rr) + cordon + /healthz 探测    │
      │     ├─ counters.py 日窗计数(08:00 CST 重置) ≥500 → 换 IP       │
      │     ├─ rotate.py   换 IP 编排（调 agent /rotate, 验 IP 变更） │
-     │     ├─ catalog.py  全部免费模型 + cusoc/ds41f_cus 别名        │
+     │     ├─ catalog.py  Zen 免费模型发现 + TTL 缓存 + 透传种子       │
+     │     ├─ eventlog.py 结构化事件日志（JSONL 落 /data）           │
      │     └─ updater.py  每日 02:00 看 opencode GitHub release      │
      └───────┬───────────┬───────────┬───────────┬──────────────────┘
         tailscale 100.x │           │           │
@@ -156,11 +157,19 @@ agent 代理 basic auth 双保险）。
   失败 → 502（真机表现：该桶 5 次请求 4 次 502）。**建 agent 配置时用 LF 源，
   并校验凭据长度**（`install.sh` 本身不写凭据，是手写步骤踩到的）。
 
-### 当前新栈公开目录（过渡态，2026-10-15）
+### 公开模型目录（2026-10-16 起，P3 catalog 首段已落地）
 
-新栈当前用 `PUBLIC_MODELS` 环境变量直接登记客户端可见名，尚未走 P3 的 catalog
-代码：`cus1/deepseek-V4.1-Flash` 与 `ds41f_cus`，二者都指向上游裸 ID `big-pickle`。
-P3（catalog 全免费模型）落地后改由代码统一管理，届时以 catalog 的默认值为准。
+- **别名**：默认 `deepseek-ai/deepseek-v4.1-flash` → 上游裸 ID `big-pickle`
+  （big-pickle 即 DeepSeek V4.1 Flash；此前过渡名 `ds41f_cus`/`cus1/deepseek-V4.1-Flash`
+  由 ECS `.env` 的 `PUBLIC_MODELS` 继续保留即可兼容 hermes 旧配置）。
+- **免费模型透传**：`egress/catalog.py` 每 10 分钟拉
+  `GET https://opencode.ai/zen/v1/models`，按上游自带标记
+  （`allowAnonymous`/`cost`/`pricing`；缺标记时按 `-free` 后缀 + `big-pickle`）
+  过滤免费模型，喂给 registry 的透传集合——聊天接口对这些裸 ID 原样放行、
+  响应原样回显。
+- **`/v1/models1`（隐藏端点）**：唯一展示全部免费模型裸 ID 的地方；鉴权接受
+  Bearer 或 `?key=`（浏览器直接打开）。**标准 `/v1/models` 保持只列公开
+  别名**，不要再造 models/model 等普通变体端点（防被模型扫描 agent 捕获）。
 
 ## 5. 关键决策记录（ADR 摘要）
 
@@ -189,8 +198,19 @@ P3（catalog 全免费模型）落地后改由代码统一管理，届时以 cat
 （600），**不进 repo**；`egress-agent status` 输出按构造脱敏。型号/拓扑
 （非密）记录在本表。
 
-**迁移项**：opc2 现有"ONT 每日 7 次定时重启"cron 在新换 IP 逻辑上线
-时停掉（P5），否则双重换 IP。
+**迁移项（opc2 ONT 定时重启 cron 清理，2026-10-16 复查）**：仓库内已确认
+**零代码残留**——`cron|crontab|schedule|定时重启|ont_reboot` 全仓 grep 仅命中
+文档与 dependabot 的无关词；该"每日 7 次定时重启"是 opc2 设备侧的 **crontab
+条目**，不在 repo。启用 `ZEN_EGRESS_ROTATION`（P5）前须手工停用，否则双重换 IP：
+
+```bash
+ssh opc2                      # 步骤见 docs/ACCESS.md §opc2
+crontab -l                    # 找到 ONT 重启条目（含 restart/reboot 之类字样）
+crontab -e                    # 删除该行保存（立即生效，无需重启服务）
+```
+
+停用后 P5 编排是唯一负责重启 ONT 的组件（阈值触发 / 硬 429 触发 /
+admin 手动触发，事件全落 `ZEN_EGRESS_EVENT_LOG`）。
 
 ## 7. 验收与退役判据
 

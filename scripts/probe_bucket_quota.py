@@ -74,7 +74,7 @@ def probe(bucket: str, base: str, admin_key: str) -> bool:
         st, body = _http("POST", f"{base}/v1/chat/completions",
                          headers={"Authorization": f"Bearer {key}"},
                          payload={
-                             "model": "ds41f_cus",
+                             "model": "deepseek-ai/deepseek-v4.1-flash",
                              "stream": False,
                              "max_tokens": MAX_TOKENS,
                              "messages": [{"role": "user", "content": PROBE_PROMPT}],

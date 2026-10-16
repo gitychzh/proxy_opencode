@@ -30,7 +30,12 @@ DEFAULT_ZEN_MODELS = ("big-pickle",)
 # The default upstream must stay in sync with the live zen catalogue
 # (GET https://opencode.ai/zen/v1/models) — see the 2026-10-02 drift note
 # in CHANGELOG.md.
-DEFAULT_PUBLIC_MODELS = ("ds41f_cus:DeepSeek V4.1 Flash:big-pickle",)
+DEFAULT_PUBLIC_MODELS = (
+    # 2026-10-16: the alias says what the model is (big-pickle IS DeepSeek
+    # V4.1 Flash upstream). The full free-model list lives in the hidden
+    # /v1/models1 endpoint; the standard /v1/models must stay masked.
+    "deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle",
+)
 
 # Admin API keys: permanent, can manage the dynamic key store via /admin/*.
 # This is a clearly-fake LOCAL DEV placeholder, never a real credential (see
@@ -175,6 +180,11 @@ class Settings:
     # a /data volume for exactly this); empty = in-memory only.
     #   ZEN_EGRESS_COUNTS_PATH="/data/egress_counts.json"
     zen_egress_counts_path: str = ""
+    # Structured JSONL event sink for the whole egress layer (cordons, 429s,
+    # probe IP changes, rotations with before/after IP). Empty = off; the
+    # container mounts /data for exactly this.
+    #   ZEN_EGRESS_EVENT_LOG="/data/egress_events.jsonl"
+    zen_egress_event_log: str = ""
 
     @property
     def dev_open(self) -> bool:
@@ -401,5 +411,8 @@ def load_settings() -> Settings:
         zen_egress_rotation=_parse_kv_int(os.environ.get("ZEN_EGRESS_ROTATION", "")),
         zen_egress_counts_path=os.environ.get(
             "ZEN_EGRESS_COUNTS_PATH", ""
+        ).strip(),
+        zen_egress_event_log=os.environ.get(
+            "ZEN_EGRESS_EVENT_LOG", ""
         ).strip(),
     )

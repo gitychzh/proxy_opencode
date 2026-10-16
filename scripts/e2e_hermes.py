@@ -9,7 +9,7 @@ script is portable across the buckets:
 
     E2E_HERMES_BIN   hermes executable            (default: PATH lookup)
     E2E_PROVIDER     hermes provider name          (default: proxyo)
-    E2E_MODEL        model id sent to hermes       (default: ds41f_cus)
+    E2E_MODEL        model id sent to hermes       (default: deepseek-ai/deepseek-v4.1-flash)
     E2E_WORKDIR      tool-using sandbox directory  (default: cwd)
     E2E_REPORT       report output path            (default: ./e2e_report.json)
     E2E_N            number of jobs to run         (default: 36)
@@ -28,7 +28,7 @@ HERMES = os.environ.get("E2E_HERMES_BIN") or shutil.which("hermes") or "hermes"
 WORKDIR = os.environ.get("E2E_WORKDIR", os.getcwd())
 REPORT = os.environ.get("E2E_REPORT", os.path.join(os.getcwd(), "e2e_report.json"))
 PROVIDER = os.environ.get("E2E_PROVIDER", "proxyo")
-MODEL = os.environ.get("E2E_MODEL", "ds41f_cus")
+MODEL = os.environ.get("E2E_MODEL", "deepseek-ai/deepseek-v4.1-flash")
 N_TARGET = int(os.environ.get("E2E_N", "36"))
 
 COMMON = [HERMES, "chat", "--provider", PROVIDER, "-m", MODEL,

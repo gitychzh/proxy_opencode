@@ -72,7 +72,8 @@ hermes / codex CLI / claude code / 任意 OpenAI SDK
                                  #   sse_iter）——进转 OpenAI chat，出转回各协议
     -> auth/                     # core.py（Bearer/x-api-key 鉴权 + 管理员）
                                  #   keystore.py（动态 key 存储，默认 24h 有效期）
-    -> registry.py               # 对外模型目录（掩码：ds41f_cus -> 上游模型）
+    -> registry.py               # 对外模型目录（掩码别名 deepseek-ai/deepseek-v4.1-flash
+                                 #   -> 上游；免费模型裸 ID 经 /v1/models1 透传）
     -> sse_mask.py               # 流式/非流式响应的 model 字段改写
     -> upstreams/                # 适配器协议 + 实现
        - zen_direct.py           # 直连 Zen（协议重构 + 标记注入 + SSE 透传）

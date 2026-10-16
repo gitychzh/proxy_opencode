@@ -49,6 +49,33 @@ curl -s -X POST http://127.0.0.1:10002/admin/egresses/opc2-eth/rotate \
 # 重启光猫约 80s 恢复 + 30-40s PPPoE 回拨，最后成败以 last_rotation 为准。
 ```
 
+**换 IP 的可观测日志**（`ZEN_EGRESS_EVENT_LOG=/data/egress_events.jsonl`）：
+一行一 JSON 事件（UTC 时间戳），换 IP 全时间线含**前后 IP 对照**：
+`rotation_requested → rotation_started(ip_from) → rotation_succeeded
+(ip_from, ip_to, elapsed_s)` 或 `rotation_failed(detail)`；另有
+`cordon`（429 配额/连续失败）、`egress_ip_observed`（探测到的 IP 变化）、
+`window_rollover`（08:00 日窗全部归零）、`free_catalog_refreshed`。
+查看：
+
+```bash
+tail -f deploy/ecs/data/egress_events.jsonl
+# 或进容器：docker compose exec zen-gw tail -f /data/egress_events.jsonl
+```
+
+大小轮转 5MB×2（同目录 `.1`/`.2`）。事件只含桶名/IP/计数/时间，无凭据与
+消息内容（红线）。
+
+**免费模型浏览（P3，/v1/models1）**：全部免费模型裸 ID 的唯一展示端点，
+浏览器直接打开（IP 入口需先信任自签 CA / 或用域名入口）：
+
+```
+https://115.29.231.25:10002/v1/models1?key=<网关或管理员KEY>
+```
+
+鉴权接受 `?key=` 或 Bearer；不要给该端点再造普通名字的别名（models/model
+等会被扫描 agent 捕获）。这些裸 ID 在 `/v1/chat/completions` 里原样透传；
+标准 `/v1/models` 永远只列公开别名。
+
 ## 应用入口（caddy）
 
 ```bash

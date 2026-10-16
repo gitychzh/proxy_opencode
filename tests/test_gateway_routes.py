@@ -148,7 +148,7 @@ async def test_models():
     assert resp.status_code == 200
     data = resp.json()["data"]
     # Model masking: only the public alias is ever listed.
-    assert data[0]["id"] == "ds41f_cus"
+    assert data[0]["id"] == "deepseek-ai/deepseek-v4.1-flash"
     assert all(m["id"] != "opencode/big-pickle" for m in data)
 
 

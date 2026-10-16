@@ -41,16 +41,21 @@ python -m proxy_opencode                       # 默认 127.0.0.1:8787
 curl http://127.0.0.1:8787/healthz
 curl -H "Authorization: Bearer dev-local-key" http://127.0.0.1:8787/v1/models
 curl -H "Authorization: Bearer dev-local-key" -H "Content-Type: application/json" \
-  -d '{"model":"ds41f_cus","messages":[{"role":"user","content":"用一句话回答 1+1=?"}]}' \
+  -d '{"model":"deepseek-ai/deepseek-v4.1-flash","messages":[{"role":"user","content":"用一句话回答 1+1=?"}]}' \
   http://127.0.0.1:8787/v1/chat/completions
 ```
 
 ## 三种协议接口（v0.6.0 起）
 
-默认对外只暴露一个模型 `ds41f_cus`（DeepSeek V4.1 Flash）：客户端请求任意模型名
-都会透明路由到它，响应（JSON 与流式 SSE）中的模型字段一律改写为公开名——上游
-真实模型名不出网关。公开目录由 `PUBLIC_MODELS` 配置，可登记多个名字；0.7.x 新栈
-即登记了 `cus1/deepseek-V4.1-Flash` + `ds41f_cus`（见下节）。
+默认对外只暴露一个模型别名 `deepseek-ai/deepseek-v4.1-flash`（即上游免费模型
+`big-pickle`）：客户端请求任意模型名都会透明路由到它，响应（JSON 与流式 SSE）中
+的模型字段一律改写为公开名——上游真实模型名不出网关。公开目录由 `PUBLIC_MODELS`
+配置，可登记多个名字。
+
+**免费模型透传（P3）**：全部免费模型的裸 ID（`big-pickle`、`space-bunny-free` 等）
+只通过隐藏端点 `GET /v1/models1?key=<key>` 展示（浏览器可直接打开，也接受
+Bearer）；这些 ID 在聊天接口里原样透传。**标准 `/v1/models` 永远只列公开别名**，
+不要把 models1 复制成 models/model 等普通变体名。
 
 | 接口 | 客户端 | 认证方式 |
 | --- | --- | --- |
@@ -94,7 +99,7 @@ Hermes 配置示例（CLI 支持 `hermes config set <key> <value>`；仅用于�
 
 ```yaml
 model:
-  default: ds41f_cus
+  default: deepseek-ai/deepseek-v4.1-flash
   provider: custom
   base_url: http://127.0.0.1:8787/v1
   api_key: dev-local-key
@@ -103,7 +108,7 @@ providers:
     name: proxyo
     base_url: http://127.0.0.1:8787/v1
     api_key: dev-local-key
-    default_model: ds41f_cus
+    default_model: deepseek-ai/deepseek-v4.1-flash
     transport: openai_chat
 ```
 
@@ -181,7 +186,7 @@ SSE 透传及按桶配额冷却。健康检查当前包含上游明细；公开�
 | `KEY_STORE_PATH` | `keys.json` | 动态 key 存储文件（JSON，原子写） |
 | `KEY_DEFAULT_TTL_HOURS` | `24` | 新生成 key 的默认有效期（小时）；`/admin/keys` 传 `ttl_hours: 0` 可签发永久 key |
 | `MASK_MODELS` | `true` | 模型掩码开关；开启后对外只暴露 `PUBLIC_MODELS` 目录，上游模型名从所有响应中抹除 |
-| `PUBLIC_MODELS` | `ds41f_cus:DeepSeek V4.1 Flash:big-pickle` | 对外模型目录，格式 `对外id:展示名:上游模型`（逗号分隔多条）。上游 ID 需与 Zen 实时目录一致 |
+| `PUBLIC_MODELS` | `deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle` | 对外模型目录，格式 `对外id:展示名:上游模型`（逗号分隔多条）。上游 ID 需与 Zen 实时目录一致；全部免费模型裸 ID 只在 `/v1/models1` 展示并在聊天里透传 |
 | `LOG_FORMAT` | `text` | 日志格式：`text`（人类可读）/ `json`（JSON 行，便于采集归档） |
 | `PAYLOAD_DUMP_DIR` | 空（关闭） | 调试用：把每个**原始客户端请求体**（含 prompt）落盘到该目录，每协议一个 JSON，仅保留最近 200 个。⚠️ 绕过"不记录消息内容"红线，**生产桶请保持关闭** |
 | `ZEN_MARKER_MODE` | `bridge` | 给模型的兼容提示：`bridge`（默认，短工具提示）/ `full`（历史完整 opencode prompt）/ `none`（不注入）。最近复测不要求 system marker；此开关不是门槛保证 |
