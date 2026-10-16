@@ -49,11 +49,19 @@ logger = logging.getLogger("proxy_opencode.egress")
 
 
 def _prefix_parts(expect_prefix: str | None) -> list[str]:
-    """Split a comma-separated prefix list, dropping blank parts."""
+    """Split a CIDR prefix list, dropping blank parts.
+
+    Accepts both commas (in-memory shapes) and semicolons: the env var
+    ``ZEN_EGRESS_EXPECT_PREFIX`` is comma-separated key=value pairs, so a
+    bucket's multi-CIDR value must use semicolons there; single-bucket
+    construction sites can use either freely.
+    """
 
     if not expect_prefix:
         return []
-    return [p.strip() for p in expect_prefix.split(",") if p.strip()]
+    return [
+        p.strip() for p in expect_prefix.replace(";", ",").split(",") if p.strip()
+    ]
 
 
 class ReleaseObserver(Protocol):
