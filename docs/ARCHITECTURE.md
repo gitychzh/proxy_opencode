@@ -83,7 +83,7 @@ agent 代理 basic auth 双保险）。
 | P2 | 0.7.0 | 网关 egress pool + Docker/compose，ECS:10002 起容器；各桶出口逐一实测复核 | **已完成**（opc2-wifi / opc2-eth / cc9 三桶真机跑通；pad 待凭据延后，见下） |
 | P3 | 0.7.0 | catalog 全免费模型；hermes 加新 alias（旧 alias 保留） | 未开始 |
 | P4 | 0.7.1 | updater：每日 02:00 查 GitHub release（含 prerelease），分级采用 | 未开始 |
-| P5 | 0.7.2 | 换 IP：计数器窗口 + 500 触发 + ONT 重启 + IP 变更验证 + 429 兜底 | **ECS 侧已完成**（2026-10-16；wifi/cc9 设备侧 API 待真机接入，见下） |
+| P5 | 0.7.2 | 换 IP：计数器窗口 + 500 触发 + ONT 重启 + IP 变更验证 + 429 兜底 | **已完成**（2026-10-17 三桶 ONT 驱动全部实弹验证，见 §6） |
 | P6 | 0.8.0 | Windows agent 转正、Android Kotlin 版、文档浓缩定稿、旧栈退役（等命令） | 未开始 |
 
 ### P5 现状（2026-10-16，ECS 侧代码完成，设备侧待真机）
@@ -104,8 +104,9 @@ agent 代理 basic auth 双保险）。
 - **`/admin/egresses`** 快照新增 `counters` 字段；新增
   `POST /admin/egresses/{name}/rotate`（管理员 key）= 手动触发，用于现场
   调试 wifi/cc9 光猫 API 与"IP 被重发同值"后的补一枪。
-- **设备侧遗留**（agent /rotate 契约网关已就绪，等真机）：opc2-wifi
-  HG8020C 重启 API 需现场复刻页面 JS 提交；cc9 光猫型号/凭据待勘查。
+- **设备侧 ONT 驱动**（2026-10-17 全部落地）：opc2-wifi HG8020C
+  `kind="huawei_ct"`、cc9 HG6142A-C `kind="fenghuo"`（协议细节与实弹记录见
+  §6 与 git 历史；各桶 ONT stanza 已写入设备 `/etc/egress-agent/*.json`）。
   opc2 现有"ONT 每日 7 次定时重启" cron 必须在启用 `ZEN_EGRESS_ROTATION`
   时停掉，否则双重换 IP。
 
@@ -197,12 +198,20 @@ agent 代理 basic auth 双保险）。
 
 ## 6. 可换 IP 的三个桶（ONT）— 拓扑与凭据去向
 
-| 桶 | 出口 | ONT | 型号 | 控制方式 | 重启验证 |
+2026-10-17 实测（三桶现状，凭据值只存设备 JSON 与 `scripts_local/ont-credentials.md`，
+本表只记型号/拓扑）：
+
+| 桶 | 出口 | ONT 管理地址 | 型号 | 驱动 `kind` | 重启验证 |
 |---|---|---|---|---|---|
-| opc2-eth | 36.149.54.x 移动 | 192.168.1.1（enp12s0 进） | 华为 V173-50 | 纯 HTTP 四步（agent `rotate` P1 实现） | 生产已验证 36.149.54.237→.180；恢复 ~80s + PPPoE ~40s |
-| opc2-wifi | 117.95.231.70 电信 | 192.168.1.1（wlx 经中兴路由 192.168.2.1 进） | 华为 HG8020C | 同框架登录可行；重启 API 需现场复刻页面 JS 提交后生效（agent `/rotate` 契约已就绪） | 待设备侧接入 |
-| cc9 | 2408: 联通 IPv6 | 192.168.3.1（型号/凭据待勘查） | 待定 | 大概率同华为 API（agent `/rotate` 契约已就绪；先勘查） | 待设备侧接入 |
-| pad / win10 | 218.93.215.38 / 111.55.73.65 | — | — | 本期不做换 IP | — |
+| opc2-eth | 36.149.x/223.68.x 移动 | 192.168.1.1（enp12s0 进） | 华为 V173-50（CMCC） | `huawei`（四步 HTTP） | 生产已验证（36.149.54.237→.180；2026-10-16 P5 真机再验证） |
+| opc2-wifi | 电信（宿迁段漂移：180.117.204.x / 106.110.x / 121.226.x） | 192.168.1.1（wlx 经中兴路由 192.168.2.1 进） | 华为 HG8020C（电信 e8-C JSCT） | `huawei_ct`（GetRandCount token + 无状态 Cookie 头登录 + CtcApp set.cgi ResetBoard） | **已实弹**：180.117.204.212→106.110.200.190→121.226.169.135（两轮换桶） |
+| cc9 | 116.147.x/112.83.x 联通（宿迁段） | 192.168.1.1（手机 wifi 192.168.3.34 经 FTTR 从网关进） | 烽火 HG6142A-C（联通 FTTR） | `fenghuo`（get_login_user 必带 tkn=完整 UA；sha256(loginpd) 登录；logintoken cookie；ajaxmethod=reboot） | **已实弹**：112.83.208.127→116.147.31.99→116.147.30.191 |
+| pad / win10 | 218.93.215.38 / 111.55.73.65 | — | — | — | 本期不做换 IP |
+
+两条驱动共性实测坑（写进 `rotate.py` 常量注释）：①电信 CtcApp 页树会间歇
+404（47 字节 "The requested URL..."），需整周期重试（`CT_ARM_ATTEMPTS=2`）；
+②烽火 login GET 不带 `tkn` 只回 `random_string`；③光猫对短时连续重启有
+防抖（受理但不重启），轮换路径自带 900s 冷却兜底。
 
 **凭据铁律**：ONT 账号口令只写设备上的 `/etc/egress-agent/<实例>.json`
 （600），**不进 repo**；`egress-agent status` 输出按构造脱敏。型号/拓扑
@@ -214,16 +223,24 @@ agent 代理 basic auth 双保险）。
 （`ZEN_EGRESS_ROTATION`）是唯一负责重启 ONT 的组件（阈值触发 / 硬 429 触发 /
 admin 手动触发，事件全落 `ZEN_EGRESS_EVENT_LOG`）。
 
-**opc2 有线腿策略路由自愈（2026-10-16 排障落地）**：旧栈 provision 单元
-`proxy_opencode-opc2b-route.service`（表 991 + rule 29991 uid 996）与
-`proxyopencode-wired-egress.service`（表 410 + rules 1040/1050 uid 997）为
-boot oneshot——上游事件（ONT 重启 / 租约巡检等）吐掉规则与表默认路由后
-无人补，uid 996 的 eth agent 会静默回落 wifi（电信）出口，仅靠池的
-`expect_prefix` 身份校验拦截（本日 65 条 `identity_mismatch` 后修复）。设备上
-已加装 `opc2-policy-routes-keep.timer`（开机 2min 起、此后每 10min restart
-两个 provision 单元幂等重放；实测 restart 前后 uidrange 996/997 规则各恰
-1 条、无堆积，uid 996 出口恢复 36.149.54.30 并与 `36.149.54.0/24` 匹配）。
-该 timer 覆盖 ONT 重启与 P5 eth 轮换后的恢复窗口（≤10min）。
+**opc2 策略路由自愈（2026-10-17 全量修正）**：上游事件（ONT 重启 / 租约
+巡检等）会吐掉规则与表默认路由，无人补则 uid 996 的 eth agent 静默回落
+wifi（电信）出口、uid 1001 的 wifi agent 反向被旧栈定义污染。现状：
+
+- `proxy_opencode-opc2b-route.service`：规则 29991（uid 996 → 表 991，经
+  enp12s0 出移动）；
+- `proxy_opencode-opc2a-route.service`（2026-10-17 新建）：规则 29998
+  （uid 1001 → 表 410，经 wlx0c9160fb3c7c 出电信）；
+- wifi agent 以专用户 `opc2-bucket-a`（uid 1001）运行
+  （`egress-agent@wifi.service.d/user.conf`）；旧栈
+  `proxyopencode-wired-egress.service` 已 stop+disable（它把表 410 错指
+  enp12s0，曾把 wifi agent 流量带出有线口）；
+- `opc2-policy-routes-keep.timer`（每 10min）已改写为幂等重放上述两个
+  provision 单元，不再引用旧栈单元。
+
+两条防火铁律：各表默认路由**只带一条默认路由**；两个 ONT LAN 同为
+192.168.1.0/24，访问光猫必须按接口定向（curl `--interface` / uid 策略
+路由），否则会命中对面设备。
 
 ## 7. 验收与退役判据
 

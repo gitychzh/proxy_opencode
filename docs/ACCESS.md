@@ -214,6 +214,9 @@ adb connect 100.87.219.115:43357 && adb -s 100.87.219.115:43357 shell "su -c 'ne
      约 3 分钟后 PPPoE 重拨拿到新 IP。会话按 **IP+UA** 绑定，POST 的 Referer 要指向对应 html 页。
 - **3 次密码错误锁 1 分钟**；成功响应示例已验证可重复执行。
 - 普通用户即可 `reboot`（`/html/resetrouter.html` 权限位 3 = 1|2）；admin 界面在首页点「管理员账户」。
+- **2026-10-17**：该流程已固化为 egress-agent `kind="fenghuo"` 驱动（登录 GET **必须带
+  `tkn=<完整UA>`**，否则只回 `random_string`）并实弹验证；agent 配置见 chroot 内
+  `/etc/egress-agent/cc9.json`（凭据只存设备与 `scripts_local/ont-credentials.md`）。
 
 **手机无人值守加固（2026-10-05 已生效，Magisk `/data/adb/service.sh` 开机自动执行）**：
 `dumpsys deviceidle disable`（禁 doze）+ Termux/Tailscale 加入 deviceidle 白名单 +
@@ -259,6 +262,8 @@ adb -s 100.109.109.106:5555 shell 'su -c "/data/local/bin/start-ubuntu.sh cmd /r
 | 吉隆坡 SWAS root 密码 | `secrets.env`（SWAS 救援 VNC 用，SSH 免密优先） | 救援用 |
 | 杭州 ECS SSH | `ssh -p 222 root@115.29.231.25` | Ubuntu 24.04.5，公钥已注入；**2026-10-06 起 SSH 端口 22 → 222**（sshd_config 仅 Port 222；`ssh.socket` 已禁用改经典 `ssh.service`，Ubuntu 24.04 socket 激活模式下 Port 指令不生效的坑） |
 | 吉隆坡 SWAS SSH | `ssh -p 2222 root@47.250.130.52`（备用 22） | 密钥对 `gw-edge-2026`；Tailscale `ssh root@100.90.84.65`；**2026-10-02 起边缘角色已迁杭州，待退订** |
+| 三桶光猫（ONT）管理员账号 | 设备侧 `/etc/egress-agent/{wifi,eth,cc9}.json` 的 `ont` stanza + 仓库外 `scripts_local/ont-credentials.md`；**值不入库** | 0.7.x P5 换 IP（硬 429 / ≥500 窗口自动重启光猫），模型/协议见 `ARCHITECTURE.md` §6 |
+| cc9 手机 adb | 本机已授 adbkey；`adb connect 100.87.219.115:43357`（5555 有 iptables 转发） | chroot 内 egress-agent 的拉起/巡检（ Magisk 看门狗 `/data/local/tmp/egress-agent-watchdog.sh` 兜底） |
 
 ### 杭州新 ECS（i-bp1bzxumftqasjq6nid5 · 99元/年 · 到期 2027-10-01）
 

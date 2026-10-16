@@ -9,6 +9,26 @@
 
 ## [Unreleased]
 
+### Added — 新增两个 ONT 驱动 huawei_ct / fenghuo + opc2 策略路由修正(2026-10-17)
+
+- `egress_agent.rotate`:新增电信 HG8020C(`kind="huawei_ct"`,GetRandCount
+  token + 无状态 Cookie 头登录 + arm 序列 + CtcApp set.cgi ResetBoard)
+  与联通烽火 HG6142A-C(`kind="fenghuo"`,get_login_user 必带 `tkn=<完整UA>`,
+  sha256(loginpd) 登录,logintoken cookie,ajaxmethod=reboot)两个驱动,
+  按 `ont.kind` 分派;`_session` 支持逐请求 `extra_headers`(UA/Referer)。
+- 烽火重启应答撕裂(板子复位中断连接)按受理计:捕获放宽为
+  `aiohttp.ClientError + OSError + TimeoutError + ValueError`,真机观察到
+  `ClientResponseError` 曾被误报为 `ont unreachable`。
+- 实弹验证:电信 wifi 两轮换桶(180.117.204.212→106.110.200.190→121.226.169.135)、
+  联通 cc9 手动+agent 各一受理(光猫对短时连续重启有防抖,轮换冷却兜底)、
+  移动 eth 原有驱动不变。
+- opc2 策略路由(0.7.x 全量修正):新建 `proxy_opencode-opc2a-route.service`
+  (rule 29998 uid 1001 → 表 410 @ wlx,出电信),wifi agent 专用户
+  `opc2-bucket-a`;旧栈 `proxyopencode-wired-egress.service` 停用(其表 410
+  误指 enp12s0 曾把 wifi agent 流量带出有线口);`opc2-policy-routes-keep.timer`
+  改为幂等重放两个 provision 单元。同步文档:ARCHITECTURE §5/§6、
+  OPERATIONS §2、ACCESS §5.1/§6。
+
 ### Changed — P5 桶间 failover + 多段 expect_prefix(2026-10-17)
 
 - **定位**:hermes 桌面版"几条就 429"(00:35 事件)实锤链路——
