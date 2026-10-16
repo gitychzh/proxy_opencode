@@ -635,6 +635,10 @@ async def test_zen_429_release_carries_retry_after() -> None:
         def __init__(self) -> None:
             self.releases: list[tuple[str, bool, str, float | None]] = []
 
+        @property
+        def size(self) -> int:
+            return 1
+
         async def acquire(self) -> Lease:
             state = EgressState(spec=EgressSpec("bucket-a", "http://agent:10001"))
             state.client = httpx.AsyncClient()

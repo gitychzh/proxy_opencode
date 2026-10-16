@@ -120,6 +120,12 @@ _MINIMAL_TOOL_NAMES = ("bash", "read")
 
 _MIN_INJECTED_TOOLS = 2
 
+# Bucket-failover cap for 429/5xx/transport retries across egress buckets
+# (0.7.x). A fully-drained pool must still surface its last upstream error
+# instead of looping until the client times out; capped overhead is 2 extra
+# attempts in the worst case.
+_FAILOVER_MAX_ATTEMPTS = 3
+
 # Injected names, in preference order. A name the client already uses is
 # skipped: injecting a duplicate would not add a distinct builtin name (the
 # gate counts names, not entries) and the old code dropped the builtin in that
@@ -250,6 +256,19 @@ def _retry_after_seconds(
     return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
 
 
+def _log_failover(*, kind: str, remaining: int) -> None:
+    """Record one upstream failure handed to the failover loop.
+
+    Counts live in the message body (they are not whitelisted extras);
+    never any request content.
+    """
+
+    logger.warning(
+        f"egress failover: upstream {kind} on one bucket, "
+        f"retrying on another ({remaining} attempt(s) left)"
+    )
+
+
 class ZenDirectAdapter:
     name = "zen-direct"
 
@@ -344,6 +363,16 @@ class ZenDirectAdapter:
         and releases it with the observed outcome, so bad buckets are
         cordoned and least-in-flight selection spreads load across healthy
         egress IPs.
+
+        Bucket failover: an upstream 429 / 5xx / transport failure releases
+        the lease and retries on the next lease — none of these outcomes
+        depend on the request itself, and no client-visible byte has been
+        sent (the SSE stream had not started), so another bucket with fresh
+        per-IP quota can serve the same body. Measured 2026-10-17: one 429
+        surfaced verbatim to a client while other buckets were still fresh.
+        Retryable errors never retry after bytes reached the client, and
+        the loop is bounded so a fully-drained pool still surfaces its last
+        upstream error instead of hanging.
         """
         model = self._zen_model(payload.get("model"))
         body = self._build_body(payload, model)
@@ -353,8 +382,44 @@ class ZenDirectAdapter:
 
         if self._pool is None:
             return await self._exchange(self.client, body, headers, model, stream, None)
+
+        attempts = min(self._pool.size, _FAILOVER_MAX_ATTEMPTS)
         lease = await self._pool.acquire()
-        return await self._exchange(lease.client, body, headers, model, stream, lease)
+        while True:
+            try:
+                result = await self._exchange(
+                    lease.client, body, headers, model, stream, lease
+                )
+            except (httpx.HTTPError, ConnectionError) as exc:
+                # _exchange already released the lease as a transport
+                # failure (it wraps httpx transport errors in a plain
+                # ConnectionError).
+                attempts -= 1
+                if attempts <= 0:
+                    raise ConnectionError(f"zen request failed: {exc}") from exc
+                _log_failover(kind="transport", remaining=attempts)
+                lease = await self._pool.acquire()
+                continue
+            if isinstance(result, StreamRelay):
+                return result
+            status = result.get("__status__")
+            if status == 429:
+                attempts -= 1
+                if attempts <= 0:
+                    return result
+                _log_failover(kind="http_429", remaining=attempts)
+                lease = await self._pool.acquire()
+                continue
+            if isinstance(status, int) and status >= 500:
+                attempts -= 1
+                if attempts <= 0:
+                    return result
+                _log_failover(kind=f"http_{status}", remaining=attempts)
+                lease = await self._pool.acquire()
+                continue
+            # 200 body, StreamRelay-unwrapped result, or a request-level
+            # 4xx: the outcome is final for this request.
+            return result
 
     async def _exchange(
         self,
@@ -365,7 +430,7 @@ class ZenDirectAdapter:
         stream: bool,
         lease: Lease | None,
     ) -> Any:
-        """Send one upstream request and fold the outcome into the lease.
+        """Send one upstream attempt and fold the outcome into the lease.
 
         A 4xx other than 429 (400/403/… ) is a request-level rejection the
         upstream returned through a working egress, so it releases the lease

@@ -48,6 +48,14 @@ window_tz = _WINDOW_TZ
 logger = logging.getLogger("proxy_opencode.egress")
 
 
+def _prefix_parts(expect_prefix: str | None) -> list[str]:
+    """Split a comma-separated prefix list, dropping blank parts."""
+
+    if not expect_prefix:
+        return []
+    return [p.strip() for p in expect_prefix.split(",") if p.strip()]
+
+
 class ReleaseObserver(Protocol):
     """Hook invoked by ``EgressPool.release`` after each lease release.
 
@@ -72,9 +80,9 @@ class EgressSpec:
             raise ValueError(f"bad egress name {name!r}")
         if not agent_url.startswith(("http://", "https://")):
             raise ValueError(f"egress {name}: agent url must be http(s): {agent_url!r}")
-        if expect_prefix:
+        for part in _prefix_parts(expect_prefix):
             try:
-                ipaddress.ip_network(expect_prefix, strict=False)
+                ipaddress.ip_network(part, strict=False)
             except ValueError as exc:
                 raise ValueError(f"egress {name}: bad expect_prefix: {exc}") from exc
         self.name = name
@@ -88,6 +96,12 @@ class EgressSpec:
         configured only an IP inside it passes — an unknown IP is NOT
         trusted, because an unverified egress could silently be leaking
         another bucket's quota.
+
+        Several comma-separated CIDRs are allowed: broadband ISPs hand
+        out addresses from several /24 blocks in one region (measured
+        2026-10-17: the mobile bucket returned 223.68.27.189 after an
+        ONT rotation while its stored prefix was 36.149.54.0/24 — both
+        blocks are China-Mobile dynamic ranges for the same bucket).
         """
 
         if not self.expect_prefix:
@@ -95,11 +109,13 @@ class EgressSpec:
         if not ip:
             return False
         try:
-            return ipaddress.ip_address(ip) in ipaddress.ip_network(
-                self.expect_prefix, strict=False
-            )
+            addr = ipaddress.ip_address(ip)
         except ValueError:
             return False
+        return any(
+            addr in ipaddress.ip_network(part, strict=False)
+            for part in _prefix_parts(self.expect_prefix)
+        )
 
 
 @dataclass
@@ -333,6 +349,12 @@ class EgressPool:
 
     def find(self, name: str) -> EgressState | None:
         return next((s for s in self._states if s.spec.name == name), None)
+
+    @property
+    def size(self) -> int:
+        """Number of configured buckets (failover budget source)."""
+
+        return len(self._states)
 
     def mark_rotating(self, name: str, rotating: bool) -> bool:
         """Flag an egress as driving an ONT rotation; selection skips it."""

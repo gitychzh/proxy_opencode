@@ -625,6 +625,10 @@ class _StubPool:
         self._client = client
         self.releases: list[tuple[str, bool, str]] = []
 
+    @property
+    def size(self) -> int:
+        return 1
+
     async def acquire(self) -> Lease:
         state = EgressState(spec=EgressSpec("bucket-a", "http://agent:10001"))
         state.client = self._client
@@ -743,6 +747,144 @@ async def test_chat_429_cordons_the_egress() -> None:
     assert result["__status__"] == 429
     assert pool.releases == [("bucket-a", False, "http_429")]
     await client.aclose()
+    await adapter.aclose()
+
+
+# ------------------------------------------------------- bucket failover
+
+
+class _RollingStubPool:
+    """N-bucket stand-in: acquire() walks the buckets in a fixed order."""
+
+    def __init__(self, buckets: dict[str, httpx.AsyncClient]) -> None:
+        self._names = list(buckets)
+        self._clients = buckets
+        self._i = 0
+        self.releases: list[tuple[str, bool, str]] = []
+
+    @property
+    def size(self) -> int:
+        return len(self._names)
+
+    async def acquire(self) -> Lease:
+        name = self._names[self._i % len(self._names)]
+        self._i += 1
+        state = EgressState(spec=EgressSpec(name, "http://agent:10001"))
+        state.client = self._clients[name]
+        state.inflight += 1
+        return Lease(state)
+
+    async def release(
+        self,
+        lease: Lease,
+        *,
+        ok: bool,
+        kind: str = "",
+        retry_after_s: float | None = None,
+    ) -> None:
+        self.releases.append((lease.name, ok, kind))
+
+
+_SSE_OK = (
+    b'data: {"id":"z","choices":[{"delta":{"content":"ok"},'
+    b'"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_429_fails_over_to_next_bucket() -> None:
+    """A quota 429 must not surface to the client while another bucket lives.
+
+    Measured 2026-10-17: the only remaining bucket drained its quota and
+    the error rode through verbatim. The lease is released and the same
+    body retried on the next bucket; client sees the aggregated 200.
+    """
+
+    seq = {"n": 0}
+
+    def _upstream(_request: httpx.Request) -> httpx.Response:
+        if seq["n"] == 0:
+            seq["n"] += 1
+            return httpx.Response(
+                429, json={"error": {"message": "FreeUsageLimitError"}}
+            )
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_SSE_OK
+        )
+
+    respx.post("https://opencode.ai/zen/v1/chat/completions").mock(
+        side_effect=_upstream
+    )
+    a, b = httpx.AsyncClient(), httpx.AsyncClient()
+    pool = _RollingStubPool({"bucket-a": a, "bucket-b": b})
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert pool.releases == [
+        ("bucket-a", False, "http_429"),
+        ("bucket-b", True, ""),
+    ]
+    await a.aclose()
+    await b.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_429_surfaces_after_failover_budget_is_exhausted() -> None:
+    """Every bucket 429ing must return the last upstream 429 (bounded)."""
+
+    respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=429, json={"error": {"message": "FreeUsageLimitError"}}
+    )
+    a, b = httpx.AsyncClient(), httpx.AsyncClient()
+    pool = _RollingStubPool({"bucket-a": a, "bucket-b": b})
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["__status__"] == 429
+    assert pool.releases == [
+        ("bucket-a", False, "http_429"),
+        ("bucket-b", False, "http_429"),
+    ]
+    await a.aclose()
+    await b.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_transport_failure_fails_over_to_next_bucket() -> None:
+    seq = {"n": 0}
+
+    def _upstream(request: httpx.Request) -> httpx.Response:
+        if seq["n"] == 0:
+            seq["n"] += 1
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_SSE_OK
+        )
+
+    respx.post("https://opencode.ai/zen/v1/chat/completions").mock(
+        side_effect=_upstream
+    )
+    a, b = httpx.AsyncClient(), httpx.AsyncClient()
+    pool = _RollingStubPool({"bucket-a": a, "bucket-b": b})
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert pool.releases == [
+        ("bucket-a", False, "transport"),
+        ("bucket-b", True, ""),
+    ]
+    await a.aclose()
+    await b.aclose()
     await adapter.aclose()
 
 

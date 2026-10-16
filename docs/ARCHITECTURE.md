@@ -186,6 +186,8 @@ agent 代理 basic auth 双保险）。
 | TLS/证书 | IP 入口沿用自签 CA（hermes 已 pin，零成本）；客户入口=域名 + LE 真证书（DNS-01，A 记录灰云直指 ECS） | 公共 CA 不签裸 IP；域名走 CF 隧道会绕海外（实测慢 10 倍），灰云直连 ECS 后是国内直连 |
 | 计数器语义 | 每出口、日窗 [08:00, 08:00+1d) Asia/Shanghai（=UTC0 重置）；窗内 ≥500 触发换 IP；换完计数清零（新 IP=新额度桶） | 上游 per-IP 日配额 UTC0 重置；用户确认的语义 |
 | 429 兜底 | 上游 429 且（`Retry-After > 3600s` **或无 Retry-After 头**）= per-IP 日耗尽 → 立即换 IP（绕过 500 阈值，每窗口每桶至多一次） | 2026-10-16 实测补全：配额 429 可完全不带头（当天三次 cordon 全 null，0 轮换）；有头短值=短窗软限流（只 cordon 不换 IP） |
+| 桶间 failover | 请求级重试：`zen_direct.chat()` 上游 429/5xx/传输失败 → 释放租赁 → 换桶重试（SSE 未开播，客户端零字节，可安全重试）；上限 min(桶数, 3)；请求级 4xx 不换桶；SSE 开播后不换 | 2026-10-17 实测：单桶 429 原样透传时别的桶还有额度；hermes 桌面端的自愈重试还会把请求放大 15+ 倍 |
+| 桶前缀校验 | `expect_prefix` 支持逗号分隔多段 CIDR（ISP 同区多段动态分配）；不匹配 → unhealthy 跳过 | 2026-10-17 移动桶轮换后 36.149.54/24 → 223.68.27.189，单段前缀造成永久 identity_mismatch |
 | updater 分级 | T1 自动（prompt 资产/UA 版本）；T2 冒烟后自动（算法常量，含全测试+真实请求）；T3 只报告 | 0.6.4 事故的教训：协议常量变化必须冒烟闸门 |
 | 出口绑定 | Linux `socket.bind((source,0))`；opc2 eth 实例复用现有 uid 策略路由（`User=opc2-bucket-b`） | 与旧 opc2-eth 网关同一机制，生产已验证 |
 | ONT 轮换后恢复 | ONT 重启会打掉 eth 的 DHCP 租约与策略表默认路由；恢复 = dhclient 续租 + 补默认路由 + 删 dhclient 多装的抢占路由（幂等脚本，P5 落 `post_rotate_cmd`） | 2026-10-14 真机实测踩通 |

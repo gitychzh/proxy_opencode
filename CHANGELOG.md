@@ -9,6 +9,22 @@
 
 ## [Unreleased]
 
+### Changed — P5 桶间 failover + 多段 expect_prefix(2026-10-17)
+
+- **定位**:hermes 桌面版"几条就 429"(00:35 事件)实锤链路——
+  ① 00:08 容器重建清空了内存态 cordon,设备桶短暂复活又被 429 打回 cordon;
+  ② 池全空时 `acquire()` fail-open 派发到已 cordon 的桶(设计如此,防 502),
+  上游 429 被 `_exchange` 原样透传给客户端——**无任何换桶重试**。
+- `zen_direct.chat()` 新增**桶间 failover**:429 / 5xx / 传输失败 → 释放租赁 →
+  重新 acquire → 重试同 body(SSE 未开播,客户端零字节,可安全重试);
+  请求级 4xx 不重换;上限 `min(pool.size, 3)`,池尽透传最后一个上游错误。
+- `egress.pool.EgressSpec.matches_prefix` 支持**逗号分隔多段 CIDR**:
+  实测移动光猫轮换后出口从 36.149.54.0/24 甩到 223.68.27.189(同为移动动态段),
+  单段前缀会把桶永久误判 identity_mismatch。
+- ECS 配置跟随:剔除 `ecs` 本机桶(机房 IP 免费额度被共享流量瞬间耗尽,
+  用户拍板"只留电信/移动/联通三桶"),`ZEN_EGRESS_PROXIES` 删 ecs 行;
+  `opc2-eth` 前缀放宽为 `36.149.54.0/24,223.68.27.0/24`。
+
 ### Changed — P5 硬 429 兜底补全:无 Retry-After 头也触发自动换 IP(2026-10-17)
 
 - **现场**:2026-10-16 深夜 opc2-wifi / opc2-eth / cc9 三桶先后被上游配额

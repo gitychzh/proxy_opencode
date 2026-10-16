@@ -53,6 +53,21 @@ def test_matches_prefix() -> None:
     assert not spec.matches_prefix("garbage")
     # no prefix configured -> never restricted
     assert EgressSpec("a", "http://a:10001").matches_prefix("1.2.3.4")
+
+
+def test_matches_prefix_accepts_comma_separated_cidrs() -> None:
+    """ISPs hand out several /24 blocks per region (mobile, 2026-10-17)."""
+
+    spec = EgressSpec(
+        "a", "http://a:10001", expect_prefix="36.149.54.0/24, 223.68.27.0/24"
+    )
+    assert spec.matches_prefix("36.149.54.30")
+    assert spec.matches_prefix("223.68.27.189")
+    assert not spec.matches_prefix("180.117.204.212")
+    assert not spec.matches_prefix("112.83.208.127")
+    # malformed single part still rejected at construction time
+    with pytest.raises(ValueError):
+        EgressSpec("a", "http://a:10001", expect_prefix="1.2.3.0/24, not-a-network")
     # unknown IP with a prefix configured must not pass
     assert not spec.matches_prefix(None)
 
