@@ -132,18 +132,23 @@ class EgressRotator:
           exactly one rotation is requested (a failed attempt leaves the
           flag set until the next window rolls over at 08:00).
         * upstream 429 whose Retry-After classifies as per-IP daily
-          quota exhaustion (measured boundary: > 3600s) → immediate
-          rotation, bypassing the threshold. Soft throttles (< 3600s)
-          keep the plain pool cordon and do not rotate.
+          quota exhaustion (measured boundary: > 3600s, or no
+          Retry-After header at all — both, 2026-10-16 measurement)
+          → immediate rotation, bypassing the threshold, at most one
+          per window per bucket. Soft throttles (< 3600s, with a
+          short Retry-After) keep the plain pool cordon and do not
+          rotate.
         """
 
         if ok:
             if self._counters.record(name):
                 self.request_rotation(name, trigger="threshold")
-        elif kind == "http_429" and self._counters.hard_quota(retry_after_s):
+        elif kind == "http_429" and self._counters.should_rotate_on_429(
+            name, retry_after_s
+        ):
             logger.warning(
-                "upstream 429 says per-IP daily quota exhausted: rotating now "
-                "(bypassing request threshold)",
+                "upstream 429 classifies as per-IP daily quota exhausted: "
+                "rotating now (bypassing request threshold)",
                 extra={"egress": name, "retry_after_s": retry_after_s},
             )
             self.request_rotation(name, trigger="hard_429")

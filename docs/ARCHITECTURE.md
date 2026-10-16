@@ -91,8 +91,12 @@ agent 代理 basic auth 双保险）。
 - **已实现**（`proxy_opencode/egress/counters.py` + `rotate.py`，25 个新测试全绿）：
   每桶日窗 `[08:00, 08:00+1d)` Asia/Shanghai 计数（窗口自动滚动归零）；
   阈值（`ZEN_EGRESS_ROTATION`，逐桶配置，如 `opc2-eth=500`）触发**每窗口恰好
-  一次**换 IP；上游 429 且 `Retry-After > 3600s`（per-IP 日耗尽实测判据）
-  **绕过阈值立即换 IP**；编排流程=标记 rotating（选桶跳过、在途请求自然
+  一次**换 IP；上游 429 且 `Retry-After > 3600s`，或 **完全没有
+  `Retry-After` 头**（2026-10-16 实测：配额 429 可不带该头，当天三次
+  cordon 全是 `retry_after_s: null`——两形都判 per-IP 日耗尽），
+  **绕过阈值立即换 IP**，且两种 bypass 都与阈值共用同一"每窗口一次"
+  去重 flag（`note_rotation_started` 置位，防光猫被 429 连环重启）；
+  编排流程=标记 rotating（选桶跳过、在途请求自然
   收尾）→ `POST {agent}/rotate` → 轮询 `/healthz` 等 IP **变化且落在
   `expect_prefix` 内**（同 IP 重发/腿回落都判失败，大声记录）→ 成功后清
   cordon（含配额 cordon）、计数归零重计。计数器状态 JSON 快照
@@ -168,7 +172,9 @@ agent 代理 basic auth 双保险）。
   过滤免费模型，喂给 registry 的透传集合——聊天接口对这些裸 ID 原样放行、
   响应原样回显。
 - **`/v1/models_cus`（隐藏端点）**：唯一展示全部免费模型裸 ID 的地方；鉴权接受
-  Bearer 或 `?key=`（浏览器直接打开）。**标准 `/v1/models` 保持只列公开
+  Bearer 或 `?key=`（浏览器直接打开）。响应默认为一行一个裸 ID 的
+  `text/plain`（无尾随换行、零装饰；owner 指令 2026-10-16），`?format=json`
+  才返回 OpenAI 形状（data/metadata）。**标准 `/v1/models` 保持只列公开
   别名**，不要再造 models/model 等普通变体端点（防被模型扫描 agent 捕获）。
 
 ## 5. 关键决策记录（ADR 摘要）
@@ -179,7 +185,7 @@ agent 代理 basic auth 双保险）。
 | 第三方依赖 | 用成熟库不自造轮子：HTTP 解析=aiohttp，ONT 重启=requests；唯独 CONNECT 双工管道自写 ~100 行 | proxy.py 评估后弃用：过重且源地址绑定能力不明确；依赖全部 pip 装本机，运行期零云端调用 |
 | TLS/证书 | IP 入口沿用自签 CA（hermes 已 pin，零成本）；客户入口=域名 + LE 真证书（DNS-01，A 记录灰云直指 ECS） | 公共 CA 不签裸 IP；域名走 CF 隧道会绕海外（实测慢 10 倍），灰云直连 ECS 后是国内直连 |
 | 计数器语义 | 每出口、日窗 [08:00, 08:00+1d) Asia/Shanghai（=UTC0 重置）；窗内 ≥500 触发换 IP；换完计数清零（新 IP=新额度桶） | 上游 per-IP 日配额 UTC0 重置；用户确认的语义 |
-| 429 兜底 | `FreeUsageLimitError` 且 `Retry-After > 3600s` = per-IP 日耗尽 → 立即换 IP（绕过 500 阈值） | 实测两层分类：短窗软限流（等/小值）vs 日耗尽（>3600s，换 IP 立即恢复） |
+| 429 兜底 | 上游 429 且（`Retry-After > 3600s` **或无 Retry-After 头**）= per-IP 日耗尽 → 立即换 IP（绕过 500 阈值，每窗口每桶至多一次） | 2026-10-16 实测补全：配额 429 可完全不带头（当天三次 cordon 全 null，0 轮换）；有头短值=短窗软限流（只 cordon 不换 IP） |
 | updater 分级 | T1 自动（prompt 资产/UA 版本）；T2 冒烟后自动（算法常量，含全测试+真实请求）；T3 只报告 | 0.6.4 事故的教训：协议常量变化必须冒烟闸门 |
 | 出口绑定 | Linux `socket.bind((source,0))`；opc2 eth 实例复用现有 uid 策略路由（`User=opc2-bucket-b`） | 与旧 opc2-eth 网关同一机制，生产已验证 |
 | ONT 轮换后恢复 | ONT 重启会打掉 eth 的 DHCP 租约与策略表默认路由；恢复 = dhclient 续租 + 补默认路由 + 删 dhclient 多装的抢占路由（幂等脚本，P5 落 `post_rotate_cmd`） | 2026-10-14 真机实测踩通 |

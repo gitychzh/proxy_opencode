@@ -10,9 +10,15 @@ Semantics (single unit-test contract — see the user's example):
   the current window triggers exactly one rotation (ONT reboot via the
   agent); after the rotation the counter restarts, because the new IP is a
   fresh quota bucket.
-* A hard 429 with ``Retry-After > 3600s`` bypasses the threshold and
-  rotates immediately (upstream-proven classification: that shape means
-  the per-IP daily quota is exhausted).
+* A hard 429 bypasses the threshold and rotates immediately: either
+  ``Retry-After > 3600s`` (upstream-proven classification: that shape
+  means the per-IP daily quota is exhausted) or **no Retry-After at
+  all** (measured 2026-10-16: the quota 429 can come without the
+  header; the real day's three quota cordons all carried
+  ``retry_after_s: null`` and never rotated). Both triggers are
+  deduplicated to at most one rotation per window per bucket via
+  ``note_rotation_started`` setting the same ``triggered`` flag the
+  threshold uses.
 
 State is in-memory plus a JSON snapshot for restart survival; the
 snapshot lives outside the repo and carries no message content.
@@ -88,9 +94,33 @@ class EgressCounters:
         return next_window_reset(at) - 86400.0
 
     def hard_quota(self, retry_after_s: float | None) -> bool:
-        """True when a 429's Retry-After classifies as per-IP daily exhaustion."""
+        """True when a 429 classifies as per-IP daily exhaustion.
 
-        return retry_after_s is not None and retry_after_s > self._hard
+        ``Retry-After > 3600s`` is the classic signal. A missing
+        Retry-After counts as exhaustion too (measured 2026-10-16: the
+        upstream free tier's quota 429 can ship without the header;
+        that day's three cordons all had ``retry_after_s: null``).
+        Soft throttling carries a short Retry-After (≤ 3600s).
+        """
+
+        if retry_after_s is None:
+            return True
+        return retry_after_s > self._hard
+
+    def should_rotate_on_429(
+        self, name: str, retry_after_s: float | None, *, now: float | None = None
+    ) -> bool:
+        """True iff this 429 should request a rotation right now.
+
+        Combines :meth:`hard_quota` with the per-window dedup flag so a
+        hard trigger cannot stack rotations within one window (the flag
+        is set by :meth:`note_rotation_started` while the rotation runs
+        and cleared by :meth:`reset` or the 08:00 rollover).
+        """
+
+        ts = now if now is not None else time.time()
+        rec = self._record_for(name, ts)
+        return not rec.triggered and self.hard_quota(retry_after_s)
 
     def record(self, name: str, *, now: float | None = None) -> bool:
         """Fold one completed (ok) request; True iff the threshold now fires.
@@ -119,8 +149,16 @@ class EgressCounters:
         return fire
 
     def note_rotation_started(self, name: str, *, now: float | None = None) -> None:
+        """Mark one rotation attempt in this window.
+
+        Also raises the window's ``triggered`` flag so bypass triggers
+        (hard 429) stay one-per-window like the threshold trigger; a
+        failed rotation leaves the flag set for the rest of the window.
+        """
+
         rec = self._record_for(name, now if now is not None else time.time())
         rec.rotations += 1
+        rec.triggered = True
         self._save()
 
     def reset(self, name: str, *, now: float | None = None) -> None:

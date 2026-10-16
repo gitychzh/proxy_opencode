@@ -9,6 +9,21 @@
 
 ## [Unreleased]
 
+### Changed — P5 硬 429 兜底补全:无 Retry-After 头也触发自动换 IP(2026-10-17)
+
+- **现场**:2026-10-16 深夜 opc2-wifi / opc2-eth / cc9 三桶先后被上游配额
+  429 cordon（`retry_after_s: null` × 3），轮换请求 0 次——原判据只认
+  `Retry-After > 3600s`,而上游配额 429 可以完全不带头,硬兜底永远
+  不触发。
+- `egress.counters`:`hard_quota()` 现将**缺失 Retry-After** 也判为
+  per-IP 日耗尽;新增 `should_rotate_on_429()` 组合"硬分类 + 每窗口一次"
+  去重;`note_rotation_started()` 置位 `triggered` flag,bypass 触发与
+  阈值触发共用同一防抖（防光猫被连环重启;轮换失败则 flag 持续到 08:00）。
+- `egress.rotate`:`on_release` 硬 429 分支改用上述组合判据。
+- 短值 Retry-After（≤3600s,软限流）行为不变:只 cordon 池,不换 IP。
+- 2026-10-16 附带修（hermes 桌面版,非本仓库）:桌面切模型把配置写回旧栈
+  9443 → 本地归一到 10002（此为用户侧 config.yaml 操作,不计版本）。
+
 ### Added — P3 免费模型目录 + 隐藏 /v1/models_cus + 结构化出口事件日志（2026-10-16）
 
 - **免费模型发现 `egress/catalog.py`**：每 10 分钟拉

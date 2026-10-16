@@ -2,7 +2,7 @@
 
 Covers the frozen contract in ``egress.counters`` / ``egress.rotate``:
 daily window at 08:00 Asia/Shanghai, threshold-fires-once-per-window,
-hard-429 (Retry-After > 3600s) bypass, ONT reboot orchestration with IP
+hard-429 (Retry-After > 3600s or absent) bypass, ONT reboot orchestration with IP
 verification, and the admin trigger endpoint.
 """
 
@@ -121,10 +121,37 @@ def test_daily_rollover_at_0800_resets_every_counter() -> None:
 
 def test_hard_quota_boundary_is_strictly_greater_than_3600s() -> None:
     counters = EgressCounters()
-    assert counters.hard_quota(None) is False
-    assert counters.hard_quota(600.0) is False
     assert counters.hard_quota(HARD_QUOTA_RETRY_AFTER_S) is False
     assert counters.hard_quota(HARD_QUOTA_RETRY_AFTER_S + 0.5) is True
+
+
+def test_hard_quota_missing_retry_after_is_daily_exhaustion() -> None:
+    """2026-10-16 measurement: quota 429s can carry no Retry-After header.
+
+    A missing header (parsed as None) must classify as daily exhaustion,
+    otherwise the hard trigger can never fire and the ONT never rotates
+    on real quota cordons (that day: three cordons, all
+    ``retry_after_s: null``, zero rotation requests).
+    """
+
+    counters = EgressCounters()
+    assert counters.hard_quota(None) is True
+    assert counters.should_rotate_on_429("a", None) is True
+
+
+def test_hard_429_rotation_fires_once_per_window() -> None:
+    """A headerless (hard) 429 rotates once; the flag blocks re-firing."""
+
+    counters = EgressCounters({"a": 500})
+    now = ts_cst(16, 15, 40)
+    assert counters.should_rotate_on_429("a", None, now=now) is True
+    counters.note_rotation_started("a", now=now)
+    assert counters.counts("a", now=now).triggered is True
+    assert counters.should_rotate_on_429("a", None, now=now) is False
+    assert counters.should_rotate_on_429("a", 7000.0, now=now) is False
+    # Successful rotation → new IP is a fresh quota bucket → flag clears.
+    counters.reset("a", now=now)
+    assert counters.should_rotate_on_429("a", None, now=now) is True
 
 
 def test_snapshot_is_admin_safe() -> None:
@@ -325,6 +352,44 @@ async def test_hard_429_bypasses_threshold_and_rotates() -> None:
     # A soft throttle (< 1h) must NOT trigger a rotation.
     rotator.on_release("a", ok=False, kind="http_429", retry_after_s=600.0)
     assert not rotator.running("a")
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_hard_429_without_retry_after_rotates_once() -> None:
+    """2026-10-16 field day: quota 429s come with no Retry-After header.
+
+    The headerless shape must still fire the bypass rotation, but the
+    per-window flag from :meth:`note_rotation_started` must stop any
+    stack-up of ONT reboots while the same window keeps 429-ing.
+    """
+
+    pool = make_pool("a")
+    rotator = make_rotator(pool, {"a": 1_000_000}, poll_s=0.02, timeout_s=0.15)
+    counters = rotator.counters
+    mark_healthy_with_ip(pool)
+    respx.post("http://a:10001/rotate").respond(
+        json={"ok": True, "results": [{"ok": True, "ont": "x", "detail": ""}]}
+    )
+
+    def _same_ip(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ready": True, "egress_ip": OLD_IP})
+
+    respx.get("http://a:10001/healthz").side_effect = _same_ip
+    rotator.on_release("a", ok=False, kind="http_429", retry_after_s=None)
+    task = rotator._tasks.get("a")  # noqa: SLF001
+    assert task is not None, "headerless 429 must start the bypass rotation"
+    outcome = await asyncio.wait_for(task, timeout=5.0)
+    assert outcome.ok is False
+    assert "unchanged" in outcome.detail
+    saw = counters.counts("a")
+    assert saw.rotations == 1
+    assert saw.triggered is True
+    # Same window, IP still stale-expired: further headerless 429s must
+    # not re-trigger rotations (one per window while the flag holds).
+    rotator.on_release("a", ok=False, kind="http_429", retry_after_s=None)
+    assert not rotator.running("a")
+    assert counters.counts("a").rotations == 1
 
 
 @respx.mock
