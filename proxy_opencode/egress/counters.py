@@ -18,7 +18,9 @@ Semantics (single unit-test contract — see the user's example):
   ``retry_after_s: null`` and never rotated). Both triggers are
   deduplicated to at most one rotation per window per bucket via
   ``note_rotation_started`` setting the same ``triggered`` flag the
-  threshold uses.
+  threshold uses — except that a **failed** attempt may be retried on
+  the next hard 429 after ``ROTATION_RETRY_COOLDOWN_S`` (2026-10-17:
+  one broken ONT config must not block IP resets for the whole day).
 
 State is in-memory plus a JSON snapshot for restart survival; the
 snapshot lives outside the repo and carries no message content.
@@ -44,6 +46,13 @@ logger = logging.getLogger("proxy_opencode.egress.counters")
 # and must NOT be treated as exhaustion). Fixed by decision record.
 HARD_QUOTA_RETRY_AFTER_S = 3600.0
 
+# A FAILED rotation attempt may be retried on the next hard 429 once this
+# much time has passed (measured 2026-10-17: all three buckets failed their
+# rotation — missing ONT config / prefix mismatch — and the one-per-window
+# flag then kept them un-rotated for the rest of the day). A cooldown keeps
+# a failing ONT from being rebooted back-to-back during a 429 burst.
+ROTATION_RETRY_COOLDOWN_S = 900.0
+
 _SNAPSHOT_VERSION = 1
 
 
@@ -61,6 +70,9 @@ class BucketCounts:
     last_rotation_ok: bool | None = None
     last_rotation_at: str = ""
     last_rotation_detail: str = ""
+    # Wall-clock epoch of the last rotation result (drives the retry
+    # cooldown for failed attempts; persisted for restart survival).
+    last_rotation_epoch: float = 0.0
 
 
 class EgressCounters:
@@ -71,10 +83,12 @@ class EgressCounters:
         thresholds: dict[str, int] | None = None,
         *,
         hard_retry_after_s: float = HARD_QUOTA_RETRY_AFTER_S,
+        retry_cooldown_s: float = ROTATION_RETRY_COOLDOWN_S,
         snapshot_path: str | None = None,
     ) -> None:
         self._thresholds = {name: int(v) for name, v in (thresholds or {}).items()}
         self._hard = float(hard_retry_after_s)
+        self._retry_cooldown = float(retry_cooldown_s)
         self._path = snapshot_path or None
         self._records: dict[str, BucketCounts] = {}
         self.load()
@@ -113,14 +127,25 @@ class EgressCounters:
         """True iff this 429 should request a rotation right now.
 
         Combines :meth:`hard_quota` with the per-window dedup flag so a
-        hard trigger cannot stack rotations within one window (the flag
-        is set by :meth:`note_rotation_started` while the rotation runs
-        and cleared by :meth:`reset` or the 08:00 rollover).
+        hard trigger cannot stack rotations within one window. One nuance
+        (measured 2026-10-17): a **failed** rotation attempt may be
+        retried on the next hard 429 once ``retry_cooldown_s`` has passed
+        — otherwise one broken ONT config blocks the bucket's IP reset
+        for the whole day. A running attempt is still excluded (the flag
+        stays latched until the result lands).
         """
 
         ts = now if now is not None else time.time()
         rec = self._record_for(name, ts)
-        return not rec.triggered and self.hard_quota(retry_after_s)
+        if not self.hard_quota(retry_after_s):
+            return False
+        if not rec.triggered:
+            return True
+        return (
+            rec.last_rotation_ok is False
+            and rec.last_rotation_epoch > 0.0
+            and (ts - rec.last_rotation_epoch) >= self._retry_cooldown
+        )
 
     def record(self, name: str, *, now: float | None = None) -> bool:
         """Fold one completed (ok) request; True iff the threshold now fires.
@@ -177,11 +202,12 @@ class EgressCounters:
         detail: str = "",
         now: float | None = None,
     ) -> None:
-        rec = self._record_for(name, now if now is not None else time.time())
+        ts = now if now is not None else time.time()
+        rec = self._record_for(name, ts)
         rec.last_rotation_ok = ok
+        rec.last_rotation_epoch = ts
         rec.last_rotation_at = (
-            datetime.fromtimestamp(now if now is not None else time.time(), tz=window_tz)
-            .isoformat(timespec="seconds")
+            datetime.fromtimestamp(ts, tz=window_tz).isoformat(timespec="seconds")
         )
         rec.last_rotation_detail = detail[:240]
         logger.info(
@@ -243,6 +269,7 @@ class EgressCounters:
                     "last_rotation_ok": rec.last_rotation_ok,
                     "last_rotation_at": rec.last_rotation_at,
                     "last_rotation_detail": rec.last_rotation_detail,
+                    "last_rotation_epoch": rec.last_rotation_epoch,
                 }
                 for name, rec in self._records.items()
             },
@@ -283,6 +310,7 @@ class EgressCounters:
                     ),
                     last_rotation_at=str(raw.get("last_rotation_at") or ""),
                     last_rotation_detail=str(raw.get("last_rotation_detail") or ""),
+                    last_rotation_epoch=float(raw.get("last_rotation_epoch") or 0.0),
                 )
             except (TypeError, ValueError):
                 continue

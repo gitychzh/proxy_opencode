@@ -310,6 +310,31 @@ async def test_release_notifies_observer_with_retry_after() -> None:
 
 
 @pytest.mark.asyncio
+async def test_release_notifies_observer_on_success() -> None:
+    """Regression 2026-10-17: the ok path returned before the observer ran.
+
+    Successful (ok) releases never reached ``counters.record()``, so every
+    bucket's request count stayed 0 for a whole day and the rotation
+    threshold could not fire. The observer must see both outcomes.
+    """
+
+    seen: list[tuple[str, bool, str]] = []
+
+    class _Spy:
+        def on_release(
+            self, name: str, *, ok: bool, kind: str, retry_after_s: float | None
+        ) -> None:
+            seen.append((name, ok, kind))
+
+    pool = make_pool("a")
+    mark_healthy_with_ip(pool)
+    pool.attach_release_observer(_Spy())
+    lease = await pool.acquire()
+    await pool.release(lease, ok=True)
+    assert seen == [("a", True, "")]
+
+
+@pytest.mark.asyncio
 async def test_quota_cordon_cleared_by_rotation_success() -> None:
     pool = make_pool("a")
     mark_healthy_with_ip(pool)
@@ -390,6 +415,66 @@ async def test_hard_429_without_retry_after_rotates_once() -> None:
     rotator.on_release("a", ok=False, kind="http_429", retry_after_s=None)
     assert not rotator.running("a")
     assert counters.counts("a").rotations == 1
+
+
+def test_hard_429_does_not_retry_during_cooldown() -> None:
+    """A failed attempt retries on the next hard 429 only after cooldown.
+
+    Measured 2026-10-17: all three buckets failed their rotations (missing
+    ONT config / prefix mismatch) and the one-per-window flag kept them
+    un-rotated for the rest of the day. A cooldown gates the retry.
+    """
+
+    counters = EgressCounters({"a": 500}, retry_cooldown_s=60.0)
+    t0 = 1_000_000.0
+    assert counters.should_rotate_on_429("a", None, now=t0)
+    counters.note_rotation_started("a", now=t0)
+    counters.note_rotation_result("a", ok=False, detail="no onts", now=t0)
+    # Immediately after the failure: still within the cooldown.
+    assert not counters.should_rotate_on_429("a", None, now=t0 + 30.0)
+    # After the cooldown has elapsed: retry allowed.
+    assert counters.should_rotate_on_429("a", None, now=t0 + 61.0)
+
+
+def test_hard_429_retry_blocked_while_attempt_outcome_pending() -> None:
+    counters = EgressCounters({"a": 500}, retry_cooldown_s=60.0)
+    t0 = 1_000_000.0
+    counters.note_rotation_started("a", now=t0)
+    # Started but no result recorded yet: never re-trigger concurrently
+    # (the flag latches until the outcome lands).
+    assert not counters.should_rotate_on_429("a", None, now=t0 + 999.0)
+
+
+def test_failed_rotation_retry_not_extended_by_soft_429() -> None:
+    """A soft throttle during the cooldown must not reset/extend anything."""
+
+    counters = EgressCounters({"a": 500}, retry_cooldown_s=60.0)
+    t0 = 1_000_000.0
+    counters.note_rotation_started("a", now=t0)
+    counters.note_rotation_result("a", ok=False, detail="x", now=t0)
+    # Soft 429 (short Retry-After) never rotates, before or after cooldown.
+    assert not counters.should_rotate_on_429("a", 600.0, now=t0 + 999.0)
+    assert not counters.should_rotate_on_429("a", 600.0, now=t0 + 10.0)
+
+
+def test_counter_snapshot_roundtrips_rotation_epoch() -> None:
+    """The retry cooldown survives a restart (last_rotation_epoch persisted)."""
+
+    import json as _json
+    import os as _os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _os.path.join(tmp, "counts.json")
+        counters = EgressCounters({"a": 500}, retry_cooldown_s=60.0, snapshot_path=path)
+        t0 = time.time()
+        counters.note_rotation_started("a", now=t0)
+        counters.note_rotation_result("a", ok=False, detail="x", now=t0)
+        raw = _json.load(open(path, encoding="utf-8"))["buckets"]["a"]
+        assert raw["last_rotation_epoch"] == t0
+        reloaded = EgressCounters({"a": 500}, retry_cooldown_s=60.0, snapshot_path=path)
+        assert reloaded.should_rotate_on_429("a", None, now=t0 + 61.0)
+        assert not reloaded.should_rotate_on_429("a", None, now=t0 + 30.0)
 
 
 @respx.mock

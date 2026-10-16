@@ -421,6 +421,12 @@ class EgressPool:
         if ok:
             state.failures = 0
             state.last_error = ""
+            # The ok path used to return before the observer ran, which
+            # meant counters.record() never saw a single completed request
+            # and the rotation threshold could not fire (found 2026-10-17:
+            # every bucket showed count=0 after a full day of 200s). The
+            # release outcome must reach the trigger logic on ok too.
+            self._notify_observer(state, ok, kind, retry_after_s)
             return
         state.failures += 1
         state.last_error = kind or "error"
@@ -462,17 +468,25 @@ class EgressPool:
                 cordon_reason=state.cordon_reason[:120],
                 egress_ip=state.egress_ip,
             )
-        if self._observer is not None:
-            try:
-                self._observer.on_release(
-                    state.spec.name, ok=ok, kind=kind, retry_after_s=retry_after_s
-                )
-            except Exception:
-                # Counter/rotation bookkeeping must never break the release
-                # path; the probe loop keeps serving state independently.
-                logger.exception(
-                    "release observer failed", extra={"egress": state.spec.name}
-                )
+        self._notify_observer(state, ok, kind, retry_after_s)
+
+    def _notify_observer(
+        self, state: EgressState, ok: bool, kind: str, retry_after_s: float | None
+    ) -> None:
+        """Fold one release outcome into the rotator/counters (never fatal)."""
+
+        if self._observer is None:
+            return
+        try:
+            self._observer.on_release(
+                state.spec.name, ok=ok, kind=kind, retry_after_s=retry_after_s
+            )
+        except Exception:
+            # Counter/rotation bookkeeping must never break the release
+            # path; the probe loop keeps serving state independently.
+            logger.exception(
+                "release observer failed", extra={"egress": state.spec.name}
+            )
 
     # --------------------------------------------------------------- probes
 

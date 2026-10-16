@@ -135,9 +135,11 @@ class EgressRotator:
           quota exhaustion (measured boundary: > 3600s, or no
           Retry-After header at all — both, 2026-10-16 measurement)
           → immediate rotation, bypassing the threshold, at most one
-          per window per bucket. Soft throttles (< 3600s, with a
-          short Retry-After) keep the plain pool cordon and do not
-          rotate.
+          per window per bucket; a FAILED attempt may be retried after
+          the counters' retry cooldown so a transient ONT/agent problem
+          does not block IP resets for the rest of the day. Soft
+          throttles (< 3600s, with a short Retry-After) keep the plain
+          pool cordon and do not rotate.
         """
 
         if ok:
