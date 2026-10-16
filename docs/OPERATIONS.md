@@ -31,35 +31,46 @@ ascending。已部署 win10-local + 四桶，经公网 LB 7/7 实测 200。
 counter 阈值实测为 63/64。诊断脚本存放于本机
 `%TEMP%\opencode\ablate*.py`（未入库，仅一次性取证）。
 
-## 1. 当前架构（旧栈：公网 LB + 四桶完整网关）
+## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 三设备出口桶）
 
 ```text
-客户端
-  -> https://llm.223722.xyz/v1 (Cloudflare)     # 或 IP 直连 https://115.29.231.25:9443/v1
-  -> cloudflared 隧道 zen-gw
-  -> 杭州 ECS 上的 zen-lb :7892
-  -> Tailscale 上的各 proxy_opencode 桶 :8791 / :8792
+客户端（hermes / 任意 OpenAI SDK）
+  -> https://115.29.231.25:10002/v1        # caddy TLS（自签 CA zen-gw-local-ca）
+  -> 127.0.0.1:10010（宿主端口映射）
+  -> docker 容器 zen-gw（容器内 :10002, uvicorn）
+  -> egress 池（按桶 CONNECT 到设备 agent，出口=设备各自公网 IP）
+       opc2-wifi  http://100.109.57.26:10001   电信 180.117.204.0/24
+       opc2-eth   http://100.109.57.26:10002   移动 36.149.54.0/24;223.68.27.0/24
+       cc9        http://100.87.219.115:10001  联通 112.83.208.0/24
   -> OpenCode Zen
 ```
 
-本节描述的是**旧栈**。0.7.x 新栈（网关进 ECS Docker 容器、桶设备只跑
-`egress-agent`，客户端入口 `https://115.29.231.25:10002/v1`）与之并存，权威描述见
-`docs/ARCHITECTURE.md`。
+> **旧栈 9443/zen-lb/cloudflared-ingress 已于 2026-10-17 由所有者下令退役并
+> 从 ECS 上彻底清除**（zen-lb / zen-glm53×3 服务停止并删除 unit；`/opt/proxy_opencode`、
+> `/opt/proxy_opencode_v2`、`/opt/llmgw`、`/opt/zen-glm53` 目录删除；caddy 仅剩 `:10002`
+> 一站；cloudflared 隧道清空 ingress 只剩 404 兜底）。设备侧旧栈完整网关（:879x）
+> 尚未拆除，因入口链路已从 ECS 断开，处于不可达闲置状态。
 
-旧栈对外模型为 `ds41f_cus`，上游 Zen 模型 ID 使用裸 ID `big-pickle`。四个桶按各自出口 IP 独立计额度；LB 做 least-connection 分发、失败重试及额度冷却。ECS/Tailscale 地址、服务及凭据位置见 `ACCESS.md`，不要把真实密钥写入仓库。
+0.7.x 权威描述见 `docs/ARCHITECTURE.md`。新栈对外经掩码别名
+`deepseek-ai/deepseek-v4.1-flash`（→ `big-pickle`）+ 免费裸 ID 透传
+（`/v1/models_cus` 纯裸 ID 输出）。三桶按各自出口 IP 独立计额度；容器内
+least-in-flight 选择、429/5xx/传输失败**桶间 failover**、cordon 冷却、P5 每窗口
+≥500 或硬 429 自动换 IP（opc2-eth 已真机验证；opc2-wifi 光猫重启 API 待现场
+复刻 HG8020C 页面 JS，`onts` 暂空）。ECS/Tailscale 地址与凭据位置见 `ACCESS.md`，
+不要把真实密钥写入仓库。
 
-## 2. 部署与最近状态
+## 2. 部署与最近状态（0.7.x 新栈，2026-10-17）
 
-| 节点 | 当前角色 | 最近确认状态 |
-|---|---|---|
-| `opc2-wifi` / `100.109.57.26:8791` | OPC2 无线出口桶 | 0.6.4；公网 IPv4 `117.95.231.70`；Zen 返回 200 |
-| `opc2-eth` / `100.109.57.26:8793` | OPC2 有线出口桶（独立 Linux UID + 策略路由表 991） | 0.6.4；公网 IPv4 `36.149.54.158`；Zen 返回 200 |
-| `cc9` / `100.87.219.115:8792` | MI CC 9 Meitu Edition / Termux 桶 | 0.6.4；当前公网 IPv4 `112.83.208.241`；Zen 返回 200 |
-| `xiaomipad5` / `100.109.109.105:8791` | 小米平板5 Ubuntu chroot 桶 | 0.6.4；公网 IPv4 `218.93.215.38`；Hermes CLI（公网入口 + 永久动态 key）E2E 三件套通过；**飞书机器人网关** websocket 模式在线（见 `ACCESS.md` §11） |
-| `win10-local` / 本机 | 用户个人机桶（已退出 LB 池，仍可直连） | 0.6.4；计划任务 `zen-gw-local` |
-| `hangzhou-ecs` / `100.81.214.95` | Tailscale LB，7892 | zen-lb active；当前仅含上述四个上游；**SSH 已改 `-p 222`**（公网/ts 均只听 222）；详细配置与访问见 `ACCESS.md` |
+| 桶 | agent | 出口 IP | expect_prefix | 最近确认状态 |
+|---|---|---|---|---|
+| `opc2-wifi` | `100.109.57.26:10001`（egress-agent@wifi） | `180.117.204.212` 电信 | `180.117.204.0/24` | healthy；P5 轮换缺 ONT 配置（HG8020C 待现场接入，硬 429 只 cordon 不换 IP） |
+| `opc2-eth` | `100.109.57.26:10002`（egress-agent@eth） | `223.68.27.189` 移动 | `36.149.54.0/24;223.68.27.0/24` | healthy；P5 轮换真机验证通过（16:19 UTC 实测重启→新 IP），前缀多段匹配 2026-10-17 修正 |
+| `cc9` | `100.87.219.115:10001` | `112.83.208.127` 联通 | `112.83.208.0/24` | healthy |
+| `ecs` 本机桶 | （已剔除） | 115.29.231.25 | — | **2026-10-17 移出池**（机房 IP 免费额度被共享流量即耗，实测"几条就429"主因）；`egress-agent@ecs` 已停用 |
+| `hangzhou-ecs` | docker `zen-gw`（caddy→127.0.0.1:10010→容器:10002） | 115.29.231.25 入口 | — | healthy；failover 真机首测通过（wifi 429 → 换桶 → 客户端 200,2026-10-17 17:02 UTC） |
 
-2026-10-05 已将 LB 池切换为两个 OPC2 不同公网出口 + CC9 + 小米平板5，共四桶。旧 `win10-local` / `owin10` 不在当前 LB 池；ECS 上保留变更前配置备份 `/opt/proxy_opencode/edge_lb.env.before-four-buckets-20261005`。四个新目标均通过 Bearer 桶间 key 的 `GET /v1/models`（HTTP 200），并已在 Hermes/负载均衡链路上完成真实 chat 检查。
+2026-10-05 的 LB 池调整记录与 `edge_lb.env` 变更备份已随旧栈退役（2026-10-17 ECS 清理）一并移除；
+历史细节见 git 历史与 `CHANGELOG.md`。
 
 ### 2.1 0.7.x 新栈部署与最近状态（2026-10-16 idx 全绿）
 
