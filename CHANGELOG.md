@@ -34,11 +34,14 @@
   各协议适配 route 全覆盖（test_gateway_routes / test_registry_mask）。
 - **隐藏端点 `GET /v1/models_cus`**：展示全部免费模型裸 ID 的**唯一**路径，
   鉴权接受 Bearer 或 `?key=<网关或管理员 key>`（浏览器可直接打开；
-  该 `?key=` 形式仅此端点支持，协议路由仍只认头字段）。带
-  `metadata: {source, refreshed_at, stale}`；zen-direct 模式限定（其余
-  模式 404）；OpenAPI schema 隐藏。**标准 `/v1/models` 保持只列公开
-  别名**——禁止再造 models/model 等普通变体端点（防扫描 agent 捕获），
-  测试锁定该契约。
+  该 `?key=` 形式仅此端点支持，协议路由仍只认头字段）。**默认响应即纯裸
+  ID**——一行一个、`text/plain`、无尾随换行、零装饰（owner 指令
+  2026-10-16：网页看到的就是裸 ID 列表）；`?format=json` 才返回带
+  `metadata: {source, refreshed_at, stale}` 的 OpenAI 形状。zen-direct
+  模式限定（其余模式 404）；OpenAPI schema 隐藏。**标准 `/v1/models`
+  保持只列公开别名**——禁止再造 models/model 等普通变体端点（防扫描
+  agent 捕获），测试锁定该契约（默认 plain 精确字节 + format=json
+  形状各一测）。
 - **事件日志 `egress/eventlog.py`**（`ZEN_EGRESS_EVENT_LOG`，如
   `/data/egress_events.jsonl`）：一行一 JSON 事件、UTC 时间戳、确定性
   尺寸轮转（5MB × 保留 2 份）、写失败自动禁用不抛异常。全链路事件齐备：
@@ -54,12 +57,12 @@
   `/v1/models` 不漏免费 ID）、`tests/test_egress_eventlog.py`（事件
   时间线含 IP 前后对照、失败形态、尺寸轮转、I/O 故障降级）。
 
-### Not-a-code-change — "每日 7 次定时重启" cron 排查结论（2026-10-16）
+### Not-a-code-change — "每日 7 次定时重启" cron 排查结论（2026-10-16，闭环）
 
-- 全仓 grep（`cron|crontab|schedule|定时重启|ont_reboot`）：**无任何
-  定时重启代码存在**——它是 opc2 设备侧 crontab 条目，非仓库代码，无需
-  删除文件。停用只需设备上 `crontab -e` 删掉 ONT 重启行（命令序列记录于
-  `docs/ARCHITECTURE.md` §6 迁移项）；启用 P5 前必须停用（双重换 IP）。
+- 设备侧复核（opc2_uname / root 两份 crontab、`/etc/cron.d/*`、全部 systemd
+  timers）：**该 cron 不复存在**，无需任何动作；P5 编排（
+  `ZEN_EGRESS_ROTATION`）自部署起是唯一负责重启 ONT 的组件。详记见
+  `docs/ARCHITECTURE.md` §6 迁移项与 opc2 策略路由自愈条目。
 
 ### Added — P5 自动换 IP：日窗计数 + ONT 重启编排（ECS 侧，2026-10-16）
 

@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from .. import __version__
 from ..auth import build_auth_dependency
@@ -60,6 +60,10 @@ def make_router(
         standard path must keep serving only the masked public alias so
         model-scanning agents find nothing. The ``_cus`` suffix IS the
         contract — never alias it to a standard-looking name.
+
+        Default body is bare ids, one per line, ``text/plain`` with no
+        trailing newline, no decoration (browser page, owner 2026-10-16);
+        ``?format=json`` returns the OpenAI-shaped envelope instead.
         """
 
         catalog = getattr(request.app.state, "free_catalog", None)
@@ -67,7 +71,12 @@ def make_router(
             return openai_error(
                 404, "models_cus catalog is available only in zen-direct mode."
             )
-        return catalog.body()
+        if request.query_params.get("format", "").strip().lower() == "json":
+            return catalog.body()
+        return Response(
+            content=catalog.plain_body(),
+            media_type="text/plain; charset=utf-8",
+        )
 
     @router.get("/healthz")
     async def healthz(request: Request) -> dict[str, Any]:

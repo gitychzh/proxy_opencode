@@ -54,8 +54,10 @@ curl -H "Authorization: Bearer dev-local-key" -H "Content-Type: application/json
 
 **免费模型透传（P3）**：全部免费模型的裸 ID（`big-pickle`、`space-bunny-free` 等）
 只通过隐藏端点 `GET /v1/models_cus?key=<key>` 展示（浏览器可直接打开，也接受
-Bearer）；这些 ID 在聊天接口里原样透传。**标准 `/v1/models` 永远只列公开别名**，
-不要把 models_cus 复制成 models/model 等普通变体名。
+Bearer）——**默认响应就是裸 ID 一行一个的 `text/plain`**（无尾随换行、零装饰；
+`?format=json` 取回 OpenAI 形状）；这些 ID 在聊天接口里原样透传。**标准
+`/v1/models` 永远只列公开别名**，不要把 models_cus 复制成 models/model 等普通
+变体名。
 
 | 接口 | 客户端 | 认证方式 |
 | --- | --- | --- |

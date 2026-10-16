@@ -134,7 +134,9 @@ def make_app(tmp_path, mode: str = "zen-direct", **kw):
 
 
 @pytest.mark.asyncio
-async def test_models_cus_lists_all_free_ids_with_query_key(tmp_path):
+async def test_models_cus_default_is_plain_bare_ids(tmp_path):
+    """Default body = one bare id per line, nothing else (owner 2026-10-16)."""
+
     app = make_app(tmp_path)
     with respx.mock:
         respx.get("https://opencode.ai/zen/v1/models").respond(json=MOCK_UPSTREAM)
@@ -143,6 +145,23 @@ async def test_models_cus_lists_all_free_ids_with_query_key(tmp_path):
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
             resp = await client.get("/v1/models_cus?key=gw-key")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/plain")
+    assert resp.text == "big-pickle\ndeepseek-v4.1-flash-free\nspace-bunny-free"
+
+
+@pytest.mark.asyncio
+async def test_models_cus_format_json_keeps_openai_shape(tmp_path):
+    app = make_app(tmp_path)
+    with respx.mock:
+        respx.get("https://opencode.ai/zen/v1/models").respond(json=MOCK_UPSTREAM)
+        await app.state.free_catalog.refresh()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.get(
+                "/v1/models_cus", params={"key": "gw-key", "format": "json"}
+            )
     assert resp.status_code == 200
     body = resp.json()
     ids = [m["id"] for m in body["data"]]

@@ -169,6 +169,11 @@ class ZenFreeCatalog:
             self._refreshed_at, tz=timezone.utc
         ).isoformat(timespec="seconds")
 
+    def plain_body(self) -> str:
+        """Bare-id body: one id per line, no decoration, no trailing newline."""
+
+        return "\n".join(self.ids())
+
     def body(self) -> dict[str, Any]:
         """OpenAI-shaped list body for the hidden /v1/models_cus endpoint."""
 
