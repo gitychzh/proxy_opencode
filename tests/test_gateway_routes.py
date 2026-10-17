@@ -139,7 +139,7 @@ async def test_unknown_model_rejected_404():
     err = resp.json()["error"]
     assert err["code"] == "model_not_found"
     assert "totally-made-up-model" in err["message"]
-    assert "/v1/models_cus" in err["message"]
+    assert "/v1/models" in err["message"]
     # Never reached the adapter.
     assert fake.last_payload is None
 

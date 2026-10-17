@@ -26,14 +26,17 @@ DEFAULT_ZEN_MODELS = ("big-pickle",)
 
 # Public-facing model catalogue. Entries are "id:display_name:upstream".
 # Users only ever see `id`; upstream is resolved server-side and scrubbed
-# from every response (JSON bodies and streamed SSE chunks alike).
-# The default upstream must stay in sync with the live zen catalogue
-# (GET https://opencode.ai/zen/v1/models) — see the 2026-10-02 drift note
-# in CHANGELOG.md.
+# from every response (JSON bodies and streamed SSE chunks alike). The
+# standard /v1/models body is plain OpenAI shape (id/object/created/
+# owned_by); `display_name` stays internal. The default upstream must stay
+# in sync with the live zen catalogue (GET
+# https://opencode.ai/zen/v1/models) — see the 2026-10-02 drift note in
+# CHANGELOG.md.
 DEFAULT_PUBLIC_MODELS = (
     # 2026-10-16: the alias says what the model is (big-pickle IS DeepSeek
-    # V4.1 Flash upstream). The full free-model list lives in the hidden
-    # /v1/models_cus endpoint; the standard /v1/models must stay masked.
+    # V4.1 Flash upstream). 2026-10-17: big-pickle is the ONLY relayed
+    # upstream model — its raw id (and every other free id) is neither
+    # listable nor callable through the standard paths.
     "deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle",
 )
 
@@ -138,6 +141,10 @@ class Settings:
     payload_dump_dir: str = ""
     # Empty -> anonymous free tier ("Bearer public" + system-prompt marker).
     zen_api_key: str = ""
+    # The relay allowlist: the ONLY upstream models this gateway fronts.
+    # /v1/models_cus lists it, and the unmasked list_models fallback uses it.
+    # Clients address models by public alias (PUBLIC_MODELS), never by these
+    # raw ids.
     zen_models: list[str] = field(default_factory=lambda: list(DEFAULT_ZEN_MODELS))
     zen_timeout_s: int = 300
     # Optional egress proxy for the zen client, e.g. "http://127.0.0.1:7897".

@@ -80,16 +80,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.adapter = build_adapter(settings, pool=egress_pool)
     app.state.keystore = KeyStore(settings.key_store_path, settings.key_default_ttl_hours)
     app.state.registry = ModelRegistry(settings)
-    # P3: the hidden /v1/models_cus endpoint's data source. Each refresh also
-    # seeds the registry's free-passthrough set, so chat accepts every free
-    # id verbatim while /v1/models keeps serving only the masked alias.
+    # P3: the hidden /v1/models_cus endpoint's data source. It lists only the
+    # relayed upstream models (OPENCODE_ZEN_MODELS, default big-pickle) — the
+    # gateway fronts nothing else, and /v1/models keeps serving the masked
+    # alias while chat rejects raw upstream ids outright.
     free_catalog: ZenFreeCatalog | None = None
     if settings.upstream_mode == "zen-direct":
         free_catalog = ZenFreeCatalog(
             settings.zen_base_url,
             api_key=settings.zen_api_key,
-            registry=app.state.registry,
-            fallback_ids=settings.zen_models,
+            relay_ids=settings.zen_models,
         )
     app.state.free_catalog = free_catalog
 

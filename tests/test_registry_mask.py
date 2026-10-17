@@ -31,17 +31,21 @@ def test_default_catalogue_has_single_public_model():
     cat = reg.catalog()
     ids = [m["id"] for m in cat["data"]]
     assert ids == [ALIAS]
-    assert cat["data"][0]["display_name"] == "DeepSeek V4.1 Flash"
+    # Strictly standard OpenAI model shape: no gateway extras (hermes and
+    # other discovery agents consume this body unmodified).
+    assert set(cat["data"][0]) == {"id", "object", "created", "owned_by"}
+    assert cat["data"][0]["object"] == "model"
 
 
 def test_resolve_maps_any_requested_model_to_upstream():
     reg = make_registry()
-    # 2026-10-02: the live zen catalogue switched to bare ids ("big-pickle");
-    # the historical "opencode/…" spelling is no longer a valid upstream id.
     assert reg.resolve(ALIAS) == "big-pickle"
-    assert reg.resolve("big-pickle") == "big-pickle"
-    # STRICT (owner 2026-10-16): unknown ids are rejected, not silently
-    # resolved to the default upstream.
+    # 2026-10-17 (owner): only the public alias is addressable. The raw
+    # upstream id is rejected exactly like any other unknown id, and the
+    # historical "opencode/…" spelling never was valid upstream.
+    for raw in ("big-pickle", "opencode/big-pickle", "space-bunny-free"):
+        with pytest.raises(UnknownModelError):
+            reg.resolve(raw)
     with pytest.raises(UnknownModelError):
         reg.resolve("gpt-4o")
     with pytest.raises(UnknownModelError):
@@ -56,30 +60,6 @@ def test_public_id_masks_every_upstream_echo():
     assert reg.public_id("opencode/big-pickle") == ALIAS
     assert reg.public_id("whatever-upstream-echoes") == ALIAS
     assert reg.public_id(ALIAS) == ALIAS
-
-
-def test_free_passthrough_echoes_verbatim():
-    """P3: ids served by /v1/models_cus round-trip unchanged — masking keeps
-    rewriting everything else (the alias, unknown echoes)."""
-    reg = make_registry()
-    reg.set_free_ids(["space-bunny-free", "cat-jam-free", "big-pickle"])
-    assert reg.resolve("space-bunny-free") == "space-bunny-free"
-    assert reg.resolve(" cat-jam-free ") == "cat-jam-free"
-    assert reg.public_id("space-bunny-free") == "space-bunny-free"
-    # Entries still win over the free set (the alias stays masked).
-    assert reg.resolve(ALIAS) == "big-pickle"
-    assert reg.public_id("big-pickle") == ALIAS
-    # Unknown non-free ids are rejected under the strict contract.
-    with pytest.raises(UnknownModelError):
-        reg.resolve("claude-opus-5")
-
-
-def test_set_free_ids_ignores_blank_entries():
-    reg = make_registry()
-    reg.set_free_ids(["a-free", "", "  "])
-    assert reg.resolve("a-free") == "a-free"
-    with pytest.raises(UnknownModelError):
-        reg.resolve("")
 
 
 def test_mask_off_is_passthrough():
@@ -100,6 +80,9 @@ def test_custom_catalogue_entries():
     )
     assert reg.resolve("b") == "up-b"
     assert reg.public_id("up-a") == "a"
+    # the upstream spelling is not addressable either.
+    with pytest.raises(UnknownModelError):
+        reg.resolve("up-b")
 
 
 # --------------------------------------------------------------- sse mask

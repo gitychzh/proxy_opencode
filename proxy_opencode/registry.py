@@ -1,27 +1,28 @@
 """Public model registry: the alias layer between users and upstreams.
 
-Users only ever see the public catalogue (e.g. the deepseek alias). Every
-request's model field is resolved to the upstream id, and every response's
-model field is rewritten back to the public id — so the upstream model name
-never leaks through the *masked* paths.
+Users only ever see the public catalogue — by default exactly one alias,
+``deepseek-ai/deepseek-v4.1-flash``. Every request's model field is resolved
+to the upstream id and every response's model field is rewritten back to the
+public id, so the upstream model name (``big-pickle``) never leaks through
+*any* client-visible path (JSON body, SSE chunks, /v1/models).
 
-Exception — free-model passthrough (P3): the full free-model list is served
-only by the hidden ``/v1/models_cus`` endpoint, and a client that deliberately
-names a free upstream id (learned there) gets it passed through verbatim,
-including the echoed ``model`` field. Masking still applies to everything
-else, so scanning agents on the standard paths can never enumerate upstream
-ids.
+Strict contract (owner, 2026-10-17): the public alias is the ONLY accepted
+model id. The raw upstream spelling is rejected (404) just like any other
+unknown id — a client cannot address the backend id even if it guesses it —
+and nothing is relayed beyond the ``PUBLIC_MODELS`` entries. The standard
+``/v1/models`` body is plain OpenAI shape (id/object/created/owned_by) so
+discovery agents such as hermes can consume it unmodified.
 """
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any
 
 from .config import Settings
 
 
 class UnknownModelError(Exception):
-    """Client-supplied model id outside the alias + free-passthrough set.
+    """Client-supplied model id outside the public alias set.
 
     Owner requirement (2026-10-16): the model id must be exactly right —
     unknown ids are rejected (404) instead of silently resolving to the
@@ -41,22 +42,6 @@ class ModelRegistry:
         if not self._entries:
             # Unmasked passthrough mode: resolve/public_id become identity.
             self.enabled = False
-        self._free_ids: frozenset[str] = frozenset()
-
-    # ------------------------------------------------------ free passthrough
-
-    def set_free_ids(self, ids: Iterable[str]) -> None:
-        """Seed the free-model passthrough set (called by the catalog).
-
-        Membership makes ``resolve``/``public_id`` echo the id verbatim:
-        the client already knows the raw upstream name (the catalog gave it
-        to them), so rewriting would only break ``model`` round-tripping.
-        """
-
-        cleaned = frozenset(
-            i for i in (str(x).strip() for x in ids) if i
-        )
-        self._free_ids = cleaned
 
     # ---------------------------------------------------------------- read
 
@@ -69,7 +54,13 @@ class ModelRegistry:
         return self._entries[0]["id"]
 
     def catalog(self) -> dict[str, Any]:
-        """OpenAI-shaped GET /v1/models body listing only public models."""
+        """OpenAI-shaped GET /v1/models body listing only public models.
+
+        Strictly standard fields (id/object/created/owned_by) — clients such
+        as hermes auto-discover models from this body and must not need to
+        understand gateway extras.
+        """
+
         return {
             "object": "list",
             "data": [
@@ -78,7 +69,6 @@ class ModelRegistry:
                     "object": "model",
                     "created": 0,
                     "owned_by": "gateway",
-                    "display_name": e["display_name"],
                 }
                 for e in self._entries
             ],
@@ -89,27 +79,25 @@ class ModelRegistry:
     def resolve(self, requested: Any) -> str:
         """Any client-requested model id -> the upstream model to call.
 
-        STRICT (owner requirement): the id must be one of the public
-        alias entries or the free-passthrough set (ids served  by
-        /v1/models_cus); anything else raises `UnknownModelError` so the
-        pipeline can answer 404 instead of silently serving the default
-        model for a typo'd request.
+        STRICT (owner requirement): only the public alias ids are accepted —
+        the raw upstream spelling (``big-pickle``) is just as unknown as a
+        typo'd id and raises `UnknownModelError`, so the backend model name
+        is unaddressable from the client side.
         """
         if not self.enabled:
             return str(requested or "")
         raw = str(requested or "").strip()
         for e in self._entries:
-            if raw in (e["id"], e["upstream"]):
+            if raw == e["id"]:
                 return e["upstream"]
-        if raw in self._free_ids:
-            return raw
         raise UnknownModelError(raw)
 
     def public_id(self, model: Any) -> str:
         """Any upstream/echoed model id -> the public id shown to users.
 
-        Same order as `resolve`: masked entries rewrite upstream names to
-        the alias; deliberately-requested free ids echo unchanged.
+        Every upstream spelling (bare id, legacy ``provider/model`` echo,
+        anything unrecognised) maps back to the alias; there is no
+        passthrough path that could surface a backend id.
         """
         if not self.enabled:
             return str(model or "")
@@ -117,6 +105,4 @@ class ModelRegistry:
         for e in self._entries:
             if raw in (e["id"], e["upstream"]):
                 return e["id"]
-        if raw in self._free_ids:
-            return raw
         return self.default_public_id

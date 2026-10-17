@@ -1,16 +1,18 @@
-"""Zen free-model catalog: discovery, TTL cache and passthrough seeding.
+"""Zen relay catalog: the list behind the hidden ``/v1/models_cus`` endpoint.
 
-The Zen catalogue (``GET {zen_base}/models``) mixes paid and free models.
-The anonymous free tier can only ever *use* the free ones, and the user
-experience contract for this gateway is:
+The gateway fronts exactly the upstream models configured in
+``OPENCODE_ZEN_MODELS`` (default: ``big-pickle``). Those are the only models
+ever relayed, and the only models this catalog exposes — "all free models"
+enumeration was removed on 2026-10-17 (owner: keep only big-pickle).
 
-* the public alias (``deepseek-ai/deepseek-v4.1-flash`` -> ``big-pickle``)
-  stays masked in the standard ``/v1/models`` response — scanners of that
-  standard path must not enumerate the real upstream ids;
-* every OTHER free model passes through verbatim: the full free-id list
-  is served ONLY by the hidden ``/v1/models_cus`` endpoint (the ``_cus``
-  is the contract — do not add stray variants of the path, the point is
-  that model-scanning agents probing standard paths find nothing).
+* the standard ``/v1/models`` serves ONLY the masked public alias
+  (``deepseek-ai/deepseek-v4.1-flash``); scanners of that path must not
+  enumerate the real upstream ids;
+* the hidden ``/v1/models_cus`` endpoint (the ``_cus`` suffix IS the
+  contract — never add a standard-looking alias) lists the relayed upstream
+  ids verbatim, intersected with the live free-model view so a relayed id
+  that upstream stopped serving free shows up stale/absent rather than
+  silently lying.
 
 Free-model detection: upstream entries may carry explicit markers
 (``allowAnonymous`` / ``cost`` / ``pricing``); when they are absent
@@ -63,7 +65,7 @@ def is_free_entry(entry: dict[str, Any]) -> bool:
 
 
 class ZenFreeCatalog:
-    """TTL-cached fetcher of the Zen free-model ids (ECS-host side)."""
+    """TTL-cached view of the relayed free-model ids (ECS-host side)."""
 
     def __init__(
         self,
@@ -71,8 +73,7 @@ class ZenFreeCatalog:
         *,
         api_key: str = "",
         ttl_s: float = _REFRESH_TTL_S,
-        registry: Any = None,
-        fallback_ids: list[str] | None = None,
+        relay_ids: list[str] | None = None,
         timeout_s: float = 10.0,
     ) -> None:
         parsed = httpx.URL(base_url)
@@ -84,26 +85,37 @@ class ZenFreeCatalog:
         self._base = base_url.rstrip("/")
         self._api_key = api_key
         self._ttl_s = max(60.0, float(ttl_s))
-        self._registry = registry
         self._timeout_s = timeout_s
-        self._fallback = [
-            i
-            for i in (fallback_ids or [])
-            if isinstance(i, str) and i.strip()
-        ]
+        # The relay allowlist (OPENCODE_ZEN_MODELS): anything outside it is
+        # never listed, no matter what upstream offers. Empty/None keeps the
+        # legacy "every free id" behaviour for direct-construction callers.
+        self._relay: list[str] = list(
+            dict.fromkeys(
+                i for i in (str(x).strip() for x in (relay_ids or [])) if i
+            )
+        )
         self._ids: list[str] = []
         self._degraded: bool | None = None  # None = never refreshed yet
         self._refreshed_at: float = 0.0
         self._task: asyncio.Task[None] | None = None
         self._closed = False
-        # Seed the passthrough set so a cold start before the first fetch
-        # still resolves the static default (big-pickle) verbatim.
-        seed = {i for i in self._fallback if is_free_entry({"id": i})}
-        if self._registry is not None and seed:
-            self._registry.set_free_ids(seed)
-            self._ids = sorted(seed)
+        # Seed the list from the configured relay ids so a cold start before
+        # the first fetch still answers with the static relay set.
+        seed = self._seed_ids()
+        if seed:
+            self._ids = seed
 
     # ----------------------------------------------------------------- API
+
+    def _seed_ids(self) -> list[str]:
+        """Configured relay ids that are free by the detection rules."""
+
+        return sorted(i for i in self._relay if is_free_entry({"id": i}))
+
+    def _relayed(self, mid: str) -> bool:
+        """True when this upstream id is in the configured relay set."""
+
+        return not self._relay or mid in self._relay
 
     async def refresh(self) -> bool:
         """Fetch the upstream catalogue once; True on success."""
@@ -120,9 +132,9 @@ class ZenFreeCatalog:
             resp.raise_for_status()
             body = resp.json()
         except (httpx.HTTPError, ValueError) as exc:
-            if self._degraded is None and self._fallback:
+            if self._degraded is None and self._relay:
                 logger.warning(
-                    "zen models unreachable; serving static fallback list",
+                    "zen models unreachable; serving static relay list",
                     extra={"error": type(exc).__name__},
                 )
             self._degraded = True
@@ -134,26 +146,26 @@ class ZenFreeCatalog:
         free = sorted(
             str(entry["id"])
             for entry in data
-            if isinstance(entry, dict) and is_free_entry(entry)
+            if isinstance(entry, dict)
+            and is_free_entry(entry)
+            and self._relayed(str(entry["id"]))
         )
         self._ids = free
         self._degraded = False
         self._refreshed_at = datetime.now(tz=timezone.utc).timestamp()
-        if self._registry is not None:
-            self._registry.set_free_ids(free)
         logger.info(
-            "zen free-model catalog refreshed",
+            "zen relay catalog refreshed",
             extra={"count": len(free), "model": "catalog"},
         )
         EVENTS.emit("free_catalog_refreshed", count=len(free), ids=free)
         return True
 
     def ids(self) -> list[str]:
-        """Last-known free ids (static fallback when nothing worked)."""
+        """Last-known relayed ids (static relay list when nothing worked)."""
 
         if self._ids:
             return list(self._ids)
-        return [i for i in self._fallback if is_free_entry({"id": i})]
+        return self._seed_ids()
 
     @property
     def degraded(self) -> bool | None:
@@ -185,7 +197,7 @@ class ZenFreeCatalog:
                 for i in ids
             ],
             "metadata": {
-                "source": "opencode-zen free models",
+                "source": "opencode-zen relayed models",
                 "refreshed_at": self.refreshed_at,
                 "stale": self._degraded is True,
             },

@@ -28,7 +28,7 @@ ECS ┌────────────────────────�
      │     │          least-inflight(rr) + cordon + /healthz 探测    │
      │     ├─ counters.py 日窗计数(08:00 CST 重置) ≥500 → 换 IP       │
      │     ├─ rotate.py   换 IP 编排（调 agent /rotate, 验 IP 变更） │
-     │     ├─ catalog.py  Zen 免费模型发现 + TTL 缓存 + 透传种子       │
+     │     ├─ catalog.py  Zen 反代模型目录（白名单交集）+ TTL 缓存        │
      │     ├─ eventlog.py 结构化事件日志（JSONL 落 /data）           │
      │     └─ updater.py  每日 02:00 看 opencode GitHub release      │
      └───────┬───────────┬───────────┬───────────┬──────────────────┘
@@ -81,7 +81,7 @@ agent 代理 basic auth 双保险）。
 | P0 | 0.7.0a1 | 冻结方案、repo 骨架、CI 双端门禁、端口注册表、caddy 片段 | **已完成**（7474c22，含既有 CI 失败修复） |
 | P1 | 0.7.0 | egress-agent 数据面（CONNECT/healthz/rotate）+ 设备实测 | **已完成**（双桶出口/换 IP 真机验证通过） |
 | P2 | 0.7.0 | 网关 egress pool + Docker/compose，ECS:10002 起容器；各桶出口逐一实测复核 | **已完成**（opc2-wifi / opc2-eth / cc9 三桶真机跑通；pad 待凭据延后，见下） |
-| P3 | 0.7.0 | catalog 全免费模型；hermes 加新 alias（旧 alias 保留） | 未开始 |
+| P3 | 0.7.0 | catalog 反代白名单（默认仅 big-pickle）+ 隐藏 /v1/models_cus；hermes 加新 alias（旧 alias 保留） | **已完成**（2026-10-17 收敛为严格别名：裸 ID 不可请求） |
 | P4 | 0.7.1 | updater：每日 02:00 查 GitHub release（含 prerelease），分级采用 | 未开始 |
 | P5 | 0.7.2 | 换 IP：计数器窗口 + 500 触发 + ONT 重启 + IP 变更验证 + 429 兜底 | **已完成**（2026-10-17 三桶 ONT 驱动全部实弹验证，见 §6） |
 | P6 | 0.8.0 | Windows agent 转正、Android Kotlin 版、文档浓缩定稿、旧栈退役（等命令） | 未开始 |
@@ -162,17 +162,22 @@ agent 代理 basic auth 双保险）。
   失败 → 502（真机表现：该桶 5 次请求 4 次 502）。**建 agent 配置时用 LF 源，
   并校验凭据长度**（`install.sh` 本身不写凭据，是手写步骤踩到的）。
 
-### 公开模型目录（2026-10-16 起，P3 catalog 首段已落地）
+### 公开模型目录（2026-10-16 起；2026-10-17 收敛为单模型严格别名）
 
 - **别名**：默认 `deepseek-ai/deepseek-v4.1-flash` → 上游裸 ID `big-pickle`
   （big-pickle 即 DeepSeek V4.1 Flash；此前过渡名 `ds41f_cus`/`cus1/deepseek-V4.1-Flash`
   由 ECS `.env` 的 `PUBLIC_MODELS` 继续保留即可兼容 hermes 旧配置）。
-- **免费模型透传**：`egress/catalog.py` 每 10 分钟拉
+  `/v1/models` 返回严格 OpenAI 形状（`id/object/created/owned_by`，2026-10-17 起
+  不再带 `display_name`），hermes 等 agent 直接自动发现；**只有 `PUBLIC_MODELS`
+  里的对外 id 可以被请求**，上游裸 ID 一律 404（`registry.resolve` 不再接受
+  上游拼写）。
+- **被反代模型白名单**：`OPENCODE_ZEN_MODELS`（默认仅 `big-pickle`）是网关
+  唯一反代的上游模型集合。`egress/catalog.py` 每 10 分钟拉
   `GET https://opencode.ai/zen/v1/models`，按上游自带标记
   （`allowAnonymous`/`cost`/`pricing`；缺标记时按 `-free` 后缀 + `big-pickle`）
-  过滤免费模型，喂给 registry 的透传集合——聊天接口对这些裸 ID 原样放行、
-  响应原样回显。
-- **`/v1/models_cus`（隐藏端点）**：唯一展示全部免费模型裸 ID 的地方；鉴权接受
+  判定免费，再与白名单求交集——2026-10-17 起不再枚举"全部免费模型"，也不再有
+  裸 ID 透传（聊天接口对上游裸 ID 返回 404）。
+- **`/v1/models_cus`（隐藏端点）**：唯一展示被反代上游裸 ID 的地方；鉴权接受
   Bearer 或 `?key=`（浏览器直接打开）。响应默认为一行一个裸 ID 的
   `text/plain`（无尾随换行、零装饰；owner 指令 2026-10-16），`?format=json`
   才返回 OpenAI 形状（data/metadata）。**标准 `/v1/models` 保持只列公开

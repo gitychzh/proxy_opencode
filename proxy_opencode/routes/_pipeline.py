@@ -148,10 +148,10 @@ def new_call(
 ) -> ChatCall:
     """Resolve the model alias, whitelist-filter and build the call context.
 
-    Strict model validation (owner requirement): an id outside the public
-    alias + free-passthrough set fails here with a protocol-shaped 404
-    (`model_not_found`), a missing/empty id with a 400. Raises
-    `GatewayHttpError` so the app-level handler answers directly.
+    Strict model validation (owner requirement): an id other than the public
+    alias fails here with a protocol-shaped 404 (`model_not_found`); a
+    missing/empty id with a 400. Raises `GatewayHttpError` so the app-level
+    handler answers directly.
     """
     requested = str(payload.get("model") or "")
     try:
@@ -177,15 +177,15 @@ def _model_error_response(requested: str, error_style: str) -> JSONResponse:
 
     if not requested.strip():
         message = (
-            "Request must include a 'model' id the gateway serves: the "
-            "public alias from /v1/models or a free id from /v1/models_cus."
+            "Request must include a 'model' id the gateway serves: use the "
+            "public alias listed by GET /v1/models."
         )
         if error_style == "anthropic":
             return anthropic_style_error(400, "invalid_request_error", message)
         return openai_error(400, message, "invalid_request_error", "model_required")
     message = (
         f"The model '{requested}' does not exist on this gateway; use the "
-        "public alias from /v1/models or a free id from /v1/models_cus."
+        "public alias listed by GET /v1/models."
     )
     if error_style == "anthropic":
         return anthropic_style_error(404, "invalid_request_error", message)

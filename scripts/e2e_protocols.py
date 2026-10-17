@@ -724,7 +724,7 @@ def run_checks(gw: Gateway) -> Checks:
         )
         c.record("unknown key id -> 404", missing.status_code == 404, str(missing.status_code))
 
-        # ---- unmasked direct upstream id must still be masked back
+        # ---- the raw upstream id is not addressable (strict alias)
         r = client.post(
             "/v1/chat/completions",
             json={
@@ -734,8 +734,9 @@ def run_checks(gw: Gateway) -> Checks:
             headers=auth,
         )
         c.record(
-            "requesting the upstream id directly is masked in the response",
-            r.status_code == 200 and r.json().get("model") == PUBLIC_MODEL,
+            "requesting the raw upstream id is rejected (404 model_not_found)",
+            r.status_code == 404 and UPSTREAM_MODEL in r.text[:160]
+            and r.json().get("error", {}).get("code") == "model_not_found",
             r.text[:160],
         )
     return c

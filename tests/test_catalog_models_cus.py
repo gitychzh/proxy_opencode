@@ -1,12 +1,15 @@
-"""P3 catalog + hidden /v1/models_cus endpoint + free-model passthrough.
+"""Relay catalog + hidden /v1/models_cus endpoint contracts.
 
-Contract under test (owner requirement, 2026-10-16):
-* free ids are discovered from the live Zen catalogue (explicit markers
-  when present, `-free` suffix / big-pickle otherwise);
-* they pass through chat VERBATIM (resolve + response echo), while the
-  standard /v1/models keeps serving ONLY the masked public alias;
-* /v1/models_cus is the ONLY path listing all free ids, accepts Bearer OR
-  ``?key=`` (browser friendly), 401 without a key, 404 outside zen-direct.
+Contract under test (owner requirement, 2026-10-17):
+* the gateway relays only the configured upstream models
+  (OPENCODE_ZEN_MODELS, default big-pickle) — the "all free models"
+  enumeration is gone;
+* /v1/models_cus is the ONLY path listing the relayed raw ids, accepts
+  Bearer OR ``?key=`` (browser friendly), 401 without a key, 404 outside
+  zen-direct;
+* the standard /v1/models keeps serving ONLY the masked public alias, and
+  chat rejects raw upstream ids (404) — knowing big-pickle does not make
+  it addressable.
 """
 
 from __future__ import annotations
@@ -20,11 +23,11 @@ import respx
 from proxy_opencode.app import create_app
 from proxy_opencode.config import Settings
 from proxy_opencode.egress.catalog import ZenFreeCatalog, is_free_entry
-from proxy_opencode.registry import ModelRegistry
 
 ALIAS = "deepseek-ai/deepseek-v4.1-flash"
 
-# Live-anonymous shape (2026-10-16): bare ids, no pricing fields.
+# Live-anonymous shape (2026-10-16): bare ids, no pricing fields. Upstream
+# offers many free models; the gateway relays exactly one of them.
 MOCK_UPSTREAM = {
     "object": "list",
     "data": [
@@ -69,40 +72,27 @@ def test_catalog_host_check():
         ZenFreeCatalog("https://evil.example.com/zen/v1")
 
 
-# ------------------------------------------------- registry free passthrough
+# ------------------------------------------------------- relay allowlist
 
 
 @pytest.mark.asyncio
-async def test_registry_seeded_by_catalog_refresh():
-    reg = ModelRegistry(Settings())
+async def test_catalog_lists_only_relayed_ids():
     cat = ZenFreeCatalog(
         "https://opencode.ai/zen/v1",
-        registry=reg,
-        fallback_ids=["big-pickle"],
+        relay_ids=["big-pickle"],
     )
     with respx.mock:
         respx.get("https://opencode.ai/zen/v1/models").respond(json=MOCK_UPSTREAM)
         assert await cat.refresh() is True
-    assert cat.ids() == [
-        "big-pickle",
-        "deepseek-v4.1-flash-free",
-        "space-bunny-free",
-    ]
-    # Passthrough seeded into the registry (sorted order is irrelevant).
-    assert reg.resolve("space-bunny-free") == "space-bunny-free"
-    # The alias keeps masking (entries win over the free set).
-    assert reg.resolve(ALIAS) == "big-pickle"
-    assert reg.public_id("space-bunny-free") == "space-bunny-free"
-    assert reg.public_id("big-pickle") == ALIAS
+    # Every other free id upstream offers is filtered out.
+    assert cat.ids() == ["big-pickle"]
 
 
 @pytest.mark.asyncio
-async def test_catalog_degraded_falls_back_to_static_list():
-    reg = ModelRegistry(Settings())
+async def test_catalog_degraded_falls_back_to_static_relay_list():
     cat = ZenFreeCatalog(
         "https://opencode.ai/zen/v1",
-        registry=reg,
-        fallback_ids=["big-pickle"],
+        relay_ids=["big-pickle"],
     )
     with respx.mock:
         respx.get("https://opencode.ai/zen/v1/models").respond(status_code=503)
@@ -147,7 +137,7 @@ async def test_models_cus_default_is_plain_bare_ids(tmp_path):
             resp = await client.get("/v1/models_cus?key=gw-key")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/plain")
-    assert resp.text == "big-pickle\ndeepseek-v4.1-flash-free\nspace-bunny-free"
+    assert resp.text == "big-pickle"
 
 
 @pytest.mark.asyncio
@@ -165,12 +155,8 @@ async def test_models_cus_format_json_keeps_openai_shape(tmp_path):
     assert resp.status_code == 200
     body = resp.json()
     ids = [m["id"] for m in body["data"]]
-    assert ids == [
-        "big-pickle",
-        "deepseek-v4.1-flash-free",
-        "space-bunny-free",
-    ]
-    assert body["metadata"]["source"] == "opencode-zen free models"
+    assert ids == ["big-pickle"]
+    assert body["metadata"]["source"] == "opencode-zen relayed models"
     assert body["metadata"]["stale"] is False
 
 
@@ -195,7 +181,7 @@ async def test_models_cus_accepts_bearer_and_rejects_missing_key(tmp_path):
 
 @pytest.mark.asyncio
 async def test_models_cus_hidden_and_not_in_models(tmp_path):
-    """Standard /v1/models must NOT enumerate free ids — models_cus only."""
+    """Standard /v1/models must NOT enumerate raw ids — models_cus only."""
     app = make_app(tmp_path)
     with respx.mock:
         respx.get("https://opencode.ai/zen/v1/models").respond(json=MOCK_UPSTREAM)
@@ -206,10 +192,33 @@ async def test_models_cus_hidden_and_not_in_models(tmp_path):
             models = await client.get(
                 "/v1/models", headers={"Authorization": "Bearer gw-key"}
             )
-    ids = [m["id"] for m in models.json()["data"]]
+    data = models.json()["data"]
+    ids = [m["id"] for m in data]
     assert ids == [ALIAS]  # exactly the public alias, nothing else
     assert "big-pickle" not in ids
     assert "space-bunny-free" not in ids
+    # Strictly standard OpenAI model shape (hermes discovery).
+    assert set(data[0]) == {"id", "object", "created", "owned_by"}
+
+
+@pytest.mark.asyncio
+async def test_raw_upstream_id_rejected_404(tmp_path):
+    """Knowing the relayed raw id (from /v1/models_cus) does not make it
+    addressable: only the public alias is — the backend name stays hidden."""
+    app = make_app(tmp_path)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "big-pickle",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            headers={"Authorization": "Bearer gw-key"},
+        )
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "model_not_found"
 
 
 @pytest.mark.asyncio

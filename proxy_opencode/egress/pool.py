@@ -534,7 +534,6 @@ class EgressPool:
                 )
             state.egress_ip = ip
             state.egress_ip_at = str(payload.get("egress_ip_at") or "")
-        identity_ok = state.spec.matches_prefix(state.egress_ip)
         # ip-matching is informational only (do not gate health)
         state.healthy = ok
         if state.healthy and state.failures > 0 and not state.cordoned(now):

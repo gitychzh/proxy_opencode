@@ -51,9 +51,10 @@ counter 阈值实测为 63/64。诊断脚本存放于本机
 > 一站；cloudflared 隧道清空 ingress 只剩 404 兜底）。设备侧旧栈完整网关（:879x）
 > 尚未拆除，因入口链路已从 ECS 断开，处于不可达闲置状态。
 
-0.7.x 权威描述见 `docs/ARCHITECTURE.md`。新栈对外经掩码别名
-`deepseek-ai/deepseek-v4.1-flash`（→ `big-pickle`）+ 免费裸 ID 透传
-（`/v1/models_cus` 纯裸 ID 输出）。三桶按各自出口 IP 独立计额度；容器内
+0.7.x 权威描述见 `docs/ARCHITECTURE.md`。新栈对外只暴露一个掩码别名
+`deepseek-ai/deepseek-v4.1-flash`（→ 唯一被反代的上游模型 `big-pickle`；
+2026-10-17 起严格别名：上游裸 ID 不可请求、不可见，除隐藏端点
+`/v1/models_cus` 纯裸 ID 输出）。三桶按各自出口 IP 独立计额度；容器内
 least-in-flight 选择、429/5xx/传输失败**桶间 failover**、cordon 冷却、P5 每窗口
 ≥500 或硬 429 自动换 IP（2026-10-17 起三桶 ONT 驱动全部实弹验证，见下表）。ECS/Tailscale 地址与凭据位置见 `ACCESS.md`，
 不要把真实密钥写入仓库。
@@ -83,9 +84,9 @@ least-in-flight 选择、429/5xx/传输失败**桶间 failover**、cordon 冷却
   `112.83.208.127`（联通改走 IPv4，前缀 `112.83.208.0/24`）、ecs
   `115.29.231.25/32`。
 - **公网入口 smoke（Windows → https://115.29.231.25:10002）**：/v1/models 仅
-  公开别名；`/v1/models_cus?key=` 全免费裸 ID 目录（无 key → 401）；chat
-  别名 / 裸 ID 200；错 model 404 / 缺 model 400 / 错 key 401——全部符合
-  预期。
+  公开别名（标准 OpenAI 形状）；`/v1/models_cus?key=` 被反代上游裸 ID 目录
+  （无 key → 401）；chat 别名 200；裸 ID 404、错 model 404 / 缺 model 400 /
+  错 key 401——全部符合预期。
 - **opc2 有线腿事故（已修复）**：旧栈策略路由 provision 单元（991/uid 996、
   410/uid 997）为 boot oneshot，规则与表默认路由被上游事件吐掉后 eth agent
   回落 wifi 出口（180.117.204.212），被池身份校验连续拦截。修复：重跑两个

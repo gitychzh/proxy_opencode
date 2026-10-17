@@ -54,15 +54,18 @@ def make_router(
         include_in_schema=False,
     )
     async def list_models_cus(request: Request, _k: str = Depends(_models_cus_key)) -> Any:
-        """Hidden full free-model catalog (P3).
+        """Hidden list of the relayed upstream model ids.
 
         Deliberately NOT under /v1/models or any standard spelling: the
         standard path must keep serving only the masked public alias so
         model-scanning agents find nothing. The ``_cus`` suffix IS the
         contract — never alias it to a standard-looking name.
 
-        Default body is bare ids, one per line, ``text/plain`` with no
-        trailing newline, no decoration (browser page, owner 2026-10-16);
+        Only the configured relay models are listed (OPENCODE_ZEN_MODELS,
+        default ``big-pickle``) — nothing else is proxied, and knowing the
+        raw id does not make it callable (chat accepts the public alias
+        only). Default body is bare ids, one per line, ``text/plain`` with
+        no trailing newline (browser page, owner 2026-10-16);
         ``?format=json`` returns the OpenAI-shaped envelope instead.
         """
 
