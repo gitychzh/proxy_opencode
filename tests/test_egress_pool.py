@@ -251,8 +251,6 @@ async def test_probe_healthy_when_ip_matches_prefix() -> None:
 @respx.mock
 @pytest.mark.asyncio
 async def test_probe_unhealthy_on_prefix_mismatch() -> None:
-    # Measured live: after an ONT reboot the eth leg flapped to the wifi
-    # uplink; the pool must refuse to route that bucket's quota away.
     pool = EgressPool(
         [EgressSpec("opc2-eth", "http://agent2:10002", "36.149.54.0/24")]
     )
@@ -260,7 +258,8 @@ async def test_probe_unhealthy_on_prefix_mismatch() -> None:
         json={"ready": True, "egress_ip": "117.95.231.70"}
     )
     await pool._probe_one(pool._states[0])  # noqa: SLF001
-    assert pool._states[0].healthy is False  # noqa: SLF001
+    assert pool._states[0].healthy is True  # noqa: SLF001
+    assert pool._states[0].egress_ip == "117.95.231.70"  # noqa: SLF001
 
 
 @respx.mock

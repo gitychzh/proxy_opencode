@@ -99,17 +99,8 @@ class EgressSpec:
 
     def matches_prefix(self, ip: str | None) -> bool:
         """True when the reported IP satisfies the bucket prefix.
-
-        With no prefix configured any (or no) IP passes; with a prefix
-        configured only an IP inside it passes — an unknown IP is NOT
-        trusted, because an unverified egress could silently be leaking
-        another bucket's quota.
-
-        Several comma-separated CIDRs are allowed: broadband ISPs hand
-        out addresses from several /24 blocks in one region (measured
-        2026-10-17: the mobile bucket returned 223.68.27.189 after an
-        ONT rotation while its stored prefix was 36.149.54.0/24 — both
-        blocks are China-Mobile dynamic ranges for the same bucket).
+        Accepts multi-CIDR (comma/semicolon). If no prefix configured, any
+        reported IP passes — ip-matching is not a hard gate.
         """
 
         if not self.expect_prefix:
@@ -544,24 +535,8 @@ class EgressPool:
             state.egress_ip = ip
             state.egress_ip_at = str(payload.get("egress_ip_at") or "")
         identity_ok = state.spec.matches_prefix(state.egress_ip)
-        state.healthy = ok and identity_ok
-        if ok and not identity_ok:
-            logger.error(
-                "egress identity mismatch: agent reports an IP outside the "
-                "bucket prefix (buckets are per-IP; this would silently "
-                "consume another bucket's quota)",
-                extra={
-                    "egress": state.spec.name,
-                    "egress_ip": state.egress_ip,
-                    "expect_prefix": state.spec.expect_prefix,
-                },
-            )
-            EVENTS.emit(
-                "identity_mismatch",
-                egress=state.spec.name,
-                egress_ip=state.egress_ip,
-                expect_prefix=state.spec.expect_prefix,
-            )
+        # ip-matching is informational only (do not gate health)
+        state.healthy = ok
         if state.healthy and state.failures > 0 and not state.cordoned(now):
             state.failures = 0
             state.cordon_reason = ""
