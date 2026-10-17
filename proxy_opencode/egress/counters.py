@@ -121,6 +121,15 @@ class EgressCounters:
             return True
         return retry_after_s > self._hard
 
+    def _rotation_available(self, rec: BucketCounts, ts: float) -> bool:
+        if not rec.triggered:
+            return True
+        return (
+            rec.last_rotation_ok is False
+            and rec.last_rotation_epoch > 0.0
+            and (ts - rec.last_rotation_epoch) >= self._retry_cooldown
+        )
+
     def should_rotate_on_429(
         self, name: str, retry_after_s: float | None, *, now: float | None = None
     ) -> bool:
@@ -139,13 +148,23 @@ class EgressCounters:
         rec = self._record_for(name, ts)
         if not self.hard_quota(retry_after_s):
             return False
-        if not rec.triggered:
-            return True
-        return (
-            rec.last_rotation_ok is False
-            and rec.last_rotation_epoch > 0.0
-            and (ts - rec.last_rotation_epoch) >= self._retry_cooldown
-        )
+        return self._rotation_available(rec, ts)
+
+    def should_rotate_on_free_tier(
+        self, name: str, *, now: float | None = None
+    ) -> bool:
+        """True iff a free-tier gate rejection should request a rotation now.
+
+        A 403 FreeTierError means the bucket's egress IP is flagged (the
+        same body 200s from a fresh IP, device IPs 403 while ECS host IP 200),
+        so trigger immediately — deduped to one rotation per window per bucket,
+        with the failed-attempt retry cooldown so one broken ONT config cannot
+        block the bucket's IP reset for the whole day.
+        """
+
+        ts = now if now is not None else time.time()
+        rec = self._record_for(name, ts)
+        return self._rotation_available(rec, ts)
 
     def record(self, name: str, *, now: float | None = None) -> bool:
         """Fold one completed (ok) request; True iff the threshold now fires.

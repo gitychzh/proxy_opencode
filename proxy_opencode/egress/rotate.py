@@ -154,6 +154,14 @@ class EgressRotator:
                 extra={"egress": name, "retry_after_s": retry_after_s},
             )
             self.request_rotation(name, trigger="hard_429")
+        elif kind == "free_tier_rejected" and self._counters.should_rotate_on_free_tier(
+            name
+        ):
+            logger.warning(
+                "free-tier gate flagged the egress IP: rotating now",
+                extra={"egress": name},
+            )
+            self.request_rotation(name, trigger="free_tier_rejected")
 
     # ------------------------------------------------------------ triggering
 

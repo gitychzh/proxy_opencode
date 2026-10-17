@@ -18,9 +18,10 @@
 
 ## 硬约束（不可违反）
 
-1. **免费层协议事实（活体复测：2026-09-30/2026-10-02/2026-10-13）**
+1. **免费层协议事实（活体复测：2026-09-30/2026-10-02/2026-10-13/2026-10-17）**
    - 匿名请求门槛：至少 2 个工具，且 `function.name` 属于 OpenCode 内置工具集（`bash/edit/glob/grep/read/skill/task/todowrite/webfetch/websearch/write`），并且 `stream: true`。少于 2 个、使用两个非内置名、或 `stream: false` 均得到 403。默认 `ZEN_TOOLS_MODE=minimal` 注入两个合成最小 schema。
    - **session ID 必须 descending 编码（opencode 1.19.0 起）**：`x-opencode-session` 必须是 descending 编码（`~((ms<<12)+counter)&0xFFFFFFFFFFFF`），同毫秒内 `counter < 64`。ascending 恒定 403 `FreeTierError`。`x-opencode-request`（`msg_`）仍为 ascending。详见实测边界。
+   - **出口 IP 门槛（2026-10-17 定位）**：仅"工具 + descending session"合规仍不够——同一份合规请求，从**被标记的出口 IP** 发出返回 403 `FreeTierError`，从**新 IP**（旋转换到的地址）或 ECS 宿主 IP 发出返回 200。即 403 常见根因是**出口 IP 被门槛标记**，而非工具/session/UA/版本。网关据此把匿名 403 `FreeTierError` 当作出口级失败：桶间 failover + cordon + 绕过阈值立即换 IP（见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5）。
    - 模型目录自 2026-10-02 起使用裸 ID（如 `big-pickle`）；旧 `opencode/big-pickle` 已失效。
    - 配额错误：`FreeUsageLimitError` 表示该出口 IP 当前触发免费额度限制（按出口 IP / UTC 日独立计量、UTC 0 点重置）。传输失败、TLS EOF、超时不是 429，不得据此判断配额。
    - 诊断与更多细节见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。

@@ -91,11 +91,12 @@ agent 代理 basic auth 双保险）。
 - **已实现**（`proxy_opencode/egress/counters.py` + `rotate.py`，25 个新测试全绿）：
   每桶日窗 `[08:00, 08:00+1d)` Asia/Shanghai 计数（窗口自动滚动归零）；
   阈值（`ZEN_EGRESS_ROTATION`，逐桶配置，如 `opc2-eth=500`）触发**每窗口恰好
-  一次**换 IP；上游 429 且 `Retry-After > 3600s`，或 **完全没有
-  `Retry-After` 头**（2026-10-16 实测：配额 429 可不带该头，当天三次
-  cordon 全是 `retry_after_s: null`——两形都判 per-IP 日耗尽），
-  **绕过阈值立即换 IP**，且两种 bypass 都与阈值共用同一"每窗口一次"
-  去重 flag（`note_rotation_started` 置位，防光猫被 429 连环重启）；
+  一次**换 IP；上游 429（`Retry-After > 3600s`，或 **完全没有
+  `Retry-After` 头**——2026-10-16 实测：配额 429 可不带该头，当天三次
+  cordon 全是 `retry_after_s: null`，两形都判 per-IP 日耗尽），或
+  **匿名 403 `FreeTierError`（出口 IP 被门槛标记，2026-10-17 实测）**，
+  **绕过阈值立即换 IP**，且这些 bypass 都与阈值共用同一"每窗口一次"
+  去重 flag（`note_rotation_started` 置位，防光猫被连环重启）；
   编排流程=标记 rotating（选桶跳过、在途请求自然
   收尾）→ `POST {agent}/rotate` → 轮询 `/healthz` 等 IP **变化且落在
   `expect_prefix` 内**（同 IP 重发/腿回落都判失败，大声记录）→ 成功后清
@@ -192,7 +193,8 @@ agent 代理 basic auth 双保险）。
 | TLS/证书 | IP 入口沿用自签 CA（hermes 已 pin，零成本）；客户入口=域名 + LE 真证书（DNS-01，A 记录灰云直指 ECS） | 公共 CA 不签裸 IP；域名走 CF 隧道会绕海外（实测慢 10 倍），灰云直连 ECS 后是国内直连 |
 | 计数器语义 | 每出口、日窗 [08:00, 08:00+1d) Asia/Shanghai（=UTC0 重置）；窗内 ≥500 触发换 IP；换完计数清零（新 IP=新额度桶） | 上游 per-IP 日配额 UTC0 重置；用户确认的语义 |
 | 429 兜底 | 上游 429 且（`Retry-After > 3600s` **或无 Retry-After 头**）= per-IP 日耗尽 → 立即换 IP（绕过 500 阈值，每窗口每桶至多一次） | 2026-10-16 实测补全：配额 429 可完全不带头（当天三次 cordon 全 null，0 轮换）；有头短值=短窗软限流（只 cordon 不换 IP） |
-| 桶间 failover | 请求级重试：`zen_direct.chat()` 上游 429/5xx/传输失败 → 释放租赁 → 换桶重试（SSE 未开播，客户端零字节，可安全重试）；上限 min(桶数, 3)；请求级 4xx 不换桶；SSE 开播后不换 | 2026-10-17 实测：单桶 429 原样透传时别的桶还有额度；hermes 桌面端的自愈重试还会把请求放大 15+ 倍 |
+| 403 门槛兜底 | 匿名模式下上游 403 `FreeTierError` = **出口 IP 被门槛标记**（同 body 换新 IP 即 200；2026-10-17 实测：设备 IP 403、ECS 宿主 IP 200）→ 释放租赁为失败（`free_tier_rejected`）、**立即 cordon 该桶**并**绕过阈值立即换 IP**（每窗口每桶至多一次，共用硬 429 的去重/失败冷却） | 此前 403 被当作"正常工作出口的请求级拒绝"按 ok 释放 → 桶一直"健康"地返回 403，用户持续报错；`/healthz` 探针只看 agent 就绪与 IP，**不检测门槛**，无法发现被标记的桶 |
+| 桶间 failover | 请求级重试：`zen_direct.chat()` 上游 429/5xx/传输失败/**匿名 403 `FreeTierError`（出口 IP 被门槛标记）** → 释放租赁 → 换桶重试（SSE 未开播，客户端零字节，可安全重试）；上限 min(桶数, 3)；**其余**请求级 4xx 不换桶；SSE 开播后不换 | 2026-10-17 实测：单桶 429 原样透传时别的桶还有额度；hermes 桌面端的自愈重试还会把请求放大 15+ 倍；403 门槛同理须换桶而非透传 |
 | 计数→阈值轮换 | **每桶每窗口 ≥500 完成(ok)请求**闸一次轮换(ONT 重启换 IP);修复 2026-10-17:`pool.release` 的 ok 提前 return 曾跳过 observer,count 恒 0,阈值从不触发 | 2026-10-17 修好后实测 count 正常累加;但实测免费额度远低于 500/IP/日,此阈值当前只作存在性兜底,主动换 IP 主要靠硬 429 |
 | 失败轮换重试 | 硬 429 触发的轮换失败后,冷却 `ROTATION_RETRY_COOLDOWN_S=900s` 可重试(防 ONT 连环重启);旧快照无 epoch 时从 last_rotation_at 解析恢复 | 2026-10-17 补全:此前一次失败(no onts/前缀误判)即锁死到窗口结束,三桶全中 |
 | 桶前缀校验 | `expect_prefix` 支持逗号分隔多段 CIDR（ISP 同区多段动态分配）；不匹配 → unhealthy 跳过 | 2026-10-17 移动桶轮换后 36.149.54/24 → 223.68.27.189，单段前缀造成永久 identity_mismatch |

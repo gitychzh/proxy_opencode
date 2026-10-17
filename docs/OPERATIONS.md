@@ -31,6 +31,31 @@ ascending。已部署 win10-local + 四桶，经公网 LB 7/7 实测 200。
 counter 阈值实测为 63/64。诊断脚本存放于本机
 `%TEMP%\opencode\ablate*.py`（未入库，仅一次性取证）。
 
+## 0.1 2026-10-17：免费层 403 的第二个根因 = 出口 IP 被门槛标记
+
+现象：协议已合规（≥2 内置工具 + descending session + `stream: true`）的请求
+仍持续 403 `FreeTierError`。
+
+**定位（ECS 宿主直连做对照）**：同一份字节请求，经设备出口 IP 发出 403，
+从 ECS 宿主 IP 直连发出 200；经设备 CONNECT 隧道与直连拿到同一张 opencode
+真证书（无 MITM）、httpbin 回显无任何头注入 —— **唯一变量是源 IP**。**旋转换
+到一个新 IP 后立即 200**（实测 cc9 `116.147.31.55` 403 → `122.195.202.2`
+200；opc2 两腿同理）。即门槛按**出口 IP** 判定，被用过的 IP 会被标记；
+而 `/healthz` 探针只看 agent 就绪与上报 IP，**不检测门槛**，所以被标记的桶
+仍显示 healthy、继续被分发，用户端持续报错。
+
+**修复（出口级失败处理）**：
+- `zen_direct._exchange`：匿名模式 403 `FreeTierError` → 释放租赁为
+  `free_tier_rejected`（失败），并让 `chat()` 桶间 failover（拒绝体在
+  SSE 开播前，客户端零字节）；非匿名/其它 403 仍按请求级 ok 释放。
+- `pool.release`：`free_tier_rejected` **立即 cordon** 该桶（不等 3 连败）。
+- `rotate.on_release`：按 `counters.should_rotate_on_free_tier` **绕过阈值
+  立即换 IP**，每窗口每桶至多一次，失败按 `ROTATION_RETRY_COOLDOWN_S` 冷却后
+  可重试（与硬 429 共用去重/冷却）。
+- 排障：整池 403 时逐个 agent `GET /healthz` 看出口 IP，必要时
+  `POST http://127.0.0.1:10010/admin/egresses/{name}/rotate`（管理员 key，
+  `10010` 是容器宿主映射，`10002` 是 caddy）手动换 IP。
+
 ## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 三设备出口桶）
 
 ```text

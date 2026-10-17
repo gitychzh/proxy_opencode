@@ -212,6 +212,32 @@ async def test_429_cordons_until_next_window_reset() -> None:
 
 
 @pytest.mark.asyncio
+async def test_free_tier_rejection_cordons_immediately_and_is_skipped() -> None:
+    """A 403 FreeTierError flags the egress IP: cordon on the first one.
+
+    Measured 2026-10-17: the gate rejects by egress IP (byte-identical body
+    200s from a fresh IP), so one rejection is enough — the IP cannot serve
+    the free tier until the agent re-dials, and selection must stop using it
+    now rather than after three consecutive failures.
+    """
+
+    pool = make_pool("a", "b", cordon_s=120)
+    mark_healthy(pool)
+    a, b = pool._states
+    lease = await pool.acquire()
+    assert lease.name == "a"
+    await pool.release(lease, ok=False, kind="free_tier_rejected")
+    snap = a.snapshot(time.monotonic())
+    assert snap["cordoned"] is True
+    assert "free_tier_rejected" in str(snap["cordon_reason"])
+    assert 0 < a.cordon_remaining_s(time.monotonic()) <= 120
+    # the flagged IP is skipped while the other bucket is still healthy
+    lease = await pool.acquire()
+    assert lease.name == "b"
+    await pool.release(lease, ok=True)
+
+
+@pytest.mark.asyncio
 async def test_quota_cordoned_bucket_is_skipped_then_returns_after_deadline() -> None:
     pool = make_pool("a", "b")
     mark_healthy(pool)

@@ -154,6 +154,19 @@ def test_hard_429_rotation_fires_once_per_window() -> None:
     assert counters.should_rotate_on_429("a", None, now=now) is True
 
 
+def test_free_tier_rejection_rotates_once_per_window() -> None:
+    """A flagged egress IP rotates off-threshold, at most once per window."""
+
+    counters = EgressCounters({"a": 500})
+    now = ts_cst(16, 15, 40)
+    assert counters.should_rotate_on_free_tier("a", now=now) is True
+    counters.note_rotation_started("a", now=now)
+    assert counters.should_rotate_on_free_tier("a", now=now) is False
+    # Successful rotation → fresh IP → flag clears → the next rejection fires.
+    counters.reset("a", now=now)
+    assert counters.should_rotate_on_free_tier("a", now=now) is True
+
+
 def test_snapshot_is_admin_safe() -> None:
     now = ts_cst(14, 9, 0)
     counters = EgressCounters({"a": 500})
@@ -413,6 +426,42 @@ async def test_hard_429_without_retry_after_rotates_once() -> None:
     # Same window, IP still stale-expired: further headerless 429s must
     # not re-trigger rotations (one per window while the flag holds).
     rotator.on_release("a", ok=False, kind="http_429", retry_after_s=None)
+    assert not rotator.running("a")
+    assert counters.counts("a").rotations == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_free_tier_rejection_rotates_off_threshold_once() -> None:
+    """2026-10-17: the gate flagged the egress IP → rotate it, bypassing threshold.
+
+    The first rejection must start a rotation immediately (the bucket's
+    request counter is nowhere near its threshold) and a second one in the
+    same window must not stack another ONT reboot.
+    """
+
+    pool = make_pool("a")
+    rotator = make_rotator(pool, {"a": 500}, poll_s=0.02, timeout_s=0.15)
+    counters = rotator.counters
+    mark_healthy_with_ip(pool)
+    respx.post("http://a:10001/rotate").respond(
+        json={"ok": True, "results": [{"ok": True, "ont": "x", "detail": ""}]}
+    )
+
+    def _same_ip(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ready": True, "egress_ip": OLD_IP})
+
+    respx.get("http://a:10001/healthz").side_effect = _same_ip
+    rotator.on_release("a", ok=False, kind="free_tier_rejected", retry_after_s=None)
+    task = rotator._tasks.get("a")  # noqa: SLF001
+    assert task is not None, "a flagged IP must start a rotation bypassing threshold"
+    outcome = await asyncio.wait_for(task, timeout=5.0)
+    assert outcome.trigger == "free_tier_rejected"
+    saw = counters.counts("a")
+    assert saw.rotations == 1
+    assert saw.triggered is True
+    # Same window: a second rejection must not stack another reboot.
+    rotator.on_release("a", ok=False, kind="free_tier_rejected", retry_after_s=None)
     assert not rotator.running("a")
     assert counters.counts("a").rotations == 1
 

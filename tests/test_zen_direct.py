@@ -907,6 +907,146 @@ async def test_chat_400_is_not_an_egress_failure() -> None:
     await adapter.aclose()
 
 
+# ------------------------------------- free-tier egress-IP gate (2026-10-17)
+
+_FREE_TIER_BODY = {
+    "type": "error",
+    "error": {
+        "type": "FreeTierError",
+        "message": "OpenCode's free tier can only be used from within OpenCode.",
+    },
+}
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_403_free_tier_cordons_the_egress() -> None:
+    """A 403 FreeTierError counts against the bucket, unlike other 4xx.
+
+    Measured 2026-10-17: the gate is decided by the egress IP — a
+    byte-identical body 200s from a fresh IP and 403s from a flagged one.
+    """
+
+    respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=403, json=_FREE_TIER_BODY
+    )
+    client = _leased_client()
+    pool = _StubPool(client)
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["__status__"] == 403
+    assert pool.releases == [("bucket-a", False, "free_tier_rejected")]
+    await client.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_403_free_tier_fails_over_to_next_bucket() -> None:
+    """The flagged IP must not surface to the client while another lives."""
+
+    seq = {"n": 0}
+
+    def _upstream(_request: httpx.Request) -> httpx.Response:
+        if seq["n"] == 0:
+            seq["n"] += 1
+            return httpx.Response(403, json=_FREE_TIER_BODY)
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_SSE_OK
+        )
+
+    respx.post("https://opencode.ai/zen/v1/chat/completions").mock(
+        side_effect=_upstream
+    )
+    a, b = httpx.AsyncClient(), httpx.AsyncClient()
+    pool = _RollingStubPool({"bucket-a": a, "bucket-b": b})
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert pool.releases == [
+        ("bucket-a", False, "free_tier_rejected"),
+        ("bucket-b", True, ""),
+    ]
+    await a.aclose()
+    await b.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_403_free_tier_surfaces_after_failover_budget_exhausted() -> None:
+    """Every bucket flagged → the last upstream 403 is returned (bounded)."""
+
+    respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=403, json=_FREE_TIER_BODY
+    )
+    a, b = httpx.AsyncClient(), httpx.AsyncClient()
+    pool = _RollingStubPool({"bucket-a": a, "bucket-b": b})
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["__status__"] == 403
+    assert pool.releases == [
+        ("bucket-a", False, "free_tier_rejected"),
+        ("bucket-b", False, "free_tier_rejected"),
+    ]
+    await a.aclose()
+    await b.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_403_other_error_type_is_not_an_egress_failure() -> None:
+    """Only the free-tier egress gate counts against the bucket.
+
+    A 403 carrying a different error type is a final request-level answer
+    through a working egress: release it ok and do not fail over.
+    """
+
+    respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=403,
+        json={"error": {"type": "AuthError", "message": "Missing API key"}},
+    )
+    client = _leased_client()
+    pool = _StubPool(client)
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["__status__"] == 403
+    assert pool.releases == [("bucket-a", True, "")]
+    await client.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_403_free_tier_with_api_key_is_not_an_egress_failure() -> None:
+    """Keyed mode: FreeTierError is not an egress signal (the pool is not free)."""
+
+    respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=403, json=_FREE_TIER_BODY
+    )
+    client = _leased_client()
+    pool = _StubPool(client)
+    adapter = ZenDirectAdapter(
+        make_settings(zen_api_key="oc_sk_test"), pool=pool
+    )  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["__status__"] == 403
+    assert pool.releases == [("bucket-a", True, "")]
+    await client.aclose()
+    await adapter.aclose()
+
+
 @respx.mock
 @pytest.mark.asyncio
 async def test_chat_transport_error_releases_lease_as_failure() -> None:

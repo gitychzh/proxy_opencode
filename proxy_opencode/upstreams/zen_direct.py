@@ -120,11 +120,29 @@ _MINIMAL_TOOL_NAMES = ("bash", "read")
 
 _MIN_INJECTED_TOOLS = 2
 
-# Bucket-failover cap for 429/5xx/transport retries across egress buckets
-# (0.7.x). A fully-drained pool must still surface its last upstream error
-# instead of looping until the client times out; capped overhead is 2 extra
-# attempts in the worst case.
+# Bucket-failover cap for 429/5xx/403-free-tier/transport retries across egress
+# buckets (0.7.x). A fully-drained pool must still surface its last upstream
+# error instead of looping until the client times out; capped overhead is 2
+# extra attempts in the worst case.
 _FAILOVER_MAX_ATTEMPTS = 3
+
+# The free-tier gate's rejection type. Measured 2026-10-17: the gate is decided
+# by the *egress IP*, not the request — a byte-identical body returns 200 from a
+# fresh IP and 403 FreeTierError from an IP the gate has flagged (device IPs
+# flagged, ECS host IP passed). So a 403 FreeTierError in anonymous mode is an
+# egress-level failure to fail over and count against the bucket, unlike every
+# other 4xx, which is a final request-level answer through a working egress.
+_FREE_TIER_ERROR = "FreeTierError"
+
+
+def _is_free_tier_rejection(status: Any, content: Any) -> bool:
+    """True when an error body is the free tier's egress-IP gate rejection."""
+
+    if status != 403 or not isinstance(content, dict):
+        return False
+    err = content.get("error")
+    return isinstance(err, dict) and err.get("type") == _FREE_TIER_ERROR
+
 
 # Injected names, in preference order. A name the client already uses is
 # skipped: injecting a duplicate would not add a distinct builtin name (the
@@ -364,15 +382,15 @@ class ZenDirectAdapter:
         cordoned and least-in-flight selection spreads load across healthy
         egress IPs.
 
-        Bucket failover: an upstream 429 / 5xx / transport failure releases
-        the lease and retries on the next lease — none of these outcomes
-        depend on the request itself, and no client-visible byte has been
-        sent (the SSE stream had not started), so another bucket with fresh
-        per-IP quota can serve the same body. Measured 2026-10-17: one 429
-        surfaced verbatim to a client while other buckets were still fresh.
-        Retryable errors never retry after bytes reached the client, and
-        the loop is bounded so a fully-drained pool still surfaces its last
-        upstream error instead of hanging.
+        Bucket failover: an upstream 429 / 5xx / transport failure, or a 403
+        FreeTierError in anonymous mode (the gate flagged this bucket's egress
+        IP — the same body returns 200 from a fresh IP, measured 2026-10-17),
+        releases the lease and retries on the next lease — none of these
+        outcomes depend on the request itself, and no client-visible byte has
+        been sent (the SSE stream had not started), so another bucket with a
+        fresh egress IP can serve the same body. Retryable errors never retry
+        after bytes reached the client, and the loop is bounded so a fully-
+        drained pool still surfaces its last upstream error instead of hanging.
         """
         model = self._zen_model(payload.get("model"))
         body = self._build_body(payload, model)
@@ -417,6 +435,21 @@ class ZenDirectAdapter:
                 _log_failover(kind=f"http_{status}", remaining=attempts)
                 lease = await self._pool.acquire()
                 continue
+            if (
+                self._auth_free
+                and _is_free_tier_rejection(status, result.get("content"))
+            ):
+                # 403 FreeTierError: the gate flagged this bucket's IP, not the
+                # request. Fail over to a bucket on a fresh IP; the flagged
+                # bucket was already released as a failure so the pool cordons
+                # it and the rotator re-dials. Measured 2026-10-17: device IPs
+                # gave FreeTierError, ECS host IP gave 200.
+                attempts -= 1
+                if attempts <= 0:
+                    return result
+                _log_failover(kind="http_403_free_tier", remaining=attempts)
+                lease = await self._pool.acquire()
+                continue
             # 200 body, StreamRelay-unwrapped result, or a request-level
             # 4xx: the outcome is final for this request.
             return result
@@ -448,6 +481,7 @@ class ZenDirectAdapter:
         if resp.status_code != 200:
             raw = await resp.aread()
             await resp.aclose()
+            result = _raw_relay_body(resp.status_code, raw)
             if resp.status_code == 429:
                 await self._release(
                     lease,
@@ -457,9 +491,22 @@ class ZenDirectAdapter:
                 )
             elif resp.status_code >= 500:
                 await self._release(lease, ok=False, kind=f"http_{resp.status_code}")
+            elif (
+                resp.status_code == 403
+                and self._auth_free
+                and _is_free_tier_rejection(
+                    resp.status_code, result.get("content")
+                )
+            ):
+                # The gate flagged this bucket's egress IP (measured
+                # 2026-10-17: the same body 200s from a fresh IP; device IPs
+                # gave FreeTierError, ECS host IP gave 200). Count it against
+                # the bucket so the pool cordons it and the rotator re-dials;
+                # chat() fails the request over to another bucket.
+                await self._release(lease, ok=False, kind="free_tier_rejected")
             else:
                 await self._release(lease, ok=True)
-            return _raw_relay_body(resp.status_code, raw)
+            return result
         if stream:
             if lease is None:
                 return StreamRelay(resp, {})
@@ -511,12 +558,11 @@ class ZenDirectAdapter:
             f"runtime/bun/{self._settings.zen_bun_version}"
         )
         headers = {
-            "Authorization": f"Bearer {self._settings.zen_api_key or 'public'}",
+            "Content-Type": "application/json",
             # Session gate (Zen, 2026-09): anonymous free-tier requests are
             # rejected with AuthError "Missing API key" unless a stable
             # `x-session-id` UUID header is present.
             "x-session-id": self._settings.zen_session_id,
-            "Content-Type": "application/json",
             "User-Agent": ua,
             "x-opencode-client": "cli",
             "x-opencode-project": "global",
@@ -525,9 +571,18 @@ class ZenDirectAdapter:
             # ids with FreeTierError (verified live 2026-10-13). Request ids
             # stay ascending, matching the genuine client.
             "x-opencode-session": opencode_id("ses_", descending=True),
+            # Captured genuine client sends the well-known `Bearer public` on
+            # the anonymous free tier (the console proxy strips anonymous auth
+            # before the inference service sees it, so it is present on the
+            # wire but not effective). A configured Zen key replaces it.
+            "Authorization": "Bearer public",
         }
+        if self._settings.zen_api_key:
+            headers["Authorization"] = f"Bearer {self._settings.zen_api_key}"
         if request_id:
-            headers["x-opencode-request"] = opencode_id("msg_")
+            rid = opencode_id("msg_")
+            headers["x-opencode-request"] = rid
+            headers["x-opencode-request-id"] = rid
         return headers
 
     def _build_body(self, payload: dict[str, Any], model: str) -> dict[str, Any]:

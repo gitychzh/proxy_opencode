@@ -446,6 +446,24 @@ class EgressPool:
                 retry_after_s=retry_after_s,
                 egress_ip=state.egress_ip,
             )
+        elif kind == "free_tier_rejected":
+            # The free-tier gate flagged this bucket's egress IP: it cannot
+            # serve the free tier until the agent re-dials (measured 2026-10-17:
+            # byte-identical body 200s from a fresh IP, 403 from flagged IP).
+            # Cordon it now so selection skips it while the rotator re-dials; a
+            # successful rotation clears the cordon immediately.
+            state.cordoned_until = now + self._cordon_s
+            state.cordon_reason = "free_tier_rejected (egress IP flagged by gate)"
+            logger.error(
+                "egress cordoned: free-tier gate flagged this egress IP",
+                extra={"egress": state.spec.name, "egress_ip": state.egress_ip},
+            )
+            EVENTS.emit(
+                "cordon",
+                egress=state.spec.name,
+                cordon_reason="free_tier_rejected",
+                egress_ip=state.egress_ip,
+            )
         elif state.failures >= self._failure_threshold:
             state.cordoned_until = now + self._cordon_s
             state.cordon_reason = f"{state.failures} consecutive failures ({kind})"
