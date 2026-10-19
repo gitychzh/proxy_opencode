@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -237,3 +238,111 @@ async def test_stream_relay_logs_client_disconnect(caplog):
     assert len(ended) == 1
     assert ended[0].reason == "client_disconnected"
     assert ended[0].chunks == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_relay_client_write_stall_aborts_stream(caplog):
+    """A consumer that stops pulling while the generator is parked at its
+    yield == the ASGI server blocked writing to the client (blackholed
+    public leg). The watcher must warn, end the stream as client_stalled,
+    cancel the response task and release the upstream promptly (it cannot
+    rely on the generator's close, which is pinned behind cyclic GC) —
+    without ever logging a completion."""
+    from proxy_opencode.routes._pipeline import relay_stream
+
+    upstream_closed = asyncio.Event()
+    logged: list[int] = []
+
+    async def upstream():
+        try:
+            for c in (b"a", b"b"):
+                yield c
+        finally:
+            upstream_closed.set()
+
+    async def drive():
+        gen = relay_stream(
+            upstream(), {}, lambda status, usage=None: logged.append(status),
+            request_id="req1", model="m", client="127.0.0.1",
+            client_stall_s=0.1,
+        )
+        async for _ in gen:
+            # Stand in for uvicorn's send() blocking on backpressure: the
+            # consumer never comes back for the next chunk.
+            await asyncio.sleep(60)
+
+    with caplog.at_level(logging.INFO, logger="proxy_opencode.pipeline"):
+        task = asyncio.create_task(drive())
+        for _ in range(300):
+            if any(r.getMessage() == "stream ended" for r in caplog.records):
+                break
+            await asyncio.sleep(0.01)
+        assert upstream_closed.is_set(), "upstream must be released"
+        for _ in range(300):  # cancellation delivery is scheduled, wait it out
+            if task.done():
+                break
+            await asyncio.sleep(0.01)
+        assert task.cancelled(), "response task must be cancelled on stall"
+
+    warns = [r for r in caplog.records if r.getMessage() == "client write stalled"]
+    assert len(warns) == 1
+    assert warns[0].request_id == "req1"
+    assert warns[0].model == "m"
+    assert warns[0].client == "127.0.0.1"
+    assert warns[0].chunks == 1
+    assert warns[0].blocked_s >= 0.1
+    ended = [r for r in caplog.records if r.getMessage() == "stream ended"]
+    assert len(ended) == 1
+    assert ended[0].reason == "client_stalled"
+    assert ended[0].chunks == 1
+    assert logged == [], "a stalled stream must not log completion"
+
+
+@pytest.mark.asyncio
+async def test_stream_relay_client_stall_disabled(caplog):
+    """client_stall_s=0 keeps the legacy behaviour: a consumer that goes
+    quiet mid-stream is not aborted and the stream can still finish."""
+    from proxy_opencode.routes._pipeline import relay_stream
+
+    logged: list[int] = []
+    gen = relay_stream(
+        FakeStreamRelay().chunks(), {}, lambda status, usage=None: logged.append(status),
+        request_id="req1", model="m", client="127.0.0.1",
+        client_stall_s=0,
+    )
+    with caplog.at_level(logging.INFO, logger="proxy_opencode.pipeline"):
+        assert await gen.__anext__() == b"a"
+        await asyncio.sleep(0.2)  # would trip an armed watchdog
+        assert await gen.__anext__() == b"b"
+        with pytest.raises(StopAsyncIteration):
+            await gen.__anext__()  # exhausts: completion log + stream ended
+    assert not [r for r in caplog.records if r.getMessage() == "client write stalled"]
+    ended = [r for r in caplog.records if r.getMessage() == "stream ended"]
+    assert ended[0].reason == "completed"
+    assert logged == [200]
+
+
+@pytest.mark.asyncio
+async def test_stream_relay_slow_upstream_does_not_trip_client_watchdog(caplog):
+    """The gap clock only runs while parked at the yield; a slow upstream
+    (await between chunks) must never be mistaken for a stalled client."""
+    from proxy_opencode.routes._pipeline import relay_stream
+
+    async def slow_upstream():
+        for c in (b"a", b"b"):
+            await asyncio.sleep(0.15)  # longer than client_stall_s below
+            yield c
+
+    out: list[bytes] = []
+    with caplog.at_level(logging.INFO, logger="proxy_opencode.pipeline"):
+        async for chunk in relay_stream(
+            slow_upstream(), {}, lambda status, usage=None: None,
+            request_id="req1", model="m", client="127.0.0.1",
+            client_stall_s=0.1,
+        ):
+            out.append(chunk)
+    assert out == [b"a", b"b"]
+    assert not [r for r in caplog.records if r.getMessage() == "client write stalled"]
+    ended = [r for r in caplog.records if r.getMessage() == "stream ended"]
+    assert len(ended) == 1
+    assert ended[0].reason == "completed"

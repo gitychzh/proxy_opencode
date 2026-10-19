@@ -1,6 +1,6 @@
 # 运维手册（当前事实）
 
-> 现状快照：2026-10-16。本文只记录当前部署状态、操作方法和仍未解决的风险。
+> 现状快照：2026-10-19。本文只记录当前部署状态、操作方法和仍未解决的风险。
 > 版本历史与已关闭问题看 `CHANGELOG.md`；设备地址和登录方式看 `ACCESS.md`；
 > 协议事实与安全红线看 `AGENTS.md`。历史实验文档已合并或删除，避免将旧拓扑当作现状。
 >
@@ -130,6 +130,46 @@ docker logs zen-gw 2>&1 | grep -E "answering 503|egress failover|cordoned"
 # 等自动轮换，或 POST /admin/egresses/{name}/rotate（管理员 key）手动换 IP。
 ```
 **生效**：已随 2026-10-19 镜像重建部署生效（与 §0.2 同批）。
+
+## 0.4 2026-10-19：hermes `stream_drop` = 客户端段 600s 黑洞（网关无过错）
+
+现象：hermes 报 `stream_drop`（`deepseek-ai/deepseek-v4.1-flash`），错误里的
+`time:` 仍是复制时刻；本次底层故障时刻是 **12:04:59Z**（UTC+8 20:04:59）
+`Stream stale for 600s → WinError 10053`，35s 后重试成功。同一窗口早前还有
+09:21/10:27/10:44Z 的 `Clean EOF, no finish_reason`。
+
+**定位（故障在 hermes↔网关的最后一跳，网关/进程/ECS 全部干净）**：
+- 与 §0.2（上游段静默）不同：本次网关侧上游**仍在正常产块**，`relay_stream`
+  已中继 242 块并卡在 `send()`（uvicorn 背压 `flow.drain()`）——上游停顿看门狗
+  （§0.2）看不到，TCP 也未断连，因此既无 WARNING 也无 `stream ended`，直到客户
+  端自己的 600s 杀流。
+- 网关 `stream ended reason=client_disconnected`（10 次）与 hermes
+  `Clean EOF, no finish_reason`、caddy `context canceled`/`aborting` 逐秒对齐；
+  该客户端段故障是**长期慢性**的（caddy `aborting` 计数：10-15 约 6、10-17
+  约 88、10-18 约 151、10-19 约 26），非本次改动的回归。
+- 已排除：Clash Verge（hermes 的 python 进程直连，不走 7897 系统代理）、ECS 网卡
+  （0 error/drop）、本机 Wi-Fi 重连（24h 内无）、HTTP/2（全程 HTTP/1.1）、caddy
+  对 SSE 压缩（`encode gzip` 默认 MIME 白名单不含 `text/event-stream`）。
+
+**修复（客户端段看门狗）**：`relay_stream` 新增 `CLIENT_STALL_S`（默认 60s，
+0 关闭）。语义：生成器停在 `yield` 恰等于 ASGI 在写这一块给客户端时被背压阻塞，
+故"交出块后超过 `CLIENT_STALL_S` 没来取下一块"= 客户端段死；仅在上游读期间不清
+零、故慢上游不会误报。触发时监视任务记 WARNING `client write stalled`、结束理由
+标 `client_stalled`、取消响应任务（uvicorn 随即 `transport.close()`，客户端秒级
+失败并可重试）、释放上游并写终态 `stream ended`。**注意**：监视任务自行完成上
+游释放与终结日志——被取消的响应任务会经其 `CancelledError` traceback 钉住生成
+器（`owner` 闭包成环），生成器 close 只能等环状 GC，若依赖它会拖慢释放与日志。
+
+**排障入口**：
+```bash
+docker logs zen-gw 2>&1 | grep -E "client write stalled|stream ended"
+# client write stalled 带 request_id/model/client/chunks/blocked_s；
+# 流量增长中若 client write stalled 显著增加，说明公网段持续劣化（非网关 bug）；
+# 紧随其后 uvicorn 的 "ASGI callable returned without completing response" ERROR
+# 是预期行为（我们主动取消响应任务让它关连接），不是故障。
+```
+
+**生效**：`CLIENT_STALL_S` 随本轮镜像重建生效（0.7.x）。
 
 ## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 三设备出口桶）
 

@@ -78,6 +78,7 @@ def make_router(
                     request_id=call.request_id,
                     model=call.upstream_model,
                     client=call.client,
+                    client_stall_s=settings.client_stall_s,
                 ),
                 status_code=200,
                 media_type="text/event-stream",

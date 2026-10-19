@@ -8,6 +8,7 @@
 ### Added
 - **docs: `docs/EGRESS_OBSERVABILITY.md`** — 新增 `egress_request` JSONL 埋点方案（Schema、失败分类、ContextVar+try/finally 埋点建议、logrotate、jq/python 统计示例）。
 - **feat(stream): `STREAM_STALL_S` SSE 停顿看门狗配置（默认 60s，0=关闭）** — 所有反代流的静默上限（覆盖响应头后首字节与字节间隔）；`deploy/ecs/env.example` 有注释说明，事实源在 `proxy_opencode/config.py`。
+- **feat(stream): `CLIENT_STALL_S` 客户端写停滞看门狗配置（默认 60s，0=关闭）** — `relay_stream` 在 `yield` 停留超阈值即判客户端段死（ASGI 写被背压阻塞），取消响应任务并快速关闭连接；`deploy/ecs/env.example` 有注释说明，事实源在 `proxy_opencode/config.py`。
 
 ### Changed
 - **docs: 项目文档整体梳理与去重** — 按“同一事实只在一处维护”原则重构文档体系：
@@ -34,6 +35,10 @@
   - `openai_http.StreamRelay`：停顿看门狗（`STREAM_STALL_S`）超时或中途 httpx 传输异常 → 记 WARNING（`reason=stream_stalled`/`stream_interrupted`，只含错误类与耗时，无内容）→ 走既有合成终止块路径收尾（`finish_reason:"length"` + `[DONE]`），异常不再穿透掐断连接；关闭钩子改携带结局（completed/cut/stalled/interrupted/disconnected）。
   - `zen_direct`：按结局释放租赁——`stalled`/`interrupted` 按**失败**（`kind=stream_stalled`/`stream_interrupted`，3 连败 cordon 死桶）并记 WARNING 带 `egress=桶名`；此前 `_released` 恒 `ok=True`，坏桶永不累计失败、永不 cordon。`cut`（上游干净截断，健康隧道仅转发）与客户端断连仍按 ok 释放（带 kind 供统计）。
   - 测试：`tests/test_zen_direct.py`（停顿/首字节静默/中途中断/看门狗开启下的正常完成/关闭钩子结局/池按失败释放）、`tests/test_config.py`（默认/覆盖/关闭）；文档：`docs/ARCHITECTURE.md` §5 ADR、`docs/OPERATIONS.md` §0.2、`deploy/ecs/env.example`。
+- **fix(stream): 客户端段写停滞看门狗（hermes 600s `stream_drop`，2026-10-19）** — 定位：故障在 **hermes↔网关最后一跳**（公网段黑洞），与 §0.2 的上游段静默不同——网关侧上游仍在正常产块，`relay_stream` 已中继 242 块但卡在 uvicorn `send()`（背压 `flow.drain()`），既无上游静默也无 TCP 断连可观测，直到 hermes 600s 自杀（12:04:59Z `Stream stale for 600s → WinError 10053`）；caddy `aborting` 长期计数证明该客户端段劣化是慢性问题，非本次回归（完整复盘见 `docs/OPERATIONS.md` §0.4）。修复：
+  - `routes/_pipeline.py::relay_stream`：`client_stall_s` 参数 + 监视任务。生成器停在 `yield` 恰等于 ASGI 写该块被背压阻塞，"交出块后超阈值没来取下一块"即判客户端段死（仅上游读期间不清零，慢上游不误报）→ WARNING `client write stalled`（含 request_id/model/client/chunks/blocked_s，无内容）、结束理由 `client_stalled`、取消响应任务（uvicorn 随即 `transport.close()`，客户端秒级失败重试）。监视任务**自行**释放上游并写终态 `stream ended`——被取消的响应任务经其 `CancelledError` traceback 钉住生成器（`owner` 闭包成环），依赖生成器 close 会把释放与日志拖到环状 GC 之后。
+  - 三路由（`routes/chat.py`、`routes/responses_api.py`、`routes/anthropic_api.py`）传入 `settings.client_stall_s`。
+  - 测试：`tests/test_logging.py`（停滞触发 WARNING+`client_stalled`+取消任务+释放上游+不记完成、`0` 关闭仍可完成、慢上游不误报）、`tests/test_config.py`（默认/覆盖/关闭）；文档：`docs/ARCHITECTURE.md` §5 ADR、`docs/OPERATIONS.md` §0.4、`deploy/ecs/env.example`。
 - **fix(deploy): 容器启动补 `setup_logging()`（生产日志曾整层丢失）** — Dockerfile CMD 走 `uvicorn --factory proxy_opencode.app:create_app_from_env`，从未经过 `python -m proxy_opencode`，容器根 logger 无 handler：全部 INFO（`chat completion`/`stream ended`）被丢弃、WARNING 走 lastResort 无格式无 extras，**无法从日志归因到桶**（2026-10-19 排障被迫翻设备 journalctl）。现 `create_app_from_env()` 先调 `setup_logging()`（uvicorn 默认 LOGGING_CONFIG 无 `root` 键，顺序安全）；测试 `tests/test_logging.py::test_app_factory_configures_logging`。
 - **fix(zen): 兜底耗尽的匿名 403 `FreeTierError` 改回 503 `egress_unavailable`（不再透传成客户端 auth 错）** — 2026-10-19 06:39Z 实测：单请求烧穿全部 3 次尝试（cc9 被标记 403 → opc2-wifi 隧道传输失败 → opc2-eth 被标记 403），分类 / cordon / 轮换全部正常，但兜底把**出口级** 403 原样透传，hermes 判为 layer=auth、retryable=false；约 90s 后轮换已恢复全池（复测 200）。修复：`zen_direct` 新增 `_egress_gate_answer`——最终（兜底耗尽或无池直连）的匿名 403 `FreeTierError` → **503 + `error.code=egress_unavailable`**（WARNING `answering 503`），非门槛 403 与带 key 模式仍按请求级原样透传。测试：`tests/test_zen_direct.py`（兜底 503、无池 503、单桶 cordon+503）；文档：`docs/ARCHITECTURE.md` §5、`docs/OPERATIONS.md` §0.3。
 

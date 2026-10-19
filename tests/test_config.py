@@ -123,6 +123,18 @@ def test_stream_stall_s_default_env_and_disable(monkeypatch):
     assert config.load_settings().stream_stall_s == 0
 
 
+def test_client_stall_s_default_env_and_disable(monkeypatch):
+    """The client-write watchdog defaults on: on 2026-10-19 a blackholed
+    client leg held a stream open for the full 600s hermes timeout while
+    upstream kept producing (see docs/OPERATIONS.md §0.4)."""
+    monkeypatch.delenv("CLIENT_STALL_S", raising=False)
+    assert config.load_settings().client_stall_s == 60
+    monkeypatch.setenv("CLIENT_STALL_S", "15")
+    assert config.load_settings().client_stall_s == 15
+    monkeypatch.setenv("CLIENT_STALL_S", "0")  # explicit opt-out
+    assert config.load_settings().client_stall_s == 0
+
+
 def test_admin_default_is_a_placeholder():
     """This repo is PUBLIC: the built-in admin key must be an obvious fake.
 

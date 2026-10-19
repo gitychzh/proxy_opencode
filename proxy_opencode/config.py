@@ -159,6 +159,17 @@ class Settings:
     # watchdog fires at 45s, so the default stays well below 300s.
     # 0 disables the watchdog (legacy behaviour).
     stream_stall_s: float = 60
+    # Client-write stall watchdog: max seconds the consumer may go without
+    # pulling the next relayed chunk while `relay_stream` is parked at its
+    # yield (that state == the ASGI server is blocked writing that chunk to
+    # the client: uvicorn drains under backpressure). Measured 2026-10-19:
+    # a blackholed home-broadband leg left hermes receiving nothing for
+    # 600.5s while upstream kept producing — the gateway held the stream
+    # open until hermes killed it; with the watchdog it logs a WARNING
+    # (`client write stalled`), ends the stream as `client_stalled` and
+    # closes the client connection after ~client_stall_s instead, so the
+    # client fails over in seconds rather than minutes. 0 disables.
+    client_stall_s: float = 60
     # Optional egress proxy for the zen client, e.g. "http://127.0.0.1:7897".
     zen_proxy: str = ""
     # Whether the httpx clients may follow ambient proxy settings
@@ -407,6 +418,7 @@ def load_settings() -> Settings:
         or list(DEFAULT_ZEN_MODELS),
         zen_timeout_s=int(os.environ.get("OPENCODE_ZEN_TIMEOUT_S", "300")),
         stream_stall_s=float(os.environ.get("STREAM_STALL_S", "60")),
+        client_stall_s=float(os.environ.get("CLIENT_STALL_S", "60")),
         zen_proxy=os.environ.get("ZEN_PROXY", "").strip(),
         upstream_trust_env=_env_bool("UPSTREAM_TRUST_ENV", False),
         zen_session_id=(

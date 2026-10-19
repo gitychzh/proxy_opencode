@@ -259,32 +259,120 @@ async def relay_stream(
     request_id: str,
     model: str,
     client: str,
+    client_stall_s: float = 60.0,
 ) -> AsyncIterator[bytes]:
     """Relay upstream SSE bytes to the client with stream lifecycle logging.
 
     Every stream terminates with a "stream ended" record — including the
-    abnormal ends (client disconnect, upstream mid-stream failure) that
-    would otherwise vanish silently from the logs. All three protocol
-    routes wrap their streaming responses in this so the completion record
-    carries real latency, chunk count and (when captured) usage.
+    abnormal ends (client disconnect, upstream mid-stream failure, client
+    write stall) that would otherwise vanish silently from the logs. All
+    three protocol routes wrap their streaming responses in this so the
+    completion record carries real latency, chunk count and (when captured)
+    usage.
 
     On client disconnect the inner generator is closed explicitly so the
     upstream response is released deterministically instead of waiting for
     GC.
+
+    Client-write stall watchdog (``client_stall_s``, 0 disables): the
+    generator is parked at its ``yield`` exactly while the ASGI server is
+    blocked writing that chunk downstream (uvicorn's ``send()`` drains
+    under backpressure), so when the consumer stops pulling for longer
+    than ``client_stall_s`` the client leg is dead even though no
+    disconnect was observed. A watcher task then logs a WARNING
+    (``client write stalled``), records ``end_reason="client_stalled"``,
+    cancels the response task (which makes uvicorn close the client
+    connection immediately — the client sees a fast failure instead of
+    hanging for minutes), releases the upstream and emits the terminal
+    "stream ended" record itself: the stalled task only lets the
+    generator close via cyclic GC, so waiting for it would delay both.
+    The gap clock only runs while parked at the yield: upstream reads
+    clear ``suspended_at`` on resume, so a slow upstream never trips it.
     """
     started = time.perf_counter()
     chunks_count = 0
     ttfb_ms: float | None = None
     reason = "completed"
+    end_reason: str | None = None
+    suspended_at: float | None = None
+    finished = False
+    ended_logged = False
+    owner: asyncio.Task[Any] | None = asyncio.current_task()
+
+    def _log_ended(reason_value: str) -> None:
+        # Guarded so the watchdog's prompt record and the generator's
+        # (GC-deferred) close never double-log the same stream.
+        nonlocal ended_logged
+        if ended_logged:
+            return
+        ended_logged = True
+        logger.info(
+            "stream ended",
+            extra={
+                "request_id": request_id,
+                "model": model,
+                "client": client,
+                "chunks": chunks_count,
+                "ttfb_ms": ttfb_ms,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                "reason": reason_value,
+            },
+        )
+
+    async def _watch_client() -> None:
+        nonlocal end_reason
+        while not finished:
+            at = suspended_at
+            now = time.perf_counter()
+            if at is not None and now - at >= client_stall_s:
+                logger.warning(
+                    "client write stalled",
+                    extra={
+                        "request_id": request_id,
+                        "model": model,
+                        "client": client,
+                        "chunks": chunks_count,
+                        "blocked_s": round(now - at, 1),
+                    },
+                )
+                end_reason = "client_stalled"
+                if owner is not None:
+                    owner.cancel()
+                # Tear down from the watcher itself: the stalled owner task
+                # never resumes normally, so its generator close is only
+                # reachable through cyclic GC (the cancelled task pins the
+                # generator via its CancelledError traceback). Releasing the
+                # upstream and logging here keeps both prompt.
+                aclose = getattr(chunks, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await aclose()
+                    except Exception:
+                        pass
+                _log_ended("client_stalled")
+                return
+            delay = (
+                min(client_stall_s, 0.5)
+                if at is None
+                else at + client_stall_s - now
+            )
+            await asyncio.sleep(max(0.05, delay))
+
+    watcher: asyncio.Task[None] | None = None
+    if client_stall_s > 0 and owner is not None:
+        watcher = asyncio.create_task(_watch_client())
     try:
         async for chunk in chunks:
             if ttfb_ms is None:
                 ttfb_ms = round((time.perf_counter() - started) * 1000, 1)
             chunks_count += 1
+            suspended_at = time.perf_counter()
             yield chunk
-        log(200, usage_holder.get("usage"))
+            suspended_at = None
+        if end_reason is None:
+            log(200, usage_holder.get("usage"))
     except (asyncio.CancelledError, GeneratorExit):
-        reason = "client_disconnected"
+        reason = end_reason or "client_disconnected"
         # Release the upstream deterministically. `chunks` is annotated as an
         # AsyncIterator but every caller passes an async generator, which
         # carries `aclose()`.
@@ -310,15 +398,7 @@ async def relay_stream(
         )
         raise
     finally:
-        logger.info(
-            "stream ended",
-            extra={
-                "request_id": request_id,
-                "model": model,
-                "client": client,
-                "chunks": chunks_count,
-                "ttfb_ms": ttfb_ms,
-                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
-                "reason": reason,
-            },
-        )
+        finished = True
+        if watcher is not None:
+            watcher.cancel()
+        _log_ended(reason)
