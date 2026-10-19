@@ -169,7 +169,9 @@ docker logs zen-gw 2>&1 | grep -E "client write stalled|stream ended"
 # 是预期行为（我们主动取消响应任务让它关连接），不是故障。
 ```
 
-**生效**：`CLIENT_STALL_S` 随本轮镜像重建生效（0.7.x）。
+**生效**：`CLIENT_STALL_S` 随本轮镜像重建生效（0.7.x，2026-10-19 15:41Z 实测：
+容器 healthy，`client_stall_s=60` 生效；6 路并发流全部 200 + `[DONE]`，
+`stream ended reason=completed`，`client write stalled` 计数 0——默认阈值未误报）。
 
 ## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 三设备出口桶）
 
