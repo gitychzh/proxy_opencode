@@ -1066,6 +1066,8 @@ async def test_chat_403_free_tier_cordons_the_egress() -> None:
 
     Measured 2026-10-17: the gate is decided by the egress IP — a
     byte-identical body 200s from a fresh IP and 403s from a flagged one.
+    Single-bucket pool: there is nowhere left to fail over, so the client
+    sees the mapped retryable 503 instead of the relayed 403.
     """
 
     respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
@@ -1077,7 +1079,8 @@ async def test_chat_403_free_tier_cordons_the_egress() -> None:
     result = await adapter.chat(
         {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
     )
-    assert result["__status__"] == 403
+    assert result["__status__"] == 503
+    assert result["content"]["error"]["code"] == "egress_unavailable"
     assert pool.releases == [("bucket-a", False, "free_tier_rejected")]
     await client.aclose()
     await adapter.aclose()
@@ -1119,8 +1122,14 @@ async def test_chat_403_free_tier_fails_over_to_next_bucket() -> None:
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_chat_403_free_tier_surfaces_after_failover_budget_exhausted() -> None:
-    """Every bucket flagged → the last upstream 403 is returned (bounded)."""
+async def test_chat_403_free_tier_answers_503_after_failover_budget_exhausted() -> None:
+    """Every bucket flagged → a bounded 503, not a client-blaming 403.
+
+    2026-10-19 06:39Z: two flagged IPs plus one dead tunnel spent all three
+    attempts and the relayed 403 reached hermes as an auth error with
+    retryable=false. The egress-level rejection must surface as a retryable
+    503 `egress_unavailable` instead; releases still cordon both buckets.
+    """
 
     respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
         status_code=403, json=_FREE_TIER_BODY
@@ -1131,13 +1140,37 @@ async def test_chat_403_free_tier_surfaces_after_failover_budget_exhausted() -> 
     result = await adapter.chat(
         {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
     )
-    assert result["__status__"] == 403
+    assert result["__status__"] == 503
+    error = result["content"]["error"]
+    assert error["type"] == "api_error"
+    assert error["code"] == "egress_unavailable"
     assert pool.releases == [
         ("bucket-a", False, "free_tier_rejected"),
         ("bucket-b", False, "free_tier_rejected"),
     ]
     await a.aclose()
     await b.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_403_free_tier_without_pool_answers_503() -> None:
+    """No pool means no failover, but the rejection is still egress-level.
+
+    The mapped 503 must not depend on failover machinery: a relayed 403
+    would still blame the client for the gateway's flagged egress IP.
+    """
+
+    respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=403, json=_FREE_TIER_BODY
+    )
+    adapter = ZenDirectAdapter(make_settings())
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["__status__"] == 503
+    assert result["content"]["error"]["code"] == "egress_unavailable"
     await adapter.aclose()
 
 

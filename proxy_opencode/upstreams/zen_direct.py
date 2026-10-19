@@ -144,6 +144,38 @@ def _is_free_tier_rejection(status: Any, content: Any) -> bool:
     return isinstance(err, dict) and err.get("type") == _FREE_TIER_ERROR
 
 
+# Client-facing answer when a free-tier 403 is the FINAL outcome (failover
+# budget spent, or no pool to move to). The rejection is egress-level — the
+# gate flagged the gateway's egress IP — but a relayed 403 makes clients
+# blame their own credentials and stop retrying: measured 2026-10-19
+# 06:39Z, when two flagged IPs plus one dead tunnel spent all three
+# attempts and hermes surfaced the relayed 403 as an auth error with
+# retryable=false. A 503 says the same truth with the retry semantics that
+# match recovery (the rotator lands fresh egress IPs within ~90s; gate 403
+# rejections cost no quota).
+_EGRESS_UNAVAILABLE_MESSAGE = (
+    "Upstream free-tier gate rejected the gateway's egress IP "
+    "(403 FreeTierError): an egress-level restriction, not a problem with "
+    "this request or your credentials. Try again later."
+)
+
+
+def _egress_unavailable_result() -> dict[str, Any]:
+    """Shape a final free-tier 403 as a retryable 503 egress outage."""
+
+    return {
+        "__status__": 503,
+        "content": {
+            "error": {
+                "message": _EGRESS_UNAVAILABLE_MESSAGE,
+                "type": "api_error",
+                "param": None,
+                "code": "egress_unavailable",
+            }
+        },
+    }
+
+
 # Injected names, in preference order. A name the client already uses is
 # skipped: injecting a duplicate would not add a distinct builtin name (the
 # gate counts names, not entries) and the old code dropped the builtin in that
@@ -410,7 +442,9 @@ class ZenDirectAdapter:
         been sent (the SSE stream had not started), so another bucket with a
         fresh egress IP can serve the same body. Retryable errors never retry
         after bytes reached the client, and the loop is bounded so a fully-
-        drained pool still surfaces its last upstream error instead of hanging.
+        drained pool answers instead of hanging; a final free-tier 403 is
+        answered as 503 `egress_unavailable` (egress-level, retryable)
+        rather than relayed as a client-blaming 403.
         """
         model = self._zen_model(payload.get("model"))
         body = self._build_body(payload, model)
@@ -419,7 +453,10 @@ class ZenDirectAdapter:
         stream = bool(payload.get("stream"))
 
         if self._pool is None:
-            return await self._exchange(self.client, body, headers, model, stream, None)
+            result = await self._exchange(
+                self.client, body, headers, model, stream, None
+            )
+            return self._egress_gate_answer(result)
 
         attempts = min(self._pool.size, _FAILOVER_MAX_ATTEMPTS)
         lease = await self._pool.acquire()
@@ -466,13 +503,39 @@ class ZenDirectAdapter:
                 # gave FreeTierError, ECS host IP gave 200.
                 attempts -= 1
                 if attempts <= 0:
-                    return result
+                    # Egress-level rejection with no attempt left to spend:
+                    # answer the retryable 503, never relay the 403.
+                    return self._egress_gate_answer(result)
                 _log_failover(kind="http_403_free_tier", remaining=attempts)
                 lease = await self._pool.acquire()
                 continue
             # 200 body, StreamRelay-unwrapped result, or a request-level
             # 4xx: the outcome is final for this request.
             return result
+
+    def _egress_gate_answer(self, result: Any) -> Any:
+        """Map a final anonymous free-tier 403 onto a client-facing 503.
+
+        `_is_free_tier_rejection` proves the 403 is about the egress IP, not
+        the request (measured 2026-10-17), so letting it through as a final
+        answer misreports our egress state as the client's auth failure —
+        measured 2026-10-19 06:39Z, when two flagged IPs plus one dead
+        tunnel spent every attempt and hermes showed the relayed 403 as a
+        non-retryable auth error. Keyed mode and other 403 bodies pass
+        through untouched: they really are request-level answers.
+        """
+        if (
+            isinstance(result, dict)
+            and self._auth_free
+            and _is_free_tier_rejection(
+                result.get("__status__"), result.get("content")
+            )
+        ):
+            logger.warning(
+                "free tier egress gate final; answering 503 to the client"
+            )
+            return _egress_unavailable_result()
+        return result
 
     async def _exchange(
         self,

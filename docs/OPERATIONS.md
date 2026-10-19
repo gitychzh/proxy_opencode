@@ -100,6 +100,37 @@ docker logs zen-gw 2>&1 | grep -E "stream stalled|stream failed mid-way|stream e
 ```
 **生效**：修复入仓库后需重建镜像：`docker compose -f deploy/ecs/compose.yml up -d --build`。
 
+## 0.3 2026-10-19：兜底耗尽透传 403 被客户端判为 auth 错（已改 503）
+
+现象：hermes 报 `HTTP 403: OpenCode's free models aren't available ... abusive
+traffic from this IP address`（layer=auth、retryable=false），同一复制窗口
+`POST /v1/chat/completions` 在网关确有一次 403 出口。
+
+**定位（分类器无 bug，是兜底耗尽后的客户端呈现错误）**：06:39Z 单个请求烧穿
+全部 3 次尝试——
+
+```
+06:39:20.684 cordon cc9（free_tier_rejected）→ failover http_403_free_tier（余 2 次）
+06:39:20.769 failover transport（opc2-wifi 隧道死，余 1 次）
+06:39:23.798 cordon opc2-eth（free_tier_rejected）→ 尝试耗尽 → 403 透传给 hermes
+```
+
+两次 403 均被 `_is_free_tier_rejection` 正确识别并 cordon/轮换，但 `attempts<=0`
+的兜底把**出口级失败**原样透传，客户端按**请求级 auth 拒绝**理解（不可重试）；
+而轮换约 90s 后全池已恢复（06:44 后复测 200）——本可重试成功。
+
+**修复**：匿名模式下**最终** 403 `FreeTierError`（兜底耗尽或无池直连）不再透传，
+改回 **503 + `error.code=egress_unavailable`**（`zen_direct._egress_gate_answer`，
+同步记 WARNING `answering 503`）；非门槛 403 与带 key 模式仍按请求级原样透传。
+
+**排障入口**：
+```bash
+docker logs zen-gw 2>&1 | grep -E "answering 503|egress failover|cordoned"
+# 客户端收到 503 egress_unavailable = 全部桶门槛标记/隧道失败、兜底耗尽；
+# 等自动轮换，或 POST /admin/egresses/{name}/rotate（管理员 key）手动换 IP。
+```
+**生效**：与 §0.2 同批，重建镜像后生效。
+
 ## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 三设备出口桶）
 
 ```text
