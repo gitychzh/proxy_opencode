@@ -287,6 +287,26 @@ def _log_failover(*, kind: str, remaining: int) -> None:
     )
 
 
+# StreamRelay close-hook outcome -> (pool release ok, kind).
+#
+# Only transport-level failures count against the egress bucket: a stalled
+# or interrupted stream means the tunnel/upstream path stopped delivering
+# (measured 2026-10-19: dead egress tunnel, zero bytes for 300s), and three
+# consecutive failures cordon the bucket. A clean upstream cut ("cut") is
+# an upstream-content failure a healthy tunnel merely forwarded — its
+# premature-death form surfaces as "interrupted" anyway (a tunnel that dies
+# mid-chunk raises, it does not send a clean chunked terminator).
+# Unknown outcomes default to failure so a new outcome can never silently
+# count as success.
+_STREAM_OUTCOMES: dict[str, tuple[bool, str]] = {
+    "completed": (True, ""),
+    "disconnected": (True, "client_disconnected"),
+    "cut": (True, "stream_cut"),
+    "stalled": (False, "stream_stalled"),
+    "interrupted": (False, "stream_interrupted"),
+}
+
+
 class ZenDirectAdapter:
     name = "zen-direct"
 
@@ -508,16 +528,26 @@ class ZenDirectAdapter:
                 await self._release(lease, ok=True)
             return result
         if stream:
+            stall_s = float(self._settings.stream_stall_s)
             if lease is None:
-                return StreamRelay(resp, {})
+                return StreamRelay(resp, {}, stall_s=stall_s)
             pool = self._pool
             assert pool is not None
             held: Lease = lease
 
-            async def _released() -> None:
-                await pool.release(held, ok=True)
+            async def _released(outcome: str) -> None:
+                ok, kind = _STREAM_OUTCOMES.get(outcome, (False, outcome))
+                if not ok:
+                    # Attribution: which egress stopped delivering? StreamRelay
+                    # already logged the mechanism (stall/interrupt); this line
+                    # ties it to the bucket that must be culled.
+                    logger.warning(
+                        "upstream stream failed mid-way",
+                        extra={"egress": held.name, "reason": kind},
+                    )
+                await pool.release(held, ok=ok, kind=kind)
 
-            return StreamRelay(resp, {}, on_close=_released)
+            return StreamRelay(resp, {}, on_close=_released, stall_s=stall_s)
         try:
             result = await _aggregate_sse(resp, model)
         except Exception:

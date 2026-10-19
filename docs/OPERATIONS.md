@@ -56,6 +56,50 @@ counter 阈值实测为 63/64。诊断脚本存放于本机
   `POST http://127.0.0.1:10010/admin/egresses/{name}/rotate`（管理员 key，
   `10010` 是容器宿主映射，`10002` 是 caddy）手动换 IP。
 
+## 0.2 2026-10-19：hermes `stream_drop` = 出口隧道静默（网关→上游段）
+
+现象：hermes 桌面端报 `stream_drop`（"The connection dropped before the reply
+finished."，model `deepseek-ai/deepseek-v4.1-flash`）；`logs/agent.log` 同刻有
+`Clean EOF, no finish_reason`。（错误详情里的 `time:` 是客户端复制时刻，不是
+故障时刻。）
+
+**定位（故障在网关→上游段，hermes↔网关与网关进程本身均健康）**：
+- zen-gw 容器连续运行 40h 无重启 → 非网关崩溃。
+- `docker logs zen-gw` 四次 `httpx.ReadTimeout`（`stream relay failed`，栈
+  `relay_stream → sse_mask → StreamRelay._stream → resp.aiter_bytes()`，2026-10-19
+  03:13/03:22/03:28/03:34Z），与 opc2 `journalctl -u 'egress-agent*'` 中
+  **opc2-wifi 隧道 open→closed 的生命周期逐一对应**（隧道建立后零字节，直到
+  网关 300s 读超时才关闭）；opc2-eth 腿同时段正常轮转。
+- `data/egress_events.jsonl` 当日已有两次 `egress_recovered opc2-wifi`
+  （03:02/03:07，对应网关 `egress failover: upstream transport`）→ 该桶早前
+  已在抖动。
+- 同一时刻 hermes 11:22:43（UTC+8）= 网关 03:22:43Z，即 300s 读超时掐断连接的
+  同一事件：异常穿透 `StreamRelay` → uvicorn 关闭客户端 SSE → hermes 报
+  stream_drop。
+
+**修复（三处，见 CHANGELOG 同日条目）**：
+- `StreamRelay` 停顿看门狗 `STREAM_STALL_S`（默认 60s，覆盖响应头后首字节与
+  字节间隔）：静默/中途传输异常 → WARNING（`reason=stream_stalled` /
+  `stream_interrupted`）→ 走既有合成终止块路径收尾（`finish_reason:"length"` +
+  `[DONE]`），客户端不再看到裸断连。
+- 租约按结局释放：关闭钩子携带结局，`stalled`/`interrupted` 按**失败**
+  （`kind=stream_stalled`/`stream_interrupted`）释放 → 3 连败 cordon 死桶
+  （此前 `_released` 恒 `ok=True`，坏桶永不累计失败、永不 cordon）。
+- 容器日志：`create_app_from_env` 先调 `setup_logging()`——Dockerfile CMD 走
+  `uvicorn --factory` 而非 `python -m proxy_opencode`，此前容器根 logger 无
+  handler：全部 INFO（`chat completion` / `stream ended`）被丢弃、WARNING 走
+  lastResort 无格式无 extras，**无法从日志归因到桶**（本次定位因此被迫翻
+  journalctl）。
+
+**排障入口**：
+```bash
+docker logs zen-gw 2>&1 | grep -E "stream stalled|stream failed mid-way|stream ended"
+# 新标记带 reason=stream_stalled/stream_interrupted 与 egress=桶名；
+# 坏桶状态：curl -s http://127.0.0.1:10010/admin/egresses -H "Authorization: Bearer $ADMIN_KEY"
+# 设备侧隧道生命周期：opc2 上 journalctl -u 'egress-agent*' --since "30 min ago"
+```
+**生效**：修复入仓库后需重建镜像：`docker compose -f deploy/ecs/compose.yml up -d --build`。
+
 ## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 三设备出口桶）
 
 ```text

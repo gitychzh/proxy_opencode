@@ -112,6 +112,17 @@ def test_upstream_trust_env_defaults_off(monkeypatch):
     assert config.load_settings().upstream_trust_env is True
 
 
+def test_stream_stall_s_default_env_and_disable(monkeypatch):
+    """The stream stall watchdog must default on (bounded well below the
+    300s read timeout that let a dead tunnel cut clients on 2026-10-19)."""
+    monkeypatch.delenv("STREAM_STALL_S", raising=False)
+    assert config.load_settings().stream_stall_s == 60
+    monkeypatch.setenv("STREAM_STALL_S", "15")
+    assert config.load_settings().stream_stall_s == 15
+    monkeypatch.setenv("STREAM_STALL_S", "0")  # explicit opt-out
+    assert config.load_settings().stream_stall_s == 0
+
+
 def test_admin_default_is_a_placeholder():
     """This repo is PUBLIC: the built-in admin key must be an obvious fake.
 

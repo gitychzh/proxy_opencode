@@ -85,6 +85,24 @@ def test_setup_logging_env_json(monkeypatch):
     assert text_handlers, "LOG_FORMAT=text should install the text formatter"
 
 
+def test_app_factory_configures_logging(monkeypatch):
+    """The container starts via create_app_from_env (never `python -m
+    proxy_opencode`), so THIS is the only place production ever runs
+    setup_logging — without it the root logger had no handler, every INFO
+    record was dropped and WARNINGs lost their extras (found 2026-10-19
+    while attributing a stream drop to a bucket).
+    """
+    import proxy_opencode.app as app_mod
+
+    calls: list[int] = []
+    sentinel_settings = object()
+    monkeypatch.setattr(app_mod, "setup_logging", lambda: calls.append(1))
+    monkeypatch.setattr(app_mod, "load_settings", lambda: sentinel_settings)
+    monkeypatch.setattr(app_mod, "create_app", lambda settings: "app-sentinel")
+    assert app_mod.create_app_from_env() == "app-sentinel"
+    assert calls == [1], "create_app_from_env must configure logging first"
+
+
 @pytest.mark.asyncio
 async def test_healthz_includes_version():
     from tests.test_gateway_routes import make_app

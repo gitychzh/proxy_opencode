@@ -147,6 +147,18 @@ class Settings:
     # raw ids.
     zen_models: list[str] = field(default_factory=lambda: list(DEFAULT_ZEN_MODELS))
     zen_timeout_s: int = 300
+    # Stream stall watchdog: max tolerated silence between SSE body bytes
+    # (covering both the first byte after the response headers and gaps
+    # mid-stream) before StreamRelay stops waiting, synthesises a terminal
+    # finish_reason:"length" chunk + [DONE] and releases the egress lease
+    # as a failure (kind=stream_stalled -> three consecutive failures
+    # cordon the bucket). Measured 2026-10-19: a dead egress tunnel held a
+    # stream silent for the full 300s zen_timeout_s read timeout, the
+    # resulting httpx.ReadTimeout tore the client connection down with no
+    # terminator and hermes reported stream_drop; its own silent-stream
+    # watchdog fires at 45s, so the default stays well below 300s.
+    # 0 disables the watchdog (legacy behaviour).
+    stream_stall_s: float = 60
     # Optional egress proxy for the zen client, e.g. "http://127.0.0.1:7897".
     zen_proxy: str = ""
     # Whether the httpx clients may follow ambient proxy settings
@@ -394,6 +406,7 @@ def load_settings() -> Settings:
         )
         or list(DEFAULT_ZEN_MODELS),
         zen_timeout_s=int(os.environ.get("OPENCODE_ZEN_TIMEOUT_S", "300")),
+        stream_stall_s=float(os.environ.get("STREAM_STALL_S", "60")),
         zen_proxy=os.environ.get("ZEN_PROXY", "").strip(),
         upstream_trust_env=_env_bool("UPSTREAM_TRUST_ENV", False),
         zen_session_id=(

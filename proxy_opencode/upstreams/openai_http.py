@@ -6,6 +6,7 @@ UPSTREAM_API_KEY. Streaming responses are relayed byte-for-byte.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -21,9 +22,14 @@ logger = logging.getLogger("proxy_opencode.stream")
 
 _CHUNK_ID_RE = re.compile(rb'"id":"([^"]+)"')
 
-# Invoked exactly once when a relay finishes, however it finishes (stream
-# drained, upstream cut, or client disconnect closing the generator).
-CloseHook = Callable[[], Awaitable[None]]
+# Stream end outcomes, passed to the close hook exactly once when the relay
+# finishes, however it finishes:
+#   "completed"    — upstream sent a terminal finish_reason chunk
+#   "cut"          — upstream closed cleanly without a terminal chunk
+#   "stalled"      — no body byte within the stall watchdog window
+#   "interrupted"  — mid-stream transport error (read error, reset, ...)
+#   "disconnected" — the consumer closed the generator (client hung up)
+CloseHook = Callable[[str], Awaitable[None]]
 
 
 class StreamRelay:
@@ -40,6 +46,20 @@ class StreamRelay:
     ``finish_reason: "length"`` chunk + ``[DONE]`` when the upstream stream
     ends without one, so a silent cut surfaces as a normal output-cap
     truncation that clients already know how to handle.
+
+    Second failure mode (found 2026-10-19 while diagnosing a hermes
+    ``stream_drop``): the upstream does not close the stream at all — a
+    dead egress tunnel leaves the connection open with ZERO bytes until
+    the 300s read timeout, after which the exception tears the client
+    connection down with no terminator (hermes: "The connection dropped
+    before the reply finished."). A stall watchdog (``stall_s``, from
+    ``STREAM_STALL_S``) bounds the silence — both for the first body byte
+    after the headers and between bytes — and then stops waiting, letting
+    the same synthesised-terminator path close the wire cleanly; the
+    outcome is handed to the close hook so an egress pool can release the
+    lease as a failure and cordon the dead bucket. ``stall_s <= 0``
+    disables the watchdog (legacy behaviour: silence is only bounded by
+    the client read timeout and the cut surfaces as a hard drop).
     """
 
     def __init__(
@@ -47,11 +67,19 @@ class StreamRelay:
         resp: httpx.Response,
         usage_holder: dict[str, Any],
         on_close: CloseHook | None = None,
+        *,
+        stall_s: float = 0.0,
     ) -> None:
         self.response = resp
         self.usage_holder = usage_holder
         # Set after chunks() ran: True when the terminal chunk was synthesised.
         self.stream_cut = False
+        # Final outcome of _stream() (see CloseHook): None until it ends;
+        # still None at hook time means the consumer closed the generator
+        # mid-stream, i.e. the client disconnected.
+        self.end_reason: str | None = None
+        # Max tolerated silence between body bytes; <= 0 disables the watchdog.
+        self._stall_s = float(stall_s)
         # Called once when the relay finishes (the egress pool releases its
         # lease then — in-flight accounting must span the whole stream).
         self._on_close: CloseHook | None = on_close
@@ -82,7 +110,9 @@ class StreamRelay:
             return
         self._on_close = None
         try:
-            await hook()
+            # None => chunks() was closed before _stream() classified its
+            # end: the consumer hung up (client disconnect).
+            await hook(self.end_reason or "disconnected")
         except Exception:  # never let bookkeeping break the relay teardown
             logger.exception("stream relay close hook failed")
 
@@ -128,7 +158,53 @@ class StreamRelay:
                 saw_finish = True
 
         try:
-            async for chunk in resp.aiter_bytes():
+            iterator = resp.aiter_bytes()
+            last_byte = time.monotonic()
+            while True:
+                try:
+                    if self._stall_s > 0:
+                        chunk = await asyncio.wait_for(
+                            iterator.__anext__(), timeout=self._stall_s
+                        )
+                    else:
+                        chunk = await iterator.__anext__()
+                except StopAsyncIteration:
+                    break
+                except TimeoutError:
+                    # Stall watchdog: no byte for stall_s — either the first
+                    # body byte after the headers or the next one mid-stream.
+                    # A dead egress tunnel hangs exactly like this until the
+                    # read timeout (measured 2026-10-19: 300s of silence, then
+                    # the exception cut the client connection with no
+                    # terminator). Stop waiting and fall through to the
+                    # synthesised terminator instead.
+                    logger.warning(
+                        "upstream stream stalled",
+                        extra={
+                            "reason": "stream_stalled",
+                            "detail": (
+                                f"no bytes for {time.monotonic() - last_byte:.1f}s "
+                                f"(limit {self._stall_s:g}s)"
+                            ),
+                        },
+                    )
+                    self.end_reason = "stalled"
+                    break
+                except httpx.HTTPError as exc:
+                    # Mid-stream transport failure: classify it like a stall
+                    # so the wire still ends with a synthesised terminator
+                    # instead of a cut connection. Never any content here —
+                    # only the error class and truncated message.
+                    logger.warning(
+                        "upstream stream interrupted",
+                        extra={
+                            "reason": "stream_interrupted",
+                            "error": f"{type(exc).__name__}: {exc}"[:200],
+                        },
+                    )
+                    self.end_reason = "interrupted"
+                    break
+                last_byte = time.monotonic()
                 # Always run the line-buffered scan (cheap bytes ops): id /
                 # finish markers live on lines that carry neither "usage" nor
                 # "finish_reason", and a skipped line means a missed terminal
@@ -141,6 +217,11 @@ class StreamRelay:
                 scan_line(pending)
         finally:
             await resp.aclose()
+        # Classify a normal end BEFORE synthesising: the yields below can
+        # raise GeneratorExit (client disconnect) and end_reason must then
+        # stay None so the close hook reports "disconnected".
+        if self.end_reason is None:
+            self.end_reason = "completed" if saw_finish else "cut"
         if not saw_finish:
             # Silent upstream cut: make the truncation explicit so clients
             # treat it as an output-cap stop instead of a protocol violation.
@@ -199,7 +280,7 @@ class OpenAIHttpAdapter:
                 body = await resp.aread()
                 await resp.aclose()
                 return _raw_relay_body(resp.status_code, body)
-            return StreamRelay(resp, {})
+            return StreamRelay(resp, {}, stall_s=self._settings.stream_stall_s)
 
         try:
             resp = await self.client.post("/v1/chat/completions", json=payload)

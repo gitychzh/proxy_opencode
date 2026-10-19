@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -569,6 +570,143 @@ async def test_chat_non_stream_cut_is_reported_as_length() -> None:
     await adapter.aclose()
 
 
+# ---------------------------------------------------- stream stall watchdog
+
+
+@pytest.mark.asyncio
+async def test_relay_stall_watchdog_synthesises_terminator() -> None:
+    # 2026-10-19 incident: a dead egress tunnel left the stream silent until
+    # the 300s read timeout; httpx.ReadTimeout then tore the client
+    # connection down with no terminator (hermes: "The connection dropped
+    # before the reply finished."). The watchdog must stop waiting first and
+    # close the wire cleanly via the synthesised-terminator path.
+    async def gen():
+        yield (
+            b'data: {"id":"z7","choices":[{"index":0,'
+            b'"delta":{"content":"part"}}]}\n\n'
+        )
+        await asyncio.sleep(60)  # tunnel hangs mid-stream
+        raise AssertionError("stall watchdog never fired")  # pragma: no cover
+
+    relay = StreamRelay(httpx.Response(200, content=gen()), {}, stall_s=0.2)
+    out = b"".join([c async for c in relay.chunks()])
+    assert relay.end_reason == "stalled"
+    assert relay.stream_cut is True
+    assert out.startswith(b'data: {"id":"z7"')  # pre-stall bytes verbatim
+    assert b'"finish_reason":"length"' in out
+    assert out.rstrip().endswith(b"data: [DONE]")
+
+
+@pytest.mark.asyncio
+async def test_relay_stall_watchdog_covers_first_byte() -> None:
+    # Response headers arrived but the first body byte never does: the
+    # watchdog window covers that gap too, so a silent tunnel is bounded by
+    # stall_s instead of the full read timeout.
+    async def gen():
+        await asyncio.sleep(60)
+        yield b"unreachable"  # pragma: no cover
+
+    relay = StreamRelay(httpx.Response(200, content=gen()), {}, stall_s=0.2)
+    out = b"".join([c async for c in relay.chunks()])
+    assert relay.end_reason == "stalled"
+    assert relay.stream_cut is True
+    assert b'"finish_reason":"length"' in out
+    assert out.rstrip().endswith(b"data: [DONE]")
+
+
+@pytest.mark.asyncio
+async def test_relay_watchdog_passes_through_normal_completion() -> None:
+    # End-of-stream (StopAsyncIteration) must flow through the wait_for
+    # wrapper untouched when the watchdog is armed.
+    sse = (
+        b'data: {"id":"z1","choices":[{"index":0,"delta":{"content":"hi"}},'
+        b'"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+    )
+
+    async def gen():
+        yield sse
+
+    relay = StreamRelay(httpx.Response(200, content=gen()), {}, stall_s=5.0)
+    out = b"".join([c async for c in relay.chunks()])
+    assert out == sse
+    assert relay.end_reason == "completed"
+    assert relay.stream_cut is False
+
+
+@pytest.mark.asyncio
+async def test_relay_interrupted_mid_stream_synthesises_terminator() -> None:
+    async def gen():
+        yield (
+            b'data: {"id":"z6","choices":[{"index":0,'
+            b'"delta":{"content":"pa"}}]}\n\n'
+        )
+        raise httpx.ReadError("connection reset by peer")
+
+    relay = StreamRelay(httpx.Response(200, content=gen()), {}, stall_s=5.0)
+    out = b"".join([c async for c in relay.chunks()])
+    assert relay.end_reason == "interrupted"
+    assert relay.stream_cut is True
+    assert b'"finish_reason":"length"' in out
+    assert out.rstrip().endswith(b"data: [DONE]")
+
+
+@pytest.mark.asyncio
+async def test_relay_close_hook_reports_stall_outcome() -> None:
+    calls: list[str] = []
+
+    async def hook(outcome: str) -> None:
+        calls.append(outcome)
+
+    async def gen():
+        await asyncio.sleep(60)
+        yield b"unreachable"  # pragma: no cover
+
+    relay = StreamRelay(
+        httpx.Response(200, content=gen()), {}, on_close=hook, stall_s=0.2
+    )
+    _ = b"".join([c async for c in relay.chunks()])
+    assert calls == ["stalled"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_stalled_stream_releases_lease_as_failure() -> None:
+    # End-to-end through the pool: a tunnel that stops delivering must
+    # release the lease as a FAILURE (kind=stream_stalled) so three
+    # consecutive stalls cordon the dead bucket instead of it never
+    # accumulating a single failure (the 2026-10-19 diagnosis: release was
+    # hardcoded ok=True and bad buckets were never cordoned).
+    async def body():
+        yield b'data: {"choices":[{"delta":{"content":"a"}}]}\n\n'
+        await asyncio.sleep(60)  # egress tunnel hangs
+        raise AssertionError("stall watchdog never fired")  # pragma: no cover
+
+    respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+        content=body(),
+    )
+    client = _leased_client()
+    pool = _StubPool(client)
+    adapter = ZenDirectAdapter(
+        make_settings(stream_stall_s=0.2), pool=pool  # type: ignore[arg-type]
+    )
+    result = await adapter.chat(
+        {
+            "model": "opencode/big-pickle",
+            "stream": True,
+            "messages": [{"role": "user", "content": "q"}],
+        }
+    )
+    assert isinstance(result, StreamRelay)
+    assert pool.releases == []  # lease held while the stream is live
+    out = b"".join([c async for c in result.chunks()])
+    assert b'"finish_reason":"length"' in out  # clean wire, not a hard drop
+    assert pool.releases == [("bucket-a", False, "stream_stalled")]
+    await client.aclose()
+    await adapter.aclose()
+
+
 @respx.mock
 @pytest.mark.asyncio
 async def test_models_endpoint() -> None:
@@ -676,7 +814,10 @@ async def test_chat_stream_leases_egress_and_releases_on_stream_end() -> None:
     # the lease must stay held while the stream is live
     assert pool.releases == []
     _ = b"".join([c async for c in result.chunks()])
-    assert pool.releases == [("bucket-a", True, "")]
+    # no finish_reason upstream -> clean cut, still an ok release (the
+    # healthy tunnel merely forwarded upstream's truncation) but with the
+    # outcome recorded for bucket stats
+    assert pool.releases == [("bucket-a", True, "stream_cut")]
     await client.aclose()
     await adapter.aclose()
 
@@ -704,7 +845,7 @@ async def test_chat_stream_releases_lease_on_client_disconnect() -> None:
     gen = result.chunks()
     await gen.__anext__()  # consume one chunk, then hang up
     await gen.aclose()
-    assert pool.releases == [("bucket-a", True, "")]
+    assert pool.releases == [("bucket-a", True, "client_disconnected")]
     await client.aclose()
     await adapter.aclose()
 
@@ -1073,10 +1214,10 @@ async def test_chat_transport_error_releases_lease_as_failure() -> None:
 
 @pytest.mark.asyncio
 async def test_relay_on_close_fires_once_after_full_stream() -> None:
-    calls: list[int] = []
+    calls: list[str] = []
 
-    async def hook() -> None:
-        calls.append(1)
+    async def hook(outcome: str) -> None:
+        calls.append(outcome)
 
     async def gen():
         yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
@@ -1085,15 +1226,16 @@ async def test_relay_on_close_fires_once_after_full_stream() -> None:
     relay = StreamRelay(httpx.Response(200, content=gen()), {}, on_close=hook)
     out = b"".join([c async for c in relay.chunks()])
     assert b"[DONE]" in out
-    assert calls == [1]
+    # no finish_reason chunk upstream -> clean cut, reported as such
+    assert calls == ["cut"]
 
 
 @pytest.mark.asyncio
 async def test_relay_on_close_fires_on_early_aclose() -> None:
-    calls: list[int] = []
+    calls: list[str] = []
 
-    async def hook() -> None:
-        calls.append(1)
+    async def hook(outcome: str) -> None:
+        calls.append(outcome)
 
     async def gen():
         yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
@@ -1103,4 +1245,22 @@ async def test_relay_on_close_fires_on_early_aclose() -> None:
     it = relay.chunks()
     await it.__anext__()
     await it.aclose()
-    assert calls == [1]
+    # closed by the consumer before the stream ended -> client disconnect
+    assert calls == ["disconnected"]
+
+
+@pytest.mark.asyncio
+async def test_relay_on_close_outcome_completed_when_finish_seen() -> None:
+    calls: list[str] = []
+
+    async def hook(outcome: str) -> None:
+        calls.append(outcome)
+
+    async def gen():
+        yield b'data: {"choices":[{"delta":{"content":"hi"},' \
+            b'"finish_reason":"stop"}]}\n\n'
+        yield b"data: [DONE]\n\n"
+
+    relay = StreamRelay(httpx.Response(200, content=gen()), {}, on_close=hook)
+    _ = b"".join([c async for c in relay.chunks()])
+    assert calls == ["completed"]

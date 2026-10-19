@@ -27,6 +27,7 @@ from .egress.eventlog import EVENTS
 from .egress.pool import EgressPool
 from .egress.rotate import EgressRotator
 from .errors import GatewayHttpError
+from .logsetup import setup_logging
 from .registry import ModelRegistry
 from .routes import admin as admin_routes
 from .routes import anthropic_api as anthropic_routes
@@ -142,5 +143,16 @@ def create_app_from_env() -> FastAPI:
     Deliberately no module-level `app` instance: building one at import time
     would create an httpx client, read the key store and validate the
     environment as a side effect of merely importing this module.
+
+    Configures logging first: the container (deploy/ecs/Dockerfile) starts
+    through this factory instead of `python -m proxy_opencode`, so without
+    this call no one ever ran `setup_logging()` in production — the root
+    logger had no handler, every INFO record (request stats, stream
+    lifecycle) was silently dropped and WARNINGs fell through to the
+    unformatted lastResort handler (found 2026-10-19 while attributing a
+    stream drop to an egress bucket: docker logs carried no bucket fields).
+    uvicorn's LOGGING_CONFIG has no `root` key, so this survives its
+    dictConfig in either order.
     """
+    setup_logging()
     return create_app(load_settings())
