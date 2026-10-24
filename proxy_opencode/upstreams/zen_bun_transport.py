@@ -33,6 +33,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Any, AsyncIterator, Mapping
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -135,6 +136,19 @@ class BunTransport:
             env.pop(name, None)
         if proxy_url:
             env["HTTPS_PROXY"] = proxy_url
+        # Hop observability for the transport-fingerprint gate: log WHERE
+        # the attempt egresses without ever logging the credential-bearing
+        # URL (secret red-lines). Wrong/missing lease proxy would show as
+        # proxy=DIRECT while the pool believes it leased a bucket.
+        proxy_hop = "DIRECT"
+        if proxy_url:
+            parsed = urlsplit(proxy_url)
+            proxy_hop = f"{parsed.hostname}:{parsed.port}"
+        logger.info(
+            "bun upstream attempt: proxy=%s timeout_ms=%d",
+            proxy_hop,
+            int(timeout_s * 1000),
+        )
         env["ZEN_UPSTREAM_BASE"] = base_url
         env["ZEN_BUN_HEADERS"] = json.dumps(dict(headers))
         env["ZEN_BUN_TIMEOUT_MS"] = str(int(timeout_s * 1000))
