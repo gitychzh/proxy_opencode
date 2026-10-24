@@ -354,6 +354,27 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
   已知待办：`egress_request` 账本行缺失（当前构建从不写 per-call 行，
   仅 cordon/rotation 事件入流）——观测性缺口，另行修复。
 
+**第四轮定案（08:5x–09:3xZ，session 单次使用——bun 部署后首轮 429 的真因）**：
+- bun 部署后首个 hermes 式聊天仍整链 429（每桶 `free_quota_exhausted`
+  cordon+轮换），与 bun 传输修复矛盾 → 容器内解耦消融定案：
+  - E1：假代理 `127.0.0.1:1` → `ECONNREFUSED`（**bun 尊重 `HTTPS_PROXY`
+    env**，排除直连假说）；
+  - E2/E4/A：同一次 cc9 防火墙路径，克隆 body + **新 mint 会话** →
+    **200×3**（E4 用网关自己 mint 的头 → headers 无罪）；
+  - E7/E8/E9/E10：**复用**同一会话（gwheaders）→ 一律 429，无论 body 是
+    克隆全量还是最小 4 具——body 无罪，**session 已消费才是触发器**；
+  - E5/E6 的 401 `AuthError` 是实验污染（`_zen_model` 只剥 provider
+    前缀，别名→裸 ID 映射在 route/catalog 层，实验 body 用了未映射模型）。
+- 结论：`x-opencode-session` **单次使用**；网关 `chat()` 旧式"每客户端
+  请求 mint 一次、贯穿三条 failover 腿"=对上游的连环重放，坏到第二轮起。
+  修复：**in-loop 每试探 mint**；hermes 的 15x 自愈重试是各自独立的
+  chat() 调用（每次重新进入 `chat()` 即重 mint 新会话），本就不受影响。
+  测试：`test_chat_mints_fresh_session_per_upstream_attempt`（两腿两个
+  不同 session）。AGENTS 硬约束 1 增补第四轮条目；该轮起"层 2 429"需
+  归因到会话复用或真配额。
+- 另证：容器内手动复现走 agent 隧道 + bun + 各桶出口全链路通畅，脚本
+  资产（/data/pb/*）与 401/403/429/200 的判定链在 spec 级可复现。
+
 ## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 四桶出口池）
 
 ```text

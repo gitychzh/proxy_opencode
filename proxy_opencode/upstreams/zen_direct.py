@@ -497,16 +497,24 @@ class ZenDirectAdapter:
         fully-drained pool answers instead of hanging; a final free-tier 403
         is answered as 503 `egress_unavailable` (retryable) rather than
         relayed as a client-blaming 403.
+
+        Per-attempt session mint: the upstream treats ``x-opencode-session``
+        as single-use — replaying a consumed session returns the
+        quota-shaped ``429 FreeUsageLimitError`` even on a healthy egress IP
+        with byte-identical headers/body (live 2026-10-24: the same IP
+        served 200 to a fresh mint and 429 to its reuse minutes later, and
+        back-to-back 200s kept arriving on that IP to fresh mints). Headers
+        are therefore minted inside the attempt loop — one mint per upstream
+        request, matching the genuine client's behaviour.
         """
         model = self._zen_model(payload.get("model"))
         body = self._build_body(payload, model)
         body["stream"] = True
-        headers = self._headers()
         stream = bool(payload.get("stream"))
 
         if self._pool is None:
             result = await self._exchange(
-                self.client, body, headers, model, stream, None
+                self.client, body, self._headers(), model, stream, None
             )
             return self._egress_gate_answer(result)
 
@@ -515,7 +523,7 @@ class ZenDirectAdapter:
         while True:
             try:
                 result = await self._exchange(
-                    lease.client, body, headers, model, stream, lease
+                    lease.client, body, self._headers(), model, stream, lease
                 )
             except (httpx.HTTPError, ConnectionError) as exc:
                 # _exchange already released the lease as a transport

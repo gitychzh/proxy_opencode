@@ -30,8 +30,9 @@
      输**（镜像内置 bun + `proxy_opencode/zen_bun/forward.ts` 一次性子进程，
      `ZEN_BUN_TRANSPORT=1`，经当前桶 agent 作 HTTPS 代理出站，SSE 直通，
      池/换 IP/故障转移语义不变）；httpx 仅 dev/test 回退。换 IP 对 httpx 无解。
+   - **session 单次使用（2026-10-24 PM 第四轮定案）**：`x-opencode-session` 被上游按**单次使用**判定——把已消费会话重放，即便出口 IP 健康、headers/body 字节相同，也回层 2 同款 429（同 IP 分钟级对照实测：新 mint=200、立即重放=429，且该 IP 随后仍能连续服务新 mint，≥3 发）。因此网关**每次上游试探（含 failover 链）都重新 mint**（`zen_direct.chat()` 循环内 `_headers()`）。层 2 的 429 有两个互斥成因：真实 per-IP/UTC 日配额 与 session 复用，二者都要求先过形状门+传输栈门。
    - **排障红线（2026-10-24 教训，随第三轮修正）**：桶出口上**成功（200）**的活体调用会消耗该 IP 当日匿名额度——活体实验少而精、原样先行（clone-first）；429/403/传输失败不烧额度。当日"整窗 count=0 却全池 429"的最终归因是**传输栈门**（httpx 全部被伪装 429），非探针烧穿（早前推断已撤，见上条）。
-   - 403 failover/cordon/换 IP 的**防御性语义保留**（见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5），但根因归因以**两门 + 传输栈判定**模型为准（见上）。
+   - 403 failover/cordon/换 IP 的**防御性语义保留**（见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5），但根因归因以**两门 + 传输栈 + session 单次使用**判定模型为准（见上）。
    - 模型目录自 2026-10-02 起使用裸 ID（如 `big-pickle`）；旧 `opencode/big-pickle` 已失效。官方 1.19.4 实发 UA：`opencode/1.19.4 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4`（UA 值不敏感但保持镜像）。
    - 诊断与更多细节见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
 

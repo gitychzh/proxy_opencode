@@ -985,6 +985,47 @@ async def test_chat_429_fails_over_to_next_bucket() -> None:
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_chat_mints_fresh_session_per_upstream_attempt() -> None:
+    """Upstream sessions are single-use (live 2026-10-24): replaying a
+    consumed session returns the quota-shaped 429 even on a healthy egress
+    IP with byte-identical headers/body. Headers must therefore be minted
+    per upstream attempt — including every failover leg — instead of once
+    per client request.
+    """
+
+    seq = {"n": 0}
+    sessions: list[str] = []
+
+    def _upstream(request: httpx.Request) -> httpx.Response:
+        sessions.append(request.headers["x-opencode-session"])
+        if seq["n"] == 0:
+            seq["n"] += 1
+            return httpx.Response(
+                429, json={"error": {"message": "FreeUsageLimitError"}}
+            )
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_SSE_OK
+        )
+
+    respx.post("https://opencode.ai/zen/v1/chat/completions").mock(
+        side_effect=_upstream
+    )
+    a, b = httpx.AsyncClient(), httpx.AsyncClient()
+    pool = _RollingStubPool({"bucket-a": a, "bucket-b": b})
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert len(sessions) == 2
+    assert len({sessions[0], sessions[1]}) == 2
+    await a.aclose()
+    await b.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_chat_429_surfaces_after_failover_budget_is_exhausted() -> None:
     """Every bucket 429ing must return the last upstream 429 (bounded)."""
 
