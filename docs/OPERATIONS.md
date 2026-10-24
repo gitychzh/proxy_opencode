@@ -272,6 +272,31 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
   08:00 CST）。窗口重置后再复测一次确认额度模型（若仍即烧，需上报为
   协议层变化并更新 AGENTS 硬约束 1 的表述）。
 
+**429 归因深挖（04:00–04:05Z，绕网关 cordon 的逐桶直刺实验）**：
+- 基线：容器内复刻网关原样请求（同 header 序列/UA/`Bearer public`/
+  内置工具/stream/descending session），经各桶 CONNECT 与 ECS 宿主直连
+  —— 4 个互不相干 IP 族（电信家宽 win10/wifi、移动 eth、联通 cc9、
+  阿里云机房 ECS）**全部 429**；响应仅 `Retry-After`（精确指向 00:00Z），
+  无任何 `X-RateLimit-*`/scope 头。
+- **用量轴排除**：`/data/egress_counts.json` 持久计数整窗 `count=0`
+  （今 UTC 日**没有任何一个**成功上游 completion），首个 429 在
+  00:59:32Z（窗口开跑仅 59 分钟）—— **"我们自己烧穿 500"不成立且
+  从未接近**（500 是网关自己的换 IP 阈值，非上游额度；上游免费额度
+  ≪500，且 429 与我们的用量、甚至与"该 IP 今日是否被我们用过"无关）。
+- **变量消去逐项 429 依旧**：全新 `x-session-id` UUID（P1）、UA 换
+  版本（P2）、去掉 `Authorization: Bearer public`（P4）、去掉
+  `x-opencode-client/project`（P6）—— 全部仍然是 429。唯二穿层者：
+  无效 model 直接 400 `Model is unavailable`（P3/P5）—— 证明限流层在
+  模型解析**之后**，与我们 fingerprint/UA/token/session 无关。
+- **结论（当日形态）**：429 由上游"匿名免费层"在**我们无法从客户端改动
+  的维度**上计数（最可能：匿名桶全局/区域级已耗），与出口 IP、
+  fingerprint、Bearer token、session 常量、opencode 头均无关；且该状态
+  在 UTC 日窗口内对**全新 IP 也预置为已耗**。网关侧当前只能
+  transparent 429；**真正的杠杆是配置真 key**（`OPENCODE_ZEN_API_KEY`
+  —— 代码路径已存在，_auth_free 走真 token 即绕开匿名层），或 hermes
+  侧配第二个 provider。窗口重置后复测"新 IP 首请求是否 200"（P7）以
+  判定是"匿名层区域性整天关闭"还是"per-IP 重置仍在"。
+
 ## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 四桶出口池）
 
 ```text
