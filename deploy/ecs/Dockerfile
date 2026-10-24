@@ -42,6 +42,10 @@ COPY proxy_opencode ./proxy_opencode
 RUN pip install --no-cache-dir . \
     && useradd --create-home --uid 10002 gw
 
+# forward.ts 不进 wheel（setuptools 只打包 .py），显式摆放并由
+# ZEN_BUN_SCRIPT 指认（见上面 ENV 块）。
+COPY proxy_opencode/zen_bun/forward.ts /app/zen_bun/forward.ts
+
 USER gw
 
 # 容器内监听全部接口；compose 只把端口发布到宿主机 loopback，由 caddy 反代。
