@@ -12,7 +12,7 @@ import logging
 import re
 import secrets
 import time
-from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Protocol
 
 import httpx
 
@@ -30,6 +30,24 @@ _CHUNK_ID_RE = re.compile(rb'"id":"([^"]+)"')
 #   "interrupted"  — mid-stream transport error (read error, reset, ...)
 #   "disconnected" — the consumer closed the generator (client hung up)
 CloseHook = Callable[[str], Awaitable[None]]
+
+
+class ResponseLike(Protocol):
+    """Minimal upstream-response surface the relay/aggregator consumes.
+
+    ``httpx.Response`` satisfies it natively; the bun transport facade
+    (``upstreams/zen_bun_transport.py``, the 2026-10-24 stack-gate hop)
+    implements the same duck surface for its subprocess streams.
+    """
+
+    status_code: int
+    headers: httpx.Headers
+
+    def aiter_bytes(self) -> AsyncIterator[bytes]: ...
+
+    def aiter_lines(self) -> AsyncIterator[str]: ...
+
+    async def aclose(self) -> None: ...
 
 
 class StreamRelay:
@@ -64,7 +82,7 @@ class StreamRelay:
 
     def __init__(
         self,
-        resp: httpx.Response,
+        resp: ResponseLike,
         usage_holder: dict[str, Any],
         on_close: CloseHook | None = None,
         *,

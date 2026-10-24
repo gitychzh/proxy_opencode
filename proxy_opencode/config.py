@@ -193,6 +193,19 @@ class Settings:
     # set OPENCODE_ZEN_PROJECT_ID to pin a specific captured value.
     zen_project_id: str = ""
     zen_client_version: str = DEFAULT_ZEN_CLIENT_VERSION
+    # bun transport (2026-10-24 stack gate): the anonymous free tier judges
+    # the TLS/HTTP transport fingerprint — byte-exact httpx replays of a
+    # genuine client capture got the quota-shaped 429 from fresh IPs while
+    # bun (boringssl, HTTP/2) replays of the same bytes got 200. When
+    # enabled, the zen-direct adapter drives one short-lived `bun
+    # forward.ts` subprocess per attempt instead of httpx (SSE passthrough;
+    # egress pool / failover semantics unchanged). Off by default so tests
+    # and no-bun deployments keep the httpx fallback; the gateway image
+    # ships the bun binary and sets ZEN_BUN_TRANSPORT=1.
+    zen_bun_transport: bool = False
+    zen_bun_bin: str = "/usr/local/bin/bun"
+    # Empty -> <repo>/proxy_opencode/zen_bun/forward.ts (the bundled script).
+    zen_bun_script: str = ""
     zen_bun_version: str = DEFAULT_ZEN_BUN_VERSION
     # 0.7.x egress pool: per-bucket device agents. Format:
     #   ZEN_EGRESS_PROXIES="name=http://<device>:10001,name2=http://<device>:10002"
@@ -430,6 +443,9 @@ def load_settings() -> Settings:
         zen_client_version=os.environ.get(
             "OPENCODE_ZEN_CLIENT_VERSION", DEFAULT_ZEN_CLIENT_VERSION
         ),
+        zen_bun_transport=_env_bool("ZEN_BUN_TRANSPORT", False),
+        zen_bun_bin=os.environ.get("ZEN_BUN_BIN", "/usr/local/bin/bun").strip(),
+        zen_bun_script=os.environ.get("ZEN_BUN_SCRIPT", "").strip(),
         zen_bun_version=os.environ.get(
             "OPENCODE_ZEN_BUN_VERSION", DEFAULT_ZEN_BUN_VERSION
         ),

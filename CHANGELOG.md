@@ -10,6 +10,15 @@
 - **docs: `docs/EGRESS_OBSERVABILITY.md`** — 新增 `egress_request` JSONL 埋点方案（Schema、失败分类、ContextVar+try/finally 埋点建议、logrotate、jq/python 统计示例）。
 - **feat(stream): `STREAM_STALL_S` SSE 停顿看门狗配置（默认 60s，0=关闭）** — 所有反代流的静默上限（覆盖响应头后首字节与字节间隔）；`deploy/ecs/env.example` 有注释说明，事实源在 `proxy_opencode/config.py`。
 - **feat(stream): `CLIENT_STALL_S` 客户端写停滞看门狗配置（默认 60s，0=关闭）** — `relay_stream` 在 `yield` 停留超阈值即判客户端段死（ASGI 写被背压阻塞），取消响应任务并快速关闭连接；`deploy/ecs/env.example` 有注释说明，事实源在 `proxy_opencode/config.py`。
+- **feat(transport): zen 上游一跳改走 bun 传输子进程（2026-10-24 传输指纹门）** — 上游按 TLS/HTTP 栈判定客户端：同一新出口 IP 分钟级对照，bun（boringssl/HTTP2）字节级克隆重放 **200**、httpx（OpenSSL/HTTP1.1）同字节重放 **429**（伪装成配额 `FreeUsageLimitError`）；头级单变量（httpx 自动 `Accept-Encoding`/缺失 `Accept`）均 200 ⇒ 唯一差异=栈。实现：
+  - `proxy_opencode/zen_bun/forward.ts`：一次性子进程契约——stdin 请求体、stdout 原始 SSE/错误体直通、stderr 单行 `META {status,headers}`（fetch 收到响应头即写，正文尚未开始）；hop-by-hop 头剥离；`AbortController` 按 `ZEN_BUN_TIMEOUT_MS` 掐断；零日志零本地端口。
+  - `upstreams/zen_bun_transport.py`：`BunTransport`（spawn/环境净化/代理注入/超时/kill）+ `_BunResponse`（httpx.Response 形状的鸭子面：`status_code/headers/aiter_bytes/aiter_lines/aclose`）+ `BunTransportError`。
+  - `upstreams/zen_direct.py`：`_exchange` 分发器（bun 优先、httpx 回退）+ `_exchange_via_bun`（429/5xx/403-门槛/流式/聚合与 httpx 路径同语义同日志）；流收尾钩子提取为 `_stream_relay`（两传输共用）；`_stream_relay`/`_egress_proxy_url`——后者按当前租得桶 agent 即时拼 Basic 凭据（secret 不入 spec/admin/日志）。
+  - `openai_http`：`ResponseLike` Protocol 统一 httpx/bun 响应面（`StreamRelay`/`_aggregate_sse` 类型放宽）。
+  - `config.py`：`ZEN_BUN_TRANSPORT/ZEN_BUN_BIN/ZEN_BUN_SCRIPT`（镜像 ENV 默认 =1；dev 无 bun 自动回退 httpx，测试不受影响）。
+  - 镜像：`deploy/ecs/Dockerfile` 预装 bun 1.4.4（npmmirror 下载，运行期零外网依赖）+ `COPY zen_bun/forward.ts`；`deploy/ecs/env.example` 注释齐。
+  - 测试：`tests/test_zen_bun_transport.py` 13 例（from_settings 门禁、spawn 环境/代理注入、META 协议四态、429/流式适配器路径、凭据拼装、行切分）。
+  - 文档：`AGENTS.md` 硬约束 1（新增传输栈门条目+撤回探针烧穿归因）、`docs/OPERATIONS.md` §0.5 第三轮定案、`docs/ARCHITECTURE.md` §1。
 
 ### Changed
 - **docs: 项目文档整体梳理与去重** — 按“同一事实只在一处维护”原则重构文档体系：
@@ -42,6 +51,7 @@
   - `egress.rotate._rotate_flow`：`POST {agent}/rotate` 传输失败（可能命令已送达 agent 或 ONT 自行重拨）不再立即判 `failed`——照常在 deadline 内轮询 `/healthz` 观测 IP 变化，观测到合法新 IP 即按成功收敛；明确的 HTTP 拒绝（状态码/`ok=false`）仍是最终失败。
   - 测试：`tests/test_egress_pool.py`（配额 cordon 随 IP 变解除 / 外前缀与未就绪不解除 / transport streak 不解除 / 403 门槛 cordon 解除）、`tests/test_egress_rotation.py`（unreachable 后轮询成功 / unreachable + IP 未见变化仍失败，detail 带两个原因）、`tests/test_egress_eventlog.py`、`tests/test_config.py` 联动放宽成功路径 poll deadline（冷启动探针数百 ms）。
   - 文档：`docs/ARCHITECTURE.md` §5、`docs/OPERATIONS.md` §0.5。
+- **fix(ops): 全池 429 根因第三次（最终）修正——传输栈门，探针烧穿归因撤回** — 当日三段递进归因（①探针烧穿配额 → ②CGNAT 共享池"新 IP 到手即被租户烧穿" → ③最终=传输栈判定）以 ②→③ 的双栈对照实验定案：同机同出口 IP 分钟内，bun 字节级克隆 4/4 200、httpx 同克隆重放 429（`FreeUsageLimitError` 原文）；头级单变量排除后唯一差异=TLS/HTTP 栈。据此：层 2"数百发探针烧穿"与"全新 IP 即熄火=CGNAT 共享池"两个早前结论均撤回（429 不烧额度；探针从不触上游）；**探针红线保留**（200 计费的活体调用才消耗）。修复=feat(transport) 一条。已知待办：`egress_request` per-call 账本行在当前构建缺失（事件流仅 cordon/rotation 类），观测性缺口另行修复。详见 `docs/OPERATIONS.md` §0.5 第三轮定案。
 - **fix(egress): 免费层 403 `FreeTierError` 按出口 IP 处理（failover + cordon + 换 IP）** — 2026-10-17 定位：协议已合规（≥2 内置工具 + descending session + `stream`）的请求在**被标记的出口 IP** 上仍 403 `FreeTierError`；同一字节请求换新 IP（旋转所得）或 ECS 宿主 IP 即 200；而 `/healthz` 探针不检测门槛，被标记的桶仍判健康并持续分发。修复：
   - 适配器 `zen_direct`：匿名模式 403 `FreeTierError` → 释放租赁为 `free_tier_rejected`（失败），并触发 `chat()` 桶间 failover（SSE 未开播、客户端零字节）；非匿名或其它错误类型的 403 仍按请求级 ok 释放。
   - 池 `pool.release`：`free_tier_rejected` **立即 cordon**（不等 3 连败），并通知 observer。

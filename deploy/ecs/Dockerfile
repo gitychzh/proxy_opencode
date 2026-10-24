@@ -8,16 +8,32 @@
 # /healthz；没有任何云端构建/遥测调用。依赖装在本镜像内（不锁云端）。
 FROM python:3.12-slim
 
+# bun 传输栈（2026-10-24 传输指纹门）：免费层上游按 TLS/HTTP 栈指纹判定，
+# httpx（OpenSSL/HTTP1.1）的请求一律被伪装成 429 配额额满；bun（boringssl/
+# HTTP2）——官方客户端同栈——同字节重放得 200。网关把 TLS/H2 跳交给 bun
+# （zen_bun/forward.ts 子进程，经每桶 agent 隧道出站，SSE 直通）。预装到
+# /usr/local/bin/bun；下载走 npmmirror（构建期一次性行为，运行期零外网依赖）。
 # 国内构建走镜像源（默认清华 TUNA）；可用 --build-arg 覆盖。
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG BUN_VERSION=1.4.4
+ARG BUN_URL=https://registry.npmmirror.com/-/binary/bun/bun-v${BUN_VERSION}/bun-linux-x64.zip
 ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HOST=0.0.0.0 \
-    PORT=10002
+    PORT=10002 \
+    ZEN_BUN_TRANSPORT=1 \
+    ZEN_BUN_BIN=/usr/local/bin/bun \
+    ZEN_BUN_SCRIPT=/app/zen_bun/forward.ts
 
 WORKDIR /app
+
+RUN python -c "import urllib.request,sys; urllib.request.urlretrieve(sys.argv[1], '/tmp/bun.zip')" "${BUN_URL}" \
+    && python -c "import zipfile; zipfile.ZipFile('/tmp/bun.zip').extractall('/tmp')" \
+    && mv /tmp/bun-linux-x64/bun /usr/local/bin/bun \
+    && chmod 0555 /usr/local/bin/bun \
+    && rm -rf /tmp/bun.zip /tmp/bun-linux-x64
 
 # 先只装包本体；pyproject 声明的依赖随 index 拉取。README.md 是 pyproject
 # 的 readme 字段，必须一起拷入，否则构建报错。

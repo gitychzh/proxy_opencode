@@ -21,9 +21,17 @@
 1. **免费层协议事实（活体复测：2026-09-30/2026-10-02/2026-10-13/2026-10-17/**2026-10-24 字节级克隆消融**）——两层门**
    - **层 1 形状门（403 `FreeTierError`）**：至少 **4** 个 distinct 工具，且 `function.name` 属于 OpenCode 内置工具集（`bash/edit/glob/grep/read/skill/task/todowrite/webfetch/websearch/write`），并且 `stream: true`。**schema/description 内容不校验**（4 真名 + 空 schema 亦 200）；UA 版本/头名（含 2.0 系改名）/`b3`/`traceparent`/`x-opencode-client` 值均**不敏感**。少于 4 个真名（1/2/3）、掺入改名工具、或 `stream: false` 均得到 403。默认 `ZEN_TOOLS_MODE=minimal` 注入 4 个合成最小 schema（pool 前四位=1.19.4 客户端实发的 `bash,edit,glob,read`）。旧的"≥2 真名"口径是 2026-09-30 时代结论，上游已收紧。
    - **session ID 必须 descending 编码（opencode 1.19.0 起）**：`x-opencode-session` 必须是 descending 编码（`~((ms<<12)+counter)&0xFFFFFFFFFFFF`），同毫秒内 `counter < 64`。ascending 恒定 403 `FreeTierError`。`x-opencode-request`（`msg_`）仍为 ascending。1.19.4 客户端实发双头 `x-opencode-session` + `x-opencode-session-id`（同值），**不再发送** legacy `x-session-id` 稳定 UUID，也不重复发送 `x-opencode-request-id`；`x-opencode-project` 为 40-hex 工作区哈希（非 `global`）。
-   - **层 2 配额门（429 `FreeUsageLimitError`）**：按**出口 IP / UTC 日**独立计量成功调用，UTC 0 点重置（实测额度口径很小而 ~数百发探针即可烧穿一个 IP；`Retry-After` 精确指向 UTC0）。传输失败、TLS EOF、超时、403 均不烧额度，不得据此判断配额。**层 1 先于层 2 判定**（配额烧穿的 IP 上形状缺陷请求仍 403）。
-   - **排障红线（2026-10-24 教训）**：任何从桶出口发出的活体探针都会**消耗该 IP 当日的匿名额度**——窗口内的直刺实验尽量少而精、原样先行（clone-first），防止自己把全池烧成 429（当日"整窗 count=0 却全池 429"即由此而来：`egress_request` 账本不含探针流量）。
-   - 403 failover/cordon/换 IP 的**防御性语义保留**（见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5），但根因归因以两层门模型为准。
+   - **层 2 配额门（429 `FreeUsageLimitError`）**：按**出口 IP / UTC 日**独立计量成功调用，UTC 0 点重置（额度口径小，窗口内数十发 200 量级即见烧穿；`Retry-After` 精确指向 UTC0）。传输失败、TLS EOF、超时、403 均不烧额度，不得据此判断配额。**层 1 先于层 2 判定**（配额烧穿的 IP 上形状缺陷请求仍 403）。注意：层 2 之上还有**传输栈门**（见下条）——httpx 请求被伪装成层 2 429 早于任何真实计量。
+   - **传输栈门（2026-10-24 PM 定案，对“配额门”单因解释的修正）**：上游按
+     **TLS/HTTP 传输栈指纹**判定客户端——同一新出口 IP 分钟级对照：bun
+     （boringssl/HTTP2）字节级克隆重放 **200**、httpx（OpenSSL/HTTP1.1）
+     同字节重放 **429**（头级单变量全通过，唯一差异=栈）。发作形态=层 2
+     同款 `FreeUsageLimitError`（伪装成配额）。**生产网关出网必须走 bun 传
+     输**（镜像内置 bun + `proxy_opencode/zen_bun/forward.ts` 一次性子进程，
+     `ZEN_BUN_TRANSPORT=1`，经当前桶 agent 作 HTTPS 代理出站，SSE 直通，
+     池/换 IP/故障转移语义不变）；httpx 仅 dev/test 回退。换 IP 对 httpx 无解。
+   - **排障红线（2026-10-24 教训，随第三轮修正）**：桶出口上**成功（200）**的活体调用会消耗该 IP 当日匿名额度——活体实验少而精、原样先行（clone-first）；429/403/传输失败不烧额度。当日"整窗 count=0 却全池 429"的最终归因是**传输栈门**（httpx 全部被伪装 429），非探针烧穿（早前推断已撤，见上条）。
+   - 403 failover/cordon/换 IP 的**防御性语义保留**（见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5），但根因归因以**两门 + 传输栈判定**模型为准（见上）。
    - 模型目录自 2026-10-02 起使用裸 ID（如 `big-pickle`）；旧 `opencode/big-pickle` 已失效。官方 1.19.4 实发 UA：`opencode/1.19.4 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4`（UA 值不敏感但保持镜像）。
    - 诊断与更多细节见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
 

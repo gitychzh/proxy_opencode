@@ -42,13 +42,18 @@ ECS ┌────────────────────────�
         └───────────────┴──────────────┴────────────┴──▶ opencode.ai/zen/v1
 ```
 
-**为什么成立**：Zen 免费层门槛是 wire 层的（两层门：**形状门 403**=
-descending session ID + **≥4 真名内置工具** + `stream:true`（2026-10-24
-消融定案；UA/头名/schema 内容不敏感）；**配额门 429**=每出口 IP/UTC 日，
-Retry-After 指向 UTC0），全部由 ECS 网关铸造，与出口无关；额度
-按出口 IP 计量，agent 的 CONNECT 出口就是各设备公网 IP，四/五桶隔离原样
-保留；字节量与今天逐跳一致（ECS↔设备那段从"LB→网关 HTTP"变为"网关→
-代理 CONNECT"），带宽与移动流量零新增。
+**为什么成立**：Zen 免费层判定皆在 wire 层、由 ECS 网关侧供给，与出口
+网段无关：**形状门 403**= descending session ID + ≥4 真名内置工具 +
+`stream:true`（2026-10-24 消融定案；UA/头名/schema 内容不敏感）；
+**配额门 429**=每出口 IP/UTC 日（Retry-After 指向 UTC0）；**传输栈门
+429**（2026-10-24 PM 第三轮定案）=非 bun/同栈客户端一律伪装配额 429，
+与 IP 鲜度无关。为此上游一跳改走 bun——`proxy_opencode/zen_bun/
+forward.ts` 一次性子进程（boringssl/HTTP2，镜像内置 bun 1.4.4；
+`ZEN_BUN_TRANSPORT=1`），每次上游试探以**当前租得桶的 agent** 为 HTTPS
+代理出站（`_egress_proxy_url` 即时拼装 Basic 凭据；httpx 仅 dev/test
+回退）。agent 的 CONNECT 出口就是各设备公网 IP，四桶隔离原样保留；
+字节量逐跳一致（ECS↔设备段=网关→子进程→代理 CONNECT），带宽与移动
+流量零新增（子进程 spawn ~10ms 量级/请求）。
 
 ## 2. 端口注册表（统一口径）
 

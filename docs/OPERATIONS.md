@@ -327,6 +327,33 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
   403 failover/cordon 语义不变。门禁全绿（pytest 258+33 / ruff / mypy）。
   **待 UTC0 重置后部署验证**（P7：新窗口首请求应 200）。
 
+**第三轮定案（07:20–08:05Z，传输栈门——对上文"配额门"单因解释的最终修正）**：
+- P7 验证时"新窗口 + 全新 IP 仍 429、而官方客户端/克隆探针 200"的矛盾在
+  双栈对照下闭环（**同机、同出口 IP、同一鲜净额度窗口，分钟内**）：
+  - bun 1.4.2（boringssl/HTTP2）重放克隆包 → **200**（4/4，含 fresh-
+    session 每次新生）；
+  - python httpx 0.28（OpenSSL 3.5.7/HTTP1.1）重放**同一字节克隆包 →
+    429 `FreeUsageLimitError`**（body/头与 bun 版完全一致，UA 也一致）。
+- 头级单变量全部无罪：httpx 自动注入的 `Accept-Encoding: gzip, deflate`
+  与"缺失 `Accept: */*`"两个差异点单独重放均 200 → 差异**只剩传输栈**
+  （TLS 指纹/JA4+ALPN/h2 语义）。
+- 结论：**上游对客户端传输栈本身有判定，非 bun/同栈类一律回以层 2 同款
+  429（伪装成配额）**。此前"数百发探针烧穿各 IP 当日额度"的归因不成立
+  （探针从不触碰 opencode.ai；且"全新 IP 首发即 429"只有栈门能解释，
+  推翻本轮早前"新 IP 到手即被同池租户烧穿"的 CGNAT 共享池假说）。
+  官方客户端始终 200 的原因=其内嵌 bun 栈，与 IP 鲜度/形状修复合成无关。
+- **修复：网关出网改走 bun 传输子进程**——`proxy_opencode/zen_bun/
+  forward.ts`（bun fetch，boringssl/HTTP2/SSE 直通），每次上游试探由
+  适配器起一个一次性 `bun forward.ts` 子进程，`HTTPS_PROXY` 指向**当前
+  租得桶的 agent**（含 Basic 凭据即时拼装，secret 不落日志/spec），stdout
+  直通 SSE、stderr 单行 `META {status,headers}` 供状态分类——池选择/
+  cordon/轮换/故障转移语义零改动，仅换"最后一跳"的栈。镜像内置 bun
+  1.4.4（npmmirror），`ZEN_BUN_TRANSPORT=1`/`ZEN_BUN_BIN`/`ZEN_BUN_SCRIPT`
+  三 env（见 `deploy/ecs/env.example`）；bun 缺席或开关关闭自动回退 httpx
+  （dev/test 不受影响）。门禁全绿（pytest 271+33 / ruff / mypy）。
+  已知待办：`egress_request` 账本行缺失（当前构建从不写 per-call 行，
+  仅 cordon/rotation 事件入流）——观测性缺口，另行修复。
+
 ## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 四桶出口池）
 
 ```text
@@ -334,7 +361,8 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
   -> https://115.29.231.25:10002/v1        # caddy TLS（自签 CA zen-gw-local-ca）
   -> 127.0.0.1:10010（宿主端口映射）
   -> docker 容器 zen-gw（容器内 :10002, uvicorn）
-  -> egress 池（按桶 CONNECT 到设备 agent，出口=设备各自公网 IP）
+  -> egress 池（按桶 CONNECT 到设备 agent，出口=设备各自公网 IP；上游 TLS/H2
+      一跳由 bun forward.ts 子进程承担——传输指纹门，见 §0.5 第三轮定案）
        opc2-wifi  http://100.109.57.26:10001   电信 180.117.204.0/24;121.226.0.0/16;106.110.0.0/16;106.111.0.0/16;114.239.0.0/16
        opc2-eth   http://100.109.57.26:10002   移动 36.149.0.0/16;223.68.0.0/16
        win10      http://100.121.137.118:10001  电信（家庭 WAN，与 opc2-wifi 同公网 IP；106.111.0.0/16 等，独立传输路径）

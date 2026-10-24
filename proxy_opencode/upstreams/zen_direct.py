@@ -45,6 +45,15 @@ service; endpoint shape mirrored from HEAD captures of a genuine client):
           calls, and `Retry-After` points at the next UTC midnight
           (measured win10 home egress, 2026-10-24).
         - transfer failures / TLS resets / 403s do NOT burn quota.
+        - TRANSPORT-STACK CAVEAT (live cross-check 2026-10-24): the quota
+          verdict is NOT purely per-IP. A byte-exact genuine-client
+          capture replayed by httpx got 429 from a FRESH egress IP while
+          bun replays (boringssl, HTTP/2) of the same bytes got 200 from
+          the SAME IP minutes later; freshly ONT-rotated IPs kept 429ing
+          under httpx across the pool. The upstream judges the TLS/HTTP
+          fingerprint and answers non-bun stacks with the quota-shaped
+          429. The bun subprocess transport (zen_bun) restores wire
+          parity; httpx remains the dev/tests fallback.
 
     Consequence for the pool: a batch of troubleshooting probes from a
     bucket's egress IP can drain that IP's own daily allowance (the
@@ -67,13 +76,14 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import urlparse
+from urllib.parse import quote_plus, urlparse
 
 import httpx
 
 from ..config import Settings
 from ..egress.pool import EgressPool, Lease
-from .openai_http import StreamRelay, _raw_relay_body
+from .openai_http import ResponseLike, StreamRelay, _raw_relay_body
+from .zen_bun_transport import BunTransport, BunTransportError
 
 logger = logging.getLogger("proxy_opencode.zen")
 
@@ -414,6 +424,10 @@ class ZenDirectAdapter:
         # tool_choice "auto" + stream_options mirror the genuine client body.
         self._builtin_tools = _builtin_tools()
         self._builtin_names = _tool_names(self._builtin_tools)
+        # Upstream transport stack (see zen_bun_transport): the bun/boringssl
+        # forwarder mirrors the genuine client runtime since the 2026-10-24
+        # transport-fingerprint gate; httpx stays for dev/tests fallback.
+        self._bun = BunTransport.from_settings(settings)
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -584,12 +598,104 @@ class ZenDirectAdapter:
         stream: bool,
         lease: Lease | None,
     ) -> Any:
+        """Route one upstream attempt through the configured transport.
+
+        The bun forwarder (boringssl TLS + HTTP/2) is the wire-accurate
+        mirror of the genuine client since the 2026-10-24 upstream
+        transport-fingerprint gate; httpx remains the dev/tests fallback
+        (deployed environments ship the bun binary; gate off via
+        ``ZEN_BUN_TRANSPORT=0``).
+        """
+        if self._bun is not None:
+            return await self._exchange_via_bun(
+                self._bun, body, headers, model, stream, lease
+            )
+        return await self._exchange_via_httpx(
+            client, body, headers, model, stream, lease
+        )
+
+    async def _exchange_via_bun(
+        self,
+        bun: BunTransport,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        model: str,
+        stream: bool,
+        lease: Lease | None,
+    ) -> Any:
+        """Send one upstream attempt through the bun transport subprocess.
+
+        Wire parity with the genuine client: bun's transport (boringssl,
+        HTTP/2) is REQUIRED on the anonymous free tier since 2026-10-24 —
+        the same fresh egress IP served 200s to bun replays of byte-exact
+        captures while every httpx attempt got the quota-shaped 429 (live
+        cross-check; ablation summary in zen_bun_transport.py). Status
+        classification, release kinds and the failover ladder are
+        identical to the httpx path.
+        """
+        try:
+            resp = await bun.post(
+                base_url=self._base,
+                path="/chat/completions",
+                headers=headers,
+                body=json.dumps(body).encode("utf-8"),
+                proxy_url=self._egress_proxy_url(lease),
+                timeout_s=float(self._settings.zen_timeout_s),
+            )
+        except BunTransportError as exc:
+            await self._release(lease, ok=False, kind="transport")
+            raise ConnectionError(f"zen request failed: {exc}") from exc
+        if resp.status_code != 200:
+            raw = b"".join([chunk async for chunk in resp.aiter_bytes()])
+            result = _raw_relay_body(resp.status_code, raw)
+            if resp.status_code == 429:
+                await self._release(
+                    lease,
+                    ok=False,
+                    kind="http_429",
+                    retry_after_s=_retry_after_seconds(resp.headers),
+                )
+            elif resp.status_code >= 500:
+                await self._release(lease, ok=False, kind=f"http_{resp.status_code}")
+            elif (
+                resp.status_code == 403
+                and self._auth_free
+                and _is_free_tier_rejection(resp.status_code, result.get("content"))
+            ):
+                # Defensive release: identical to the httpx path. A 403 on
+                # the real stack is no longer expected (shape gate sat); it
+                # only means a parity-breaking upstream future-tightening.
+                await self._release(lease, ok=False, kind="free_tier_rejected")
+            else:
+                await self._release(lease, ok=True)
+            return result
+        if stream:
+            return self._stream_relay(resp, float(self._settings.stream_stall_s), lease)
+        try:
+            result = await _aggregate_sse(resp, model)
+        except Exception:
+            await self._release(lease, ok=False, kind="aggregate_error")
+            raise
+        else:
+            await self._release(lease, ok=True)
+            return result
+        finally:
+            await resp.aclose()
+
+    async def _exchange_via_httpx(
+        self,
+        client: httpx.AsyncClient,
+        body: dict[str, Any],
+        headers: dict[str, str],
+        model: str,
+        stream: bool,
+        lease: Lease | None,
+    ) -> Any:
         """Send one upstream attempt and fold the outcome into the lease.
 
-        A 4xx other than 429 (400/403/… ) is a request-level rejection the
-        upstream returned through a working egress, so it releases the lease
-        as a success; only 429 (free-tier quota) and 5xx / transport failures
-        count against the bucket. Mirrors the balancer's release semantics.
+        Fallback transport (dev/tests, no-bun images). The anonymous free
+        tier's transport-fingerprint gate (2026-10-24) makes this stack
+        unreliable in production: see `_exchange_via_bun`.
         """
         req = client.build_request(
             "POST", f"{self._base}/chat/completions", json=body, headers=headers
@@ -628,26 +734,7 @@ class ZenDirectAdapter:
                 await self._release(lease, ok=True)
             return result
         if stream:
-            stall_s = float(self._settings.stream_stall_s)
-            if lease is None:
-                return StreamRelay(resp, {}, stall_s=stall_s)
-            pool = self._pool
-            assert pool is not None
-            held: Lease = lease
-
-            async def _released(outcome: str) -> None:
-                ok, kind = _STREAM_OUTCOMES.get(outcome, (False, outcome))
-                if not ok:
-                    # Attribution: which egress stopped delivering? StreamRelay
-                    # already logged the mechanism (stall/interrupt); this line
-                    # ties it to the bucket that must be culled.
-                    logger.warning(
-                        "upstream stream failed mid-way",
-                        extra={"egress": held.name, "reason": kind},
-                    )
-                await pool.release(held, ok=ok, kind=kind)
-
-            return StreamRelay(resp, {}, on_close=_released, stall_s=stall_s)
+            return self._stream_relay(resp, float(self._settings.stream_stall_s), lease)
         try:
             result = await _aggregate_sse(resp, model)
         except Exception:
@@ -671,6 +758,56 @@ class ZenDirectAdapter:
             await self._pool.release(
                 lease, ok=ok, kind=kind, retry_after_s=retry_after_s
             )
+
+    def _stream_relay(
+        self,
+        resp: ResponseLike,
+        stall_s: float,
+        lease: Lease | None,
+    ) -> StreamRelay:
+        """Build the streaming relay + pool release hook (shared transports).
+
+        The close hook folds the stream outcome into the egress pool so a
+        bucket that stopped delivering is culled; in-flight accounting
+        spans the whole stream either way.
+        """
+        if lease is None:
+            return StreamRelay(resp, {}, stall_s=stall_s)
+        pool = self._pool
+        assert pool is not None
+        held: Lease = lease
+
+        async def _released(outcome: str) -> None:
+            ok, kind = _STREAM_OUTCOMES.get(outcome, (False, outcome))
+            if not ok:
+                # Attribution: which egress stopped delivering? StreamRelay
+                # already logged the mechanism (stall/interrupt); this line
+                # ties it to the bucket that must be culled.
+                logger.warning(
+                    "upstream stream failed mid-way",
+                    extra={"egress": held.name, "reason": kind},
+                )
+            await pool.release(held, ok=ok, kind=kind)
+
+        return StreamRelay(resp, {}, on_close=_released, stall_s=stall_s)
+
+    def _egress_proxy_url(self, lease: Lease | None) -> str | None:
+        """HTTP-proxy URL for the leased bucket's agent (bun subprocess env).
+
+        Mirrors ``EgressPool._proxy_for``: the tailnet is private but the
+        agent still requires Basic auth on CONNECT; credentials come from
+        ``zen_egress_secret`` and are composed per attempt, so no secret
+        value is stored in specs, admin snapshots or logs.
+        """
+        if lease is None:
+            return None
+        agent = lease.state.spec.agent_url
+        secret = self._settings.zen_egress_secret
+        if not secret:
+            return agent
+        parsed = urlparse(agent)
+        creds = quote_plus(secret)
+        return f"{parsed.scheme}://{creds}:{creds}@{parsed.netloc}{parsed.path or ''}"
 
     # ------------------------------------------------------------ internals
 
@@ -832,7 +969,7 @@ def _merge_tool_call_delta(
             slot["function"]["arguments"] += fn["arguments"]
 
 
-async def _aggregate_sse(resp: httpx.Response, model: str) -> dict[str, Any]:
+async def _aggregate_sse(resp: ResponseLike, model: str) -> dict[str, Any]:
     """Aggregate one upstream SSE stream into a non-stream completion JSON."""
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
