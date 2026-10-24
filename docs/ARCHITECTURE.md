@@ -35,8 +35,8 @@ ECS ┌────────────────────────�
         tailscale 100.x │           │           │
         ┌──────────────┴┐  ┌────────┴─┐  ┌──────┴─────┐
         ▼               ▼  ▼          ▼  ▼            ▼
-   opc2:10001(wifi)  opc2:10002(eth) pad:10001  cc9:10001
-   egress-agent      egress-agent     egress-agent egress-agent
+   opc2:10001(wifi)  opc2:10002(eth) win10:10001  cc9:10001
+   egress-agent      egress-agent     egress-agent egress-agent   （Windows 本机桶=同一 Python 包 + Startup 自启）
    （Python, 每台上行仅一个代理进程; connECT 出去=本设备公网IP）
         │               │              │            │
         └───────────────┴──────────────┴────────────┴──▶ opencode.ai/zen/v1
@@ -52,7 +52,7 @@ ECS ┌────────────────────────�
 
 | 端口 | 归属 | 说明 |
 |---|---|---|
-| **10001** | 设备侧 egress-agent | 代理端口（CONNECT + /healthz + /rotate 同端口）。opc2-wifi / pad / cc9 各一个实例 |
+| **10001** | 设备侧 egress-agent | 代理端口（CONNECT + /healthz + /rotate 同端口）。opc2-wifi / cc9 / win10 各一个实例 |
 | **10002** | 设备侧 egress-agent（opc2-eth） | 同一台设备第二上行专用；**同时是 ECS 对客户端入口**（caddy:10002 → 容器 127.0.0.1:10002） |
 | **10003** | 预留 | 未来第 5/6 出口或第二服务 |
 | 9443 | 旧栈入口（caddy → zen-lb:7892） | 退役前不动；hermes 旧 alias 仍在用 |

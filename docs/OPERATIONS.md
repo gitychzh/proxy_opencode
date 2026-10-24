@@ -252,7 +252,27 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
   无代码可为**；hermes 在窗口重度自愈重试（15x）会持续放大上游调用量，
   建议期间暂停或降频。
 
-## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 三设备出口桶）
+**第四桶 `win10`（Windows 本机，同日部署）**：
+- 范围收敛：**网关不做任何改动**——本机只跑 egress-agent（CONNECT 隧道
+  + `/healthz`，即"桶"本体），编排全在 ECS。agent 配置
+  `C:\Users\<user>\.egress-agent\win10.json`（凭据=共享 agent secret，
+  位置见 `docs/ACCESS.md`）；listener 只绑 Tailscale IP
+  `100.121.137.118:10001`；无 ONT、不入 `ZEN_EGRESS_ROTATION`。
+  启动：`deploy/windows/start-egress-agent.ps1`（幂等防重、healthz 自检）；
+  用户 Startup 目录已放入开机自启 launcher。
+- 接入：ECS `.env` 三处（PROXIES/EXPECT_PREFIX/不加 ROTATION）+
+  `docker compose up -d`。池四桶全绿；**CONNECT 数据面真测通过**
+  （经本机隧道对 opencode.ai 200）。本机与 opc2-wifi 同一家庭 WAN（同一
+  公网 IP），给一条独立 ECS↔本机的传输路径，但**共享该 IP 的上游额度**。
+  wifi 桶 expect_prefix 补 `106.111.0.0/16`（今晨重拨 IP 曾被旧前缀挡外）。
+- **当日配额语义实测（重要）**：03:30–03:35 轮换连出**全新 IP**
+  （联通 `122.195.202.20`→`.60`、移动 `.225`），全部**即刻 429** —— 与
+  2026-10-17 的"新 IP=新额度"实测显著变严：当日窗口内靠换 IP 已**不能**
+  恢复服务，整窗预期持续 transparent 429 直到 UTC0 重置（2026-10-25
+  08:00 CST）。窗口重置后再复测一次确认额度模型（若仍即烧，需上报为
+  协议层变化并更新 AGENTS 硬约束 1 的表述）。
+
+## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 四桶出口池）
 
 ```text
 客户端（hermes / 任意 OpenAI SDK）
@@ -260,8 +280,9 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
   -> 127.0.0.1:10010（宿主端口映射）
   -> docker 容器 zen-gw（容器内 :10002, uvicorn）
   -> egress 池（按桶 CONNECT 到设备 agent，出口=设备各自公网 IP）
-       opc2-wifi  http://100.109.57.26:10001   电信 180.117.204.0/24;121.226.0.0/16;106.110.0.0/16;114.239.0.0/16
+       opc2-wifi  http://100.109.57.26:10001   电信 180.117.204.0/24;121.226.0.0/16;106.110.0.0/16;106.111.0.0/16;114.239.0.0/16
        opc2-eth   http://100.109.57.26:10002   移动 36.149.0.0/16;223.68.0.0/16
+       win10      http://100.121.137.118:10001  电信（家庭 WAN，与 opc2-wifi 同公网 IP；106.111.0.0/16 等，独立传输路径）
        cc9        http://100.87.219.115:10001  联通 112.83.0.0/16;116.147.0.0/16;122.195.0.0/16
   -> OpenCode Zen
 ```
@@ -275,7 +296,8 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
 0.7.x 权威描述见 `docs/ARCHITECTURE.md`。新栈对外只暴露一个掩码别名
 `deepseek-ai/deepseek-v4.1-flash`（→ 唯一被反代的上游模型 `big-pickle`；
 2026-10-17 起严格别名：上游裸 ID 不可请求、不可见，除隐藏端点
-`/v1/models_cus` 纯裸 ID 输出）。三桶按各自出口 IP 独立计额度；容器内
+`/v1/models_cus` 纯裸 ID 输出）。四桶中 win10 与 opc2-wifi 出口同一家庭 WAN
+（同一公网 IP 的上游额度共享，但独立一条 ECS↔本机的传输路径）；容器内
 least-in-flight 选择、429/5xx/传输失败**桶间 failover**、cordon 冷却、P5 每窗口
 ≥500 或硬 429 自动换 IP（2026-10-17 起三桶 ONT 驱动全部实弹验证，见下表）。ECS/Tailscale 地址与凭据位置见 `ACCESS.md`，
 不要把真实密钥写入仓库。
@@ -287,6 +309,7 @@ least-in-flight 选择、429/5xx/传输失败**桶间 failover**、cordon 冷却
 | `opc2-wifi` | `100.109.57.26:10001`（egress-agent@wifi，User=opc2-bucket-a/uid1001） | `106.110.200.129` 电信 | `180.117.204.0/24;121.226.0.0/16;106.110.0.0/16;114.239.0.0/16` | healthy；HG8020C `huawei_ct` 驱动 2026-10-17 实弹两轮换 IP 成功；`114.239.0.0/16` 为后续轮换落到的电信新段（2026-10-17 补入，否则轮换校验必判失败）；**隧道持续抖动**（2026-10-19 全天 ~30s cordon/探针恢复循环，transport failover 吸收中，见 §0.2） |
 | `opc2-eth` | `100.109.57.26:10002`（egress-agent@eth，uid996） | `223.68.47.67` 移动 | `36.149.0.0/16;223.68.0.0/16` | healthy；P5 轮换真机验证通过；误出口修复=新建 opc2a-route(uid1001→表410@wlx) + 旧栈 wired-egress 停用 + keep-timer 改写（见 ARCHITECTURE §6）；2026-10-19 06:39Z 门槛标记后轮换所得新 IP |
 | `cc9` | `100.87.219.115:10001` | `112.83.208.101` 联通 | `112.83.0.0/16;116.147.0.0/16;122.195.0.0/16` | healthy；HG6142A-C `fenghuo` 驱动实弹受理通过（112.83.208.127→116.147.31.99→116.147.30.191→122.195.202.2）；chroot agent 由 Magisk 看门狗拉起；`122.195.0.0/16` 为后续轮换落到的联通新段（2026-10-17 补入）；2026-10-19 06:39Z 门槛标记后轮换所得新 IP |
+| `win10` | `100.121.137.118:10001`（Windows 本机 egress-agent，`.venv` python + `deploy/windows/start-egress-agent.ps1`，Startup 自启） | `106.111.50.124` 电信（与 opc2-wifi 同家庭 WAN） | `106.111.0.0/16;121.226.0.0/16;106.110.0.0/16;180.117.204.0/24;114.239.0.0/16` | healthy/probe ok；CONNECT 数据面真测通过（经本机隧道对 opencode.ai 200，2026-10-24 部署）；**无 ONT、不参与轮换**（不入 `ZEN_EGRESS_ROTATION`）；当日窗口配额随（同 WAN 共享的）IP 已烧穿（见 §0.5） |
 | `ecs` 本机桶 | （已剔除） | 115.29.231.25 | — | **2026-10-17 移出池**（机房 IP 免费额度被共享流量即耗，实测"几条就429"主因）；`egress-agent@ecs` 已停用 |
 | `hangzhou-ecs` | docker `zen-gw`（caddy→127.0.0.1:10010→容器:10002） | 115.29.231.25 入口 | — | healthy；failover 真机首测通过（wifi 429 → 换桶 → 客户端 200,2026-10-17 17:02 UTC） |
 

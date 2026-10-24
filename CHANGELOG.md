@@ -6,6 +6,7 @@
 ## [Unreleased]
 
 ### Added
+- **feat(egress): 第四桶 `win10`（Windows 本机）接入出口池** — 本机只提供代理与数据转发（egress-agent 的 CONNECT 隧道 + `/healthz`），网关编排仍全部在 ECS。部署件：`deploy/windows/start-egress-agent.ps1`（幂等防重 + healthz 自检，Startup 目录 launcher 开机自启），配置在用户目录 `%USERPROFILE%\.egress-agent\win10.json`（凭据不入仓，见 `docs/ACCESS.md`）；listener 只绑 Tailscale IP；无 ONT、不入 `ZEN_EGRESS_ROTATION`。ECS 侧 `.env` 三处接入（PROXIES 追加桶、EXPECT_PREFIX 新桶前缀 `106.111.0.0/16` 族、ROTATION 不列）+ wifi 桶前缀补今晨重拨段。真测：池四桶探针全绿、CONNECT 数据面经本机隧道 opencode.ai 200。注意：win10 与 opc2-wifi 同家庭 WAN（同一公网 IP，上游额度共享、传输路径独立）。文档：`docs/OPERATIONS.md` §1/§2/§0.5、`docs/ARCHITECTURE.md` §1/§2、`deploy/ecs/env.example`。
 - **docs: `docs/EGRESS_OBSERVABILITY.md`** — 新增 `egress_request` JSONL 埋点方案（Schema、失败分类、ContextVar+try/finally 埋点建议、logrotate、jq/python 统计示例）。
 - **feat(stream): `STREAM_STALL_S` SSE 停顿看门狗配置（默认 60s，0=关闭）** — 所有反代流的静默上限（覆盖响应头后首字节与字节间隔）；`deploy/ecs/env.example` 有注释说明，事实源在 `proxy_opencode/config.py`。
 - **feat(stream): `CLIENT_STALL_S` 客户端写停滞看门狗配置（默认 60s，0=关闭）** — `relay_stream` 在 `yield` 停留超阈值即判客户端段死（ASGI 写被背压阻塞），取消响应任务并快速关闭连接；`deploy/ecs/env.example` 有注释说明，事实源在 `proxy_opencode/config.py`。
