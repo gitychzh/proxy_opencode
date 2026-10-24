@@ -35,9 +35,12 @@ ECS ┌────────────────────────�
         tailscale 100.x │           │           │
         ┌──────────────┴┐  ┌────────┴─┐  ┌──────┴─────┐
         ▼               ▼  ▼          ▼  ▼            ▼
-   opc2:10001(wifi)  opc2:10002(eth) win10:10001  cc9:10001
-   egress-agent      egress-agent     egress-agent egress-agent   （Windows 本机桶=同一 Python 包 + Startup 自启）
-   （Python, 每台上行仅一个代理进程; connECT 出去=本设备公网IP）
+   owin10:10001(mobile) owin10:10002(telecom) win10:10001  cc9:10001
+   egress-agent         egress-agent       egress-agent egress-agent （Windows 本机桶=同一 Python 包 + schtasks/Startup 自启）
+   （Python, 每台上行仅一个代理进程; connECT 出去=本设备公网IP;
+     owin10 双实例用 bind_source 钉源：mobile=192.168.1.222→移动 223.68.24.82，
+     telecom=192.168.2.235→电信 106.111.50.124；opc2 双桶 2026-10-25 随设备
+     退役移除；cc9 2026-10-25 下线待恢复）
         │               │              │            │
         └───────────────┴──────────────┴────────────┴──▶ opencode.ai/zen/v1
 ```
