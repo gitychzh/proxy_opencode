@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import time
 
-from egress_agent.health import HealthState, extract_ip
+from egress_agent.health import PROBE_READY_GRACE_S, HealthState, extract_ip
 
 
 def _state() -> HealthState:
@@ -30,6 +31,7 @@ def test_extract_ip_no_ip() -> None:
 
 def test_payload_shape_and_counters() -> None:
     state = _state()
+    state.probe_at = time.monotonic()  # probe loop alive: fresh stamp
     state.tunnels_active = 2
     state.tunnels_total = 7
     payload = state.payload()
@@ -42,6 +44,31 @@ def test_payload_shape_and_counters() -> None:
     # secret-free by construction
     blob = json.dumps(payload)
     assert "password" not in blob
+
+
+def test_ready_false_when_egress_probe_failed() -> None:
+    # Recent probe attempt that could not reach the echo: dead outbound path
+    # must flip ready off (2026-10-24 zombie-bucket incident).
+    state = _state()
+    state.probe_at = time.monotonic()
+    state.egress_probe_ok = False
+    assert state.payload()["ready"] is False
+
+
+def test_ready_false_when_probe_loop_stale() -> None:
+    # Loop stopped firing (crash/hang): a stale ready=true must not be served
+    # beyond the grace window (interval + margin).
+    state = _state()
+    state.probe_at = time.monotonic() - (PROBE_READY_GRACE_S + 1.0)
+    state.egress_probe_ok = True
+    assert state.payload()["ready"] is False
+
+
+def test_ready_false_before_first_probe_attempt() -> None:
+    # Boot state: probe_at never stamped -> loop not running yet -> not ready.
+    state = _state()
+    state.egress_probe_ok = True  # even a hand-set True cannot fake freshness
+    assert state.payload()["ready"] is False
 
 
 def test_note_rotation_clears_stale_ip() -> None:

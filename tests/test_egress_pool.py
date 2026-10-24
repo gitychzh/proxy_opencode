@@ -302,6 +302,32 @@ async def test_probe_not_ready_marks_unhealthy() -> None:
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_probe_unhealthy_when_agent_egress_probe_failed() -> None:
+    # Agent-level defence layering: an agent that still answers ready=true
+    # but reports its own egress probe failing (outbound sockets broken)
+    # must not receive client work (measured 2026-10-24 zombie bucket).
+    pool = EgressPool([EgressSpec("a", "http://agent1:10001")])
+    respx.get("http://agent1:10001/healthz").respond(
+        json={"ready": True, "egress_probe_ok": False, "egress_ip": "1.2.3.4"}
+    )
+    await pool._probe_one(pool._states[0])  # noqa: SLF001
+    assert pool._states[0].healthy is False  # noqa: SLF001
+    assert pool._states[0].egress_ip == "1.2.3.4"  # noqa: SLF001
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_probe_healthy_with_explicit_ok_egress_probe() -> None:
+    pool = EgressPool([EgressSpec("a", "http://agent1:10001")])
+    respx.get("http://agent1:10001/healthz").respond(
+        json={"ready": True, "egress_probe_ok": True, "egress_ip": "1.2.3.4"}
+    )
+    await pool._probe_one(pool._states[0])  # noqa: SLF001
+    assert pool._states[0].healthy is True  # noqa: SLF001
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_probe_sends_agent_secret_basic_auth() -> None:
     pool = EgressPool(
         [EgressSpec("a", "http://agent1:10001")], agent_secret="s3cret"

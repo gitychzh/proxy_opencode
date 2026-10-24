@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 
 import pytest
 
@@ -152,7 +153,10 @@ async def test_connect_to_dead_port_is_502() -> None:
 
 @pytest.mark.asyncio
 async def test_healthz_endpoint_returns_payload() -> None:
-    agent, _state = await _start_agent(_config())
+    agent, state = await _start_agent(_config())
+    # These tests never run the probe loop; stamp a live probe so the
+    # readiness semantics (tested in test_health.py) report ready=true here.
+    state.probe_at = time.monotonic()
     try:
         head, body = await _send_recv(
             agent.port, b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n"

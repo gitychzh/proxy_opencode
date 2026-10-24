@@ -210,6 +210,22 @@ retryable=false）。`/v1/chat/completions` 直连转发上游匿名 429
   观测到合法新 IP 即按成功收敛（detail 注明 agent call 不可达）；明确 HTTP
   拒绝仍为最终失败（detail 同时带 transport 与 poll 两个原因）。
 
+**追加定位（同日第二轮修复，健康面第三缺口——僵尸桶）**：
+- 01:54Z 后复测发现：opc2-wifi agent `/healthz` 的 `ready` 是**硬编码
+  true**——出口全灭（`bind_source` DHCP 漂移 `192.168.2.138`→`.235` 使
+  隧道 socket 绑定失败，电信腿对 `opencode.ai:443` 自身亦不可达，POST 8s
+  超时连败数小时）期间，agent 照答 ready=true，池以 ready 单一判据持续
+  把客户端工作派给僵尸桶（502 燃料；见首轮修复里 01:49 恢复后的连败流）。
+- 修复分两层：agent `health.py` `ready = egress_probe_ok is not False and
+  探针新鲜`（每次探测尝试都打单调点 `probe_at`，`PROBE_READY_GRACE_S=45s`
+  内算新鲜；环停转或最近一次探测失败 → ready=false）；网关 `pool.
+  _probe_one` 增加 `egress_probe_ok is False → unhealthy` 的第二道防线
+  （旧 agent 不带字段行为不变）。设备热修与代码无关但同窗完成：
+  `/etc/egress-agent/wifi.json` `bind_source` 修正 `.235`
+  （`640 root:opc2_uname`），agent 重启后绑定成功；
+  当刻电信腿对 `opencode.ai:443` 仍超时（ISP 侧劣化，代码不可修，
+  待其自愈/重拨恢复）。
+
 **排障入口**：
 ```bash
 docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5"

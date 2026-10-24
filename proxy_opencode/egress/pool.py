@@ -575,6 +575,13 @@ class EgressPool:
         now = time.monotonic()
         state.last_probe_at = now
         ok = bool(payload.get("ready")) and resp.status_code == 200
+        # Layered defence with the agent's own readiness: an agent that
+        # answers ready=true but reports a failed egress probe
+        # (``egress_probe_ok=false`` — outbound sockets failing) must not
+        # receive client work; older agents that omit the field keep the
+        # previous behaviour (default true).
+        if payload.get("egress_probe_ok") is False:
+            ok = False
         state.last_probe_ok = ok
         ip = payload.get("egress_ip") if isinstance(payload, dict) else None
         ip_changed = False

@@ -34,6 +34,13 @@ PROBE_INTERVAL_S = 30.0
 PROBE_TIMEOUT_S = 8.0
 PROBE_TTL_S = 5.0
 
+# ``ready`` turns false this long after an unsuccessful *or* missing probe:
+# the pool skips a not-ready agent instead of tunnelling through an egress
+# whose outbound path is dead (measured 2026-10-24: a stale-health ready=true
+# fed the bucket client requests for hours while every outbound socket timed
+# out — the gateway kept handing work to a leg that returned 502 builds).
+PROBE_READY_GRACE_S = PROBE_INTERVAL_S + 15.0
+
 _IP_CANDIDATE = re.compile(r"[0-9A-Fa-f:.]+")
 
 
@@ -63,13 +70,21 @@ class HealthState:
     egress_ip: str | None = None
     egress_ip_at: str | None = None
     egress_probe_ok: bool | None = None
+    # Monotonic stamp of the last probe attempt (success or failure); a
+    # loop that stopped firing must not serve a stale ready=true forever.
+    probe_at: float = 0.0
     last_rotation_at: str | None = None
     last_rotation_ok: bool | None = None
 
     def payload(self) -> dict[str, object]:
+        fresh = (time.monotonic() - self.probe_at) < PROBE_READY_GRACE_S
         return {
             "egress": self.egress_name,
-            "ready": True,
+            # True only while the egress probe loop is alive *and* the most
+            # recent probe outcome is not a failure. The gateway pool skips
+            # a bucket whose agent answers ready=false (its outbound sockets
+            # are failing — nothing a CONNECT can use).
+            "ready": self.egress_probe_ok is not False and fresh,
             "egress_ip": self.egress_ip,
             "egress_ip_at": self.egress_ip_at,
             "egress_probe_ok": self.egress_probe_ok,
@@ -110,6 +125,7 @@ async def egress_probe_loop(state: HealthState, interval_s: float = PROBE_INTERV
     """Refresh the observed egress IP in the background (never raises)."""
 
     while True:
+        state.probe_at = time.monotonic()
         ip = await probe_egress_ip(state.echo_url, state.bind_source)
         state.egress_probe_ok = ip is not None
         if ip:

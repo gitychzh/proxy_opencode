@@ -24,6 +24,11 @@
 - **docs: 去除冗余段落** — 删除双桶性能对比、抓包复盘等多处重复的历史细节，避免旧拓扑/过期结论干扰当前事实。
 
 ### Fixed
+- **fix(egress): 僵尸桶 ready 语义——agent `ready` 反映探针活性与最近探测结果；网关核实 `egress_probe_ok`（2026-10-24 同日第二缺口）** — 部署首轮修复（上一条）时复测发现：opc2-wifi 的 `/healthz` `ready` 是**硬编码 true**，出口整体死（`bind_source` DHCP 漂移 `192.168.2.138`→`.235` + 电信腿对 `opencode.ai:443` 自身不可达、连败数小时放行），agent 照答 ready=true，池以 ready 单一判据选桶 → 僵尸桶持续领客户端工作（502 燃料）。修复分两层防御：
+  - agent `egress_agent/health.py`：`ready = egress_probe_ok is not False and 探针新鲜`——探针环每次尝试（成败皆）打单调点 `probe_at`，`PROBE_READY_GRACE_S=45s`（interval+15s）内视为新鲜；环停转（崩溃/卡死）或最近一次探测失败 → `ready: false`。旧字段 `egress_probe_ok` 保持不变。
+  - 网关 `egress/pool._probe_one`：第二道防线——payload `egress_probe_ok is False` 即判 unhealthy（即便 agent 仍答 ready=true）；旧 agent 不带该字段行为不变。
+  - 测试：`egress-agent/tests/test_health.py`（失败探测 / 探针环 stale / 首探前 ready=false）、`tests/test_egress_pool.py`（`egress_probe_ok=false` → unhealthy / 显式 true → healthy）。
+  - 文档：`docs/ARCHITECTURE.md` §5 ADR、`docs/OPERATIONS.md` §0.5。
 - **fix(egress): 配额/门槛 cordon 随 ISP 换 IP 解除 + agent 不可达的轮换继续轮询（hermes `billing` 429，2026-10-24）** — 定位：01:42–01:54Z 三桶连环故障——opc2-eth 硬 429 烧穿每日免费额度且 `POST /rotate` 撞上隧道抖动 30s 超时（`agent unreachable`，而 ONT 实际已在重拨）、opc2-wifi 出口传输连败 cordon、cc9 轮换所得新 IP（CGNAT 共享）同样瞬间 429；兜底耗尽后 429 `Free usage limit reached` 原样透传给 hermes（layer=billing, retryable=false）。修复（两处根因级缺口）：
   - `egress.pool._probe_one → _lift_ip_scoped_cordon`：429 配额烧穿（`free_quota_exhausted`）与 403 门槛标记（`free_tier_rejected`）是**按出口 IP 的判决**——ISP 侧自行重拨得到合法前缀内的新 IP 且探针就绪时，cordon **立即解除**（事件 `cordon_lifted`，failure 计数清零）；外前缀 IP（eth 腿跳到 wifi 出口）与探针未就绪一律不解除；transport 配额类之外的 streak cordon 保持原 deadline，新 IP 若同样 429 会在首个请求上重新 cordon。
   - `egress.rotate._rotate_flow`：`POST {agent}/rotate` 传输失败（可能命令已送达 agent 或 ONT 自行重拨）不再立即判 `failed`——照常在 deadline 内轮询 `/healthz` 观测 IP 变化，观测到合法新 IP 即按成功收敛；明确的 HTTP 拒绝（状态码/`ok=false`）仍是最终失败。
