@@ -269,7 +269,7 @@ class EgressRotator:
         state = self._pool.find(name)
         ip_from = state.egress_ip if state is not None else None
         agent = await self._agent_rotate(spec)
-        if not agent["ok"]:
+        if not agent["ok"] and not agent.get("unreachable"):
             return RotationOutcome(
                 name=name,
                 ok=False,
@@ -277,17 +277,34 @@ class EgressRotator:
                 detail=f"agent rotate refused: {agent['detail']}",
                 ip_from=ip_from,
             )
+        # An unreachable POST (transport error after the request was sent,
+        # or no route to the agent at all) does NOT mean the rotation died:
+        # the agent may already be executing the reboot, or the ONT may be
+        # re-dialing on its own. Poll for the recovery under the caller's
+        # deadline and fold whatever IP actually lands. A definite refusal
+        # (HTTP error status, ok=false body) above really is final.
         poll = await self._wait_for_ip_change(
             spec, ip_from, deadline=time.monotonic() + self._timeout_s
         )
         if poll.ok:
+            detail = poll.detail
+            if not agent["ok"]:
+                detail = f"agent unreachable during call, but {poll.detail}"
             return RotationOutcome(
                 name=name,
                 ok=True,
                 trigger=trigger,
-                detail=poll.detail,
+                detail=detail,
                 ip_from=ip_from,
                 ip_to=poll.ip,
+            )
+        if not agent["ok"]:
+            return RotationOutcome(
+                name=name,
+                ok=False,
+                trigger=trigger,
+                detail=f"agent rotate unreachable: {agent['detail']}; {poll.detail}",
+                ip_from=ip_from,
             )
         return RotationOutcome(
             name=name, ok=False, trigger=trigger, detail=poll.detail, ip_from=ip_from
@@ -299,7 +316,11 @@ class EgressRotator:
         The agent runs the P1 four-step Huawei ONT reboot (production-
         verified on opc2-eth) and answers once the reset command went out;
         the gateway itself waits out the ~80s recovery + ~40s PPPoE redial
-        by polling ``/healthz``.
+        by polling ``/healthz``. A transport-level failure carries
+        ``unreachable=True``: the command may still have gone out (or the
+        ONT is independently re-dialing), so the caller keeps polling
+        instead of declaring the rotation dead — observed 2026-10-24:
+        opc2-eth rotated fine during a tunnel flap that killed the POST.
         """
 
         url = f"{spec.agent_url.rstrip('/')}/rotate"
@@ -310,7 +331,11 @@ class EgressRotator:
             ) as client:
                 resp = await client.post(url, json={"wait": False}, headers=headers)
         except httpx.HTTPError as exc:
-            return {"ok": False, "detail": f"agent unreachable: {exc}"}
+            return {
+                "ok": False,
+                "detail": f"agent unreachable: {exc}",
+                "unreachable": True,
+            }
         detail = ""
         payload: Any = None
         try:
@@ -326,7 +351,7 @@ class EgressRotator:
             ok = resp.status_code == 200 and bool(payload.get("ok"))
         else:
             ok = False
-        return {"ok": ok, "detail": detail or f"status {resp.status_code}"}
+        return {"ok": ok, "detail": detail or f"status {resp.status_code}", "unreachable": False}
 
     async def _wait_for_ip_change(
         self, spec: EgressSpec, ip_from: str | None, *, deadline: float

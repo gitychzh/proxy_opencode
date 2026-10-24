@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -326,6 +327,168 @@ async def test_start_and_aclose_lifecycle() -> None:
     assert pool._states[0].last_probe_ok is True  # noqa: SLF001
     await pool.aclose()
     assert pool._closed is True
+
+
+# ------------------------------------------------ IP-scoped cordon release
+
+
+def _capture_events(tmp_path):  # type: ignore[no-untyped-def]
+    """Point EVENTS at a tmp JSONL file; returns (reader, cleanup)."""
+    from proxy_opencode.egress.eventlog import EVENTS
+
+    path = tmp_path / "events.jsonl"
+    EVENTS.configure(str(path))
+
+    def read() -> list[dict]:
+        with open(str(path), encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    return read, lambda: EVENTS.configure("")
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_quota_cordon_lifted_when_isp_changes_ip(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """ISP re-dial + fresh quota ⇒ the full-day 429 cordon must not persist.
+
+    Measured 2026-10-24: opc2-eth exhausted its per-IP daily quota and was
+    cordoned until the window reset; while benched the ISP re-issued
+    36.149.55.24 on its own, and the fresh (healthy, in-prefix) IP kept
+    serving nothing until UTC 00:00. Both 429 quota verdicts and free-tier
+    gate verdicts are made against the *egress IP*: they do not carry
+    over to a new address.
+    """
+
+    pool = EgressPool([EgressSpec("a", "http://agent1:10001")])
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    state.egress_ip = "3.3.3.3"
+    lease = await pool.acquire()
+    await pool.release(lease, ok=False, kind="http_429")
+    assert state.cordoned(time.monotonic()) is True
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://agent1:10001/healthz").respond(
+            json={"ready": True, "egress_ip": "4.4.4.4"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.cordoned(time.monotonic()) is False
+        assert state.cordon_reason == ""
+        assert state.failures == 0
+        assert state.healthy is True
+        names = [e["event"] for e in read()]
+        assert "cordon_lifted" in names
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_quota_cordon_survives_out_of_prefix_ip_change(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A foreign address (eth leg flapping onto wifi) must NOT lift cordon.
+
+    This is exactly the measured mixed-bucket failure: the leg's truth is
+    verified by the prefix, and a cordon must never be lifted for an IP
+    the bucket is not supposed to own.
+    """
+
+    pool = EgressPool(
+        [EgressSpec("a", "http://agent1:10001", expect_prefix="3.3.3.0/24")]
+    )
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    state.egress_ip = "3.3.3.3"
+    lease = await pool.acquire()
+    await pool.release(lease, ok=False, kind="http_429")
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://agent1:10001/healthz").respond(
+            json={"ready": True, "egress_ip": "9.9.9.9"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.cordoned(time.monotonic()) is True
+        assert "free_quota" in state.cordon_reason
+        assert [e["event"] for e in read()] == ["egress_ip_observed"]
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_quota_cordon_not_lifted_when_probe_not_ready(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """ready=false on a changed IP: the agent is still mid-recovery."""
+
+    pool = EgressPool([EgressSpec("a", "http://agent1:10001")])
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    state.egress_ip = "3.3.3.3"
+    lease = await pool.acquire()
+    await pool.release(lease, ok=False, kind="http_429")
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://agent1:10001/healthz").respond(
+            json={"ready": False, "egress_ip": "4.4.4.4"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.cordoned(time.monotonic()) is True
+        assert [e["event"] for e in read()] == ["egress_ip_observed"]
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_transport_cordon_not_lifted_by_ip_change(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Only the IP-scoped verdicts lift; streak cordons keep their deadline."""
+
+    pool = EgressPool(
+        [EgressSpec("a", "http://agent1:10001")], failure_threshold=3, cordon_s=9999
+    )
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    state.egress_ip = "3.3.3.3"
+    for _ in range(3):
+        lease = await pool.acquire()
+        await pool.release(lease, ok=False, kind="transport")
+    assert state.cordoned(time.monotonic()) is True
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://agent1:10001/healthz").respond(
+            json={"ready": True, "egress_ip": "4.4.4.4"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.cordoned(time.monotonic()) is True
+        assert "consecutive failures" in state.cordon_reason
+        assert [e["event"] for e in read()] == ["egress_ip_observed"]
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_free_tier_cordon_lifted_when_isp_changes_ip(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The free-tier gate verdict also belongs to the old address alone."""
+
+    pool = EgressPool([EgressSpec("a", "http://agent1:10001")])
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    state.egress_ip = "3.3.3.3"
+    lease = await pool.acquire()
+    await pool.release(lease, ok=False, kind="free_tier_rejected")
+    assert state.cordoned(time.monotonic()) is True
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://agent1:10001/healthz").respond(
+            json={"ready": True, "egress_ip": "4.4.4.4"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.cordoned(time.monotonic()) is False
+        assert [e["event"] for e in read()] == ["egress_ip_observed", "cordon_lifted"]
+        lifted = [e for e in read() if e["event"] == "cordon_lifted"][0]
+        assert lifted["cordon_reason"] == "free_tier_rejected"
+        assert lifted["ip_to"] == "4.4.4.4"
+    finally:
+        cleanup()
 
 
 # ------------------------------------------------------------ proxy auth

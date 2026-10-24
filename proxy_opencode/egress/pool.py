@@ -210,6 +210,14 @@ def seconds_to_window_reset() -> float:
 class EgressPool:
     """Least-in-flight selection (round-robin ties) + health probes/cordons."""
 
+    # Cordon verdicts that are anchored to the *egress IP* rather than to
+    # the bucket's own agent: the upstream judges quota (429) and the
+    # free-tier gate (403) per source address, so a freshly ISP-issued IP
+    # inherits neither — see ``_lift_ip_scoped_cordon``.
+    _IP_SCOPED_CORDON_REASONS = frozenset(
+        {"free_quota_exhausted", "free_tier_rejected"}
+    )
+
     def __init__(
         self,
         specs: list[EgressSpec],
@@ -510,6 +518,45 @@ class EgressPool:
                     )
             await asyncio.sleep(self._probe_interval_s)
 
+    def _lift_ip_scoped_cordon(self, state: EgressState, new_ip: str) -> None:
+        """Undo cordons whose reason was a verdict about the previous IP.
+
+        Both quota exhaustion (429 ``FreeUsageLimitError``) and the
+        free-tier gate (403 ``FreeTierError``) are per-source-address
+        verdicts (measured 2026-10-17: byte-identical bodies accept a
+        fresh IP, reject the flagged one). The rotation driver already
+        clears cordon on a verified rotation; this closes the remaining
+        gap: the ISP re-dials on its own while the bucket sits on a
+        full-day quota cordon — observed 2026-10-24, opc2-eth re-dialed
+        after its rotate call was unreachable and the healthy new
+        ``36.149.55.24`` stayed benched until the window reset.
+
+        Preconditions: the probe just succeeded (``ok``), the new IP
+        satisfies the bucket prefix, and the cordon reason is one of the
+        IP-scoped verdicts. Anything else (transport streaks, plain
+        cooldowns) keeps its deadline; a fresh IP that is also exhausted
+        will re-cordon on its own first 429.
+        """
+
+        if not state.spec.matches_prefix(new_ip):
+            return
+        reason = state.cordon_reason.split(" (", 1)[0]
+        if reason not in self._IP_SCOPED_CORDON_REASONS:
+            return
+        state.cordoned_until = 0.0
+        state.cordon_reason = ""
+        state.failures = 0
+        logger.info(
+            "cordon lifted: egress IP changed, the old verdict does not carry over",
+            extra={"egress": state.spec.name, "cordon_reason": reason, "ip": new_ip},
+        )
+        EVENTS.emit(
+            "cordon_lifted",
+            egress=state.spec.name,
+            cordon_reason=reason,
+            ip_to=new_ip,
+        )
+
     async def _probe_one(self, state: EgressState) -> None:
         headers = {}
         if self._agent_secret:
@@ -530,8 +577,12 @@ class EgressPool:
         ok = bool(payload.get("ready")) and resp.status_code == 200
         state.last_probe_ok = ok
         ip = payload.get("egress_ip") if isinstance(payload, dict) else None
+        ip_changed = False
+        current_ip = ""
         if isinstance(ip, str) and ip:
-            if ip != state.egress_ip:
+            current_ip = ip
+            ip_changed = ip != state.egress_ip
+            if ip_changed:
                 logger.info(
                     "egress ip changed",
                     extra={
@@ -554,6 +605,10 @@ class EgressPool:
             state.egress_ip_at = str(payload.get("egress_ip_at") or "")
         # ip-matching is informational only (do not gate health)
         state.healthy = ok
+        if ok and ip_changed:
+            # Only lift on a *proven-good* probe: a ready=false answer with
+            # a fresh IP means the agent is still mid-recovery.
+            self._lift_ip_scoped_cordon(state, current_ip)
         if state.healthy and state.failures > 0 and not state.cordoned(now):
             state.failures = 0
             state.cordon_reason = ""

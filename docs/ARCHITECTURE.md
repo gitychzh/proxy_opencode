@@ -100,8 +100,19 @@ agent 代理 basic auth 双保险）。
   编排流程=标记 rotating（选桶跳过、在途请求自然
   收尾）→ `POST {agent}/rotate` → 轮询 `/healthz` 等 IP **变化且落在
   `expect_prefix` 内**（同 IP 重发/腿回落都判失败，大声记录）→ 成功后清
-  cordon（含配额 cordon）、计数归零重计。计数器状态 JSON 快照
+  cordon（含配额 cordon）、计数归零重计。**`POST /rotate` 传输失败不判最终
+  失败**：命令可能已送达 agent（或 ONT 自行重拨），照常轮询到 deadline，
+  观测到合法新 IP 即按成功收敛（2026-10-24 实测：隧道抖动令 `POST` 30s
+  超时报 `agent unreachable`，桶 IP 随后真实更换——明确的 HTTP 拒绝仍是最终
+  失败）。计数器状态 JSON 快照
   （`ZEN_EGRESS_COUNTS_PATH`，容器 `/data` 卷）跨重启存活。
+- **cordon 的 IP 语义（2026-10-24 增补）**：配额烧穿（429 →
+  `free_quota_exhausted`，绑到窗口末）与门槛标记（403 →
+  `free_tier_rejected`）都是**对出口 IP 的判决**：探测循环观测到 agent
+  上报的出口 IP 变化、新 IP 落在 `expect_prefix` 内且探针就绪时，这两类
+  cordon **立即解除**（事件 `cordon_lifted`），不让健康的新 IP 坐满全窗口；外
+  前缀 IP（eth 腿回落 wifi 出口）与探针未就绪不解除；transport 连败 streak
+  cordon 保持原 deadline；新 IP 若同样烧穿，会在第一个请求上重新 cordon。
 - **`/admin/egresses`** 快照新增 `counters` 字段；新增
   `POST /admin/egresses/{name}/rotate`（管理员 key）= 手动触发，用于现场
   调试 wifi/cc9 光猫 API 与"IP 被重发同值"后的补一枪。
@@ -195,6 +206,8 @@ agent 代理 basic auth 双保险）。
 | 429 兜底 | 上游 429 且（`Retry-After > 3600s` **或无 Retry-After 头**）= per-IP 日耗尽 → 立即换 IP（绕过 500 阈值，每窗口每桶至多一次） | 2026-10-16 实测补全：配额 429 可完全不带头（当天三次 cordon 全 null，0 轮换）；有头短值=短窗软限流（只 cordon 不换 IP） |
 | 403 门槛兜底 | 匿名模式下上游 403 `FreeTierError` = **出口 IP 被门槛标记**（同 body 换新 IP 即 200；2026-10-17 实测：设备 IP 403、ECS 宿主 IP 200）→ 释放租赁为失败（`free_tier_rejected`）、**立即 cordon 该桶**并**绕过阈值立即换 IP**（每窗口每桶至多一次，共用硬 429 的去重/失败冷却） | 此前 403 被当作"正常工作出口的请求级拒绝"按 ok 释放 → 桶一直"健康"地返回 403，用户持续报错；`/healthz` 探针只看 agent 就绪与 IP，**不检测门槛**，无法发现被标记的桶 |
 | 桶间 failover | 请求级重试：`zen_direct.chat()` 上游 429/5xx/传输失败/**匿名 403 `FreeTierError`（出口 IP 被门槛标记）** → 释放租赁 → 换桶重试（SSE 未开播，客户端零字节，可安全重试）；上限 min(桶数, 3)；**其余**请求级 4xx 不换桶；SSE 开播后不换；**兜底耗尽（或无池直连）时最终 403 `FreeTierError` 不透传**，改回 **503 + `error.code=egress_unavailable`**（`_egress_gate_answer`，出口级失败的可重试语义） | 2026-10-17 实测：单桶 429 原样透传时别的桶还有额度；hermes 桌面端的自愈重试还会把请求放大 15+ 倍；403 门槛同理须换桶而非透传；2026-10-19 06:39Z 实测：三桶同时故障兜底透传 403，hermes 判为 layer=auth、retryable=false（约 90s 后轮换已恢复全池） |
+| cordon 的 IP 语义 | 429 烧穿（`free_quota_exhausted`，绑到窗口末）与 403 门槛标记（`free_tier_rejected`）是**对出口 IP 的判决**：探针观测到 agent 上报的出口 IP 变化、新 IP 落在 `expect_prefix` 内且探针就绪 → cordon **立即解除**（事件 `cordon_lifted`）；外前缀 IP 与探针未就绪不解除；transport streak cordon 保持原 deadline | 2026-10-24 实测：opc2-eth 烧穿 223.68.27.82 后 ISP 自行重拨出健康的 36.149.55.24，cordon 依旧行为绑到 UTC0 —— 健康新 IP 白白坐满全窗口，池被减员至 2 桶加剧 429 兜底透传；新 IP 若同样烧穿，会在第一个请求上重新 cordon |
+| 轮换失败语义 | `POST {agent}/rotate` **传输失败 ≠ 最终失败**：命令可能已送达（或 ONT 自行重拨），照常在 deadline 内轮询 IP 变化，观测到合法新 IP 即按成功收敛；明确的 HTTP 拒绝（状态码/`ok=false`）才是最终失败 | 2026-10-24 实测：opc2-eth 硬 429 轮换的 POST 撞隧道抖动 30s 超时报 `agent unreachable`，被记 `rotation_failed`，而 ONT 实际重拨成功 —— 失败记录颠倒因果，运维被迫手动重旋 |
 | 流停顿看门狗 + 租约结局 | `STREAM_STALL_S`（默认 60s）：SSE 静默（响应头后首字节与字节间隔）超时或中途传输异常 → 记 WARNING 后**合成 `finish_reason:"length"` + `[DONE]` 优雅收尾**，异常不再穿透掐断客户端连接；关闭钩子携带结局（completed / cut / stalled / interrupted / disconnected），`stalled`/`interrupted` 按**失败**释放（`kind=stream_stalled`/`stream_interrupted`，3 连败 cordon），`cut`（上游干净截断）与客户端断连仍按 ok | 2026-10-19 实测（hermes `stream_drop`）：opc2-wifi 死隧道令流零字节静默满 `OPENCODE_ZEN_TIMEOUT_S=300` → `httpx.ReadTimeout` 穿透 `StreamRelay` → uvicorn 掐断 SSE → 客户端报 stream_drop；且 `_released` 原本恒 `ok=True`，坏桶永不累计失败、永不 cordon |
 | 客户端写停滞看门狗 | `CLIENT_STALL_S`（默认 60s）：`relay_stream` 停在 `yield` 即=ASGI 写该块被背压阻塞（uvicorn `send()` 走 `flow.drain()`）——挂起超过阈值即判**客户端段已死**：WARNING `client write stalled`、结束理由 `client_stalled`，由监视任务自己取消响应任务、释放上游并写 `stream ended`；0 关闭 | 2026-10-19 实测：hermes 拿到 200 后 600s 零字节（公网段黑洞），网关侧上游仍在产块、卡在 `send()`，既无上游静默也无 TCP 断连可观测，直到 hermes 600s 自杀报 `stream_drop`；取消响应任务后 uvicorn 立即 `transport.close()`（spec 2.3 折叠任务组 → `__call__` 正常返回 → run_asgi 关连接），客户端秒级失败重试 |
 | 计数→阈值轮换 | **每桶每窗口 ≥500 完成(ok)请求**闸一次轮换(ONT 重启换 IP);修复 2026-10-17:`pool.release` 的 ok 提前 return 曾跳过 observer,count 恒 0,阈值从不触发 | 2026-10-17 修好后实测 count 正常累加;但实测免费额度远低于 500/IP/日,此阈值当前只作存在性兜底,主动换 IP 主要靠硬 429 |

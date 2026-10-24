@@ -173,6 +173,54 @@ docker logs zen-gw 2>&1 | grep -E "client write stalled|stream ended"
 容器 healthy，`client_stall_s=60` 生效；6 路并发流全部 200 + `[DONE]`，
 `stream ended reason=completed`，`client write stalled` 计数 0——默认阈值未误报）。
 
+## 0.5 2026-10-24：三桶连环 429 兜底透传（billing 层）+ cordon 不随换 IP 解除
+
+现象：hermes 01:54:01Z 报 `HTTP 429: Free usage limit reached. Subscribe to
+OpenCode Go`（provider=oc1id → `deepseek-ai/deepseek-v4.1-flash`，layer=billing、
+retryable=false）。`/v1/chat/completions` 直连转发上游匿名 429
+`FreeUsageLimitError`（按出口 IP / UTC 日计量）。
+
+**时间线（事件日志 `/data/egress_events.jsonl`，UTC）**：
+- 01:42:31 opc2-eth 硬 429 触发轮换；`POST /rotate` 30s 超时
+  `agent unreachable`（隧道抖动），`rotation_failed`——但 ONT 实际已在重拨，
+  01:44:51 观测到新 IP `36.149.55.24`（合法前缀内、探针就绪）。
+- 01:42:40–43:56 opc2-wifi 出口传输连败（16 连）cordon，01:49:23 恢复。
+- 01:43:58 opc2-eth 免费额度 cordon：`free_quota_exhausted`
+  `retry_after_s=80162`（烧穿的 IP 是 `223.68.27.82`）——cordon 绑到窗口末
+  （UTC0），**尽管出口已换、新 IP 健康**。
+- 01:43:59 cc9 硬 429 轮换成功 `116.147.31.217 → 112.83.208.62`；
+  该 IP（联通 CGNAT 共享池）随后同样 429 —— 01:54:01 三桶皆不可用（eth 绑
+  窗口、wifi 抖动中、cc9 新 IP 亦 429），兜底把 429 原样透传给 hermes。
+
+**定位（两个根因级缺口，2026-10-24 修复）**：
+1. 配额/门槛 cordon 是**按出口 IP 的判决**，但探针观测到 IP 变化时只记
+   `egress_ip_observed` 不重估 cordon → ISP 侧自行重拨（非轮换编排路径）得到
+   的健康新 IP 被旧判决压到 UTC0，池被减员，加剧兜底透传概率。
+2. `POST {agent}/rotate` 传输失败即判 `rotation_failed`，**不再轮询** —— 命令
+   可能实际已送达（本次 ONT 确实重启并换了 IP），失败记录颠倒因果。
+   （opc2-wifi 的 rotate 于 2026-10-18 起多次因同因 refused。）
+
+**修复（随本轮镜像重建生效）**：
+- `egress.pool._probe_one`：观测到出口 IP 变化、新 IP 在 `expect_prefix` 内且
+  探针 ready → `free_quota_exhausted` / `free_tier_rejected` cordon 立即解除
+  （事件 `cordon_lifted`，failure 计数清零）。外前缀 IP（eth 腿回落 wifi）、
+  探针未就绪、transport streak cordon 不解除；新 IP 若同样烧穿会在首个请求上
+  重新 cordon。
+- `egress.rotate._rotate_flow`：rotate POST 传输失败后照常轮询到 deadline，
+  观测到合法新 IP 即按成功收敛（detail 注明 agent call 不可达）；明确 HTTP
+  拒绝仍为最终失败（detail 同时带 transport 与 poll 两个原因）。
+
+**排障入口**：
+```bash
+docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5"
+# 免费额度 429 的当日分布（各桶烧穿时刻）看 eventlog 的 cordon 事件；
+# 请求级明细需开 ZEN_EGRESS_REQUEST_LOG（见 docs/EGRESS_OBSERVABILITY.md）。
+```
+
+**注**：hermes 侧 `fallback_providers` 只配了 `oc1id`（同池），整池 billing
+失败时无处可去；如需双上游兜底，可在 hermes 配置第二个 provider
+（如 `proxykimi`），属客户端配置，不属本仓库。
+
 ## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 三设备出口桶）
 
 ```text

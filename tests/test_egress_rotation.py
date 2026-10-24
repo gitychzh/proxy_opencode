@@ -593,6 +593,73 @@ async def test_agent_failure_reported_and_no_state_change() -> None:
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_unreachable_agent_still_polls_for_ip_change() -> None:
+    """A transport-dead rotate call must not end the rotation as failed.
+
+    The POST may already have reached the agent (or the ONT is re-dialing
+    on its own). Observed 2026-10-24: opc2-eth's hard-429 rotation was
+    written off as ``agent unreachable`` after its 30s call timeout while
+    the tunnel flapped — and the bucket's IP verified as changed minutes
+    later. When the poll later observes a fresh in-prefix IP, the rotation
+    succeeds from the pool's standpoint (the ONT really did reboot).
+    """
+
+    pool = make_pool("a")
+    # Cold-start probes cost hundreds of ms each (fresh httpx client per
+    # poll); give the success path room despite that.
+    rotator = make_rotator(pool, {"a": 3}, poll_s=0.01, timeout_s=3.0)
+    counters = rotator.counters
+    mark_healthy_with_ip(pool)
+    respx.post("http://a:10001/rotate").mock(
+        side_effect=httpx.ConnectError("tunnel flap")
+    )
+    respx.get("http://a:10001/healthz").respond(
+        json={"ready": True, "egress_ip": NEW_IP}
+    )
+    task = rotator.request_rotation("a", trigger="hard_429")
+    assert task is not None
+    outcome = await asyncio.wait_for(task, timeout=5.0)
+    assert outcome.ok is True
+    assert outcome.ip_from == OLD_IP
+    assert outcome.ip_to == NEW_IP
+    assert "unreachable" in outcome.detail
+    saw = counters.counts("a")
+    assert saw.last_rotation_ok is True
+    state = pool.find("a")
+    assert state is not None
+    assert state.egress_ip == NEW_IP
+    assert state.rotating is False
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_unreachable_agent_with_stale_ip_fails_after_poll() -> None:
+    """Unreachable POST *and* no IP change anywhere: still a failure, but
+    the detail must carry both the transport error and the poll verdict so
+    the operator can tell the two apart."""
+
+    pool = make_pool("a")
+    rotator = make_rotator(pool, {"a": 3}, poll_s=0.01, timeout_s=0.06)
+    counters = rotator.counters
+    mark_healthy_with_ip(pool)
+    respx.post("http://a:10001/rotate").mock(
+        side_effect=httpx.ConnectTimeout("no route")
+    )
+    respx.get("http://a:10001/healthz").respond(
+        json={"ready": True, "egress_ip": OLD_IP}
+    )
+    task = rotator.request_rotation("a", trigger="hard_429")
+    assert task is not None
+    outcome = await asyncio.wait_for(task, timeout=5.0)
+    assert outcome.ok is False
+    assert "unreachable" in outcome.detail
+    assert "unchanged" in outcome.detail
+    saw = counters.counts("a")
+    assert saw.last_rotation_ok is False
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_unchanged_ip_times_out_as_failed_rotation() -> None:
     pool = make_pool("a")
     rotator = make_rotator(pool, {"a": 3}, poll_s=0.02, timeout_s=0.1)
@@ -615,7 +682,8 @@ async def test_unchanged_ip_times_out_as_failed_rotation() -> None:
 async def test_prefix_violation_refused() -> None:
     """A reboot that lands the leg on another uplink must NOT be applied."""
     pool = make_pool("a")
-    rotator = make_rotator(pool, {"a": 3}, poll_s=0.01, timeout_s=0.5)
+    # Cold-start probes cost hundreds of ms; keep the deadline generous.
+    rotator = make_rotator(pool, {"a": 3}, poll_s=0.01, timeout_s=3.0)
     mark_healthy_with_ip(pool)
     respx.post("http://a:10001/rotate").respond(
         json={"ok": True, "results": [{"ok": True, "ont": "x", "detail": ""}]}
@@ -735,15 +803,25 @@ async def test_admin_egresses_snapshot_includes_counters(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_admin_rotate_endpoints(tmp_path) -> None:
     pool = make_pool("a", "pad")
-    rotator = make_rotator(pool, {"a": 3}, poll_s=0.01, timeout_s=0.3)
+    # Generous poll deadline: each probe opens a fresh httpx client and the
+    # first one costs hundreds of ms on a cold Windows test process; a tight
+    # deadline can't cover the two polls this success path needs.
+    rotator = make_rotator(pool, {"a": 3}, poll_s=0.01, timeout_s=3.0)
     mark_healthy_with_ip(pool)
     respx.post("http://a:10001/rotate").respond(
         json={"ok": True, "results": [{"ok": True, "ont": "x", "detail": ""}]}
     )
-    respx.get("http://a:10001/healthz").side_effect = [
-        httpx.Response(200, json={"ready": True, "egress_ip": OLD_IP}),
-        httpx.Response(200, json={"ready": True, "egress_ip": NEW_IP}),
-    ]
+    # First poll sees the old IP (ISP may re-issue it), every later poll
+    # the fresh one — a counter instead of a two-slot queue, so extra
+    # polls on a busy CI loop cannot exhaust the mock.
+    polls = {"n": 0}
+
+    def _healthz(_request: httpx.Request) -> httpx.Response:
+        polls["n"] += 1
+        ip = OLD_IP if polls["n"] == 1 else NEW_IP
+        return httpx.Response(200, json={"ready": True, "egress_ip": ip})
+
+    respx.get("http://a:10001/healthz").side_effect = _healthz
     app = _admin_app(tmp_path, pool, rotator)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://t"

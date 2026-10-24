@@ -24,6 +24,11 @@
 - **docs: 去除冗余段落** — 删除双桶性能对比、抓包复盘等多处重复的历史细节，避免旧拓扑/过期结论干扰当前事实。
 
 ### Fixed
+- **fix(egress): 配额/门槛 cordon 随 ISP 换 IP 解除 + agent 不可达的轮换继续轮询（hermes `billing` 429，2026-10-24）** — 定位：01:42–01:54Z 三桶连环故障——opc2-eth 硬 429 烧穿每日免费额度且 `POST /rotate` 撞上隧道抖动 30s 超时（`agent unreachable`，而 ONT 实际已在重拨）、opc2-wifi 出口传输连败 cordon、cc9 轮换所得新 IP（CGNAT 共享）同样瞬间 429；兜底耗尽后 429 `Free usage limit reached` 原样透传给 hermes（layer=billing, retryable=false）。修复（两处根因级缺口）：
+  - `egress.pool._probe_one → _lift_ip_scoped_cordon`：429 配额烧穿（`free_quota_exhausted`）与 403 门槛标记（`free_tier_rejected`）是**按出口 IP 的判决**——ISP 侧自行重拨得到合法前缀内的新 IP 且探针就绪时，cordon **立即解除**（事件 `cordon_lifted`，failure 计数清零）；外前缀 IP（eth 腿跳到 wifi 出口）与探针未就绪一律不解除；transport 配额类之外的 streak cordon 保持原 deadline，新 IP 若同样 429 会在首个请求上重新 cordon。
+  - `egress.rotate._rotate_flow`：`POST {agent}/rotate` 传输失败（可能命令已送达 agent 或 ONT 自行重拨）不再立即判 `failed`——照常在 deadline 内轮询 `/healthz` 观测 IP 变化，观测到合法新 IP 即按成功收敛；明确的 HTTP 拒绝（状态码/`ok=false`）仍是最终失败。
+  - 测试：`tests/test_egress_pool.py`（配额 cordon 随 IP 变解除 / 外前缀与未就绪不解除 / transport streak 不解除 / 403 门槛 cordon 解除）、`tests/test_egress_rotation.py`（unreachable 后轮询成功 / unreachable + IP 未见变化仍失败，detail 带两个原因）、`tests/test_egress_eventlog.py`、`tests/test_config.py` 联动放宽成功路径 poll deadline（冷启动探针数百 ms）。
+  - 文档：`docs/ARCHITECTURE.md` §5、`docs/OPERATIONS.md` §0.5。
 - **fix(egress): 免费层 403 `FreeTierError` 按出口 IP 处理（failover + cordon + 换 IP）** — 2026-10-17 定位：协议已合规（≥2 内置工具 + descending session + `stream`）的请求在**被标记的出口 IP** 上仍 403 `FreeTierError`；同一字节请求换新 IP（旋转所得）或 ECS 宿主 IP 即 200；而 `/healthz` 探针不检测门槛，被标记的桶仍判健康并持续分发。修复：
   - 适配器 `zen_direct`：匿名模式 403 `FreeTierError` → 释放租赁为 `free_tier_rejected`（失败），并触发 `chat()` 桶间 failover（SSE 未开播、客户端零字节）；非匿名或其它错误类型的 403 仍按请求级 ok 释放。
   - 池 `pool.release`：`free_tier_rejected` **立即 cordon**（不等 3 连败），并通知 observer。

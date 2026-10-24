@@ -53,7 +53,9 @@ curl -s -X POST http://127.0.0.1:10002/admin/egresses/opc2-eth/rotate \
 一行一 JSON 事件（UTC 时间戳），换 IP 全时间线含**前后 IP 对照**：
 `rotation_requested → rotation_started(ip_from) → rotation_succeeded
 (ip_from, ip_to, elapsed_s)` 或 `rotation_failed(detail)`；另有
-`cordon`（429 配额/连续失败）、`egress_ip_observed`（探测到的 IP 变化）、
+`cordon`（429 配额/连续失败）、`cordon_lifted`（出口 IP 变化解除
+`free_quota_exhausted`/`free_tier_rejected` 类 cordon，2026-10-24 起）、
+`egress_ip_observed`（探测到的 IP 变化）、
 `window_rollover`（08:00 日窗全部归零）、`free_catalog_refreshed`。
 查看：
 

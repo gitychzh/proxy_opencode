@@ -100,7 +100,8 @@ async def test_rotation_flow_writes_full_event_timeline(tmp_path):
     pool = make_pool("a")
     mark_healthy_with_ip(pool, OLD_IP)
     counters = EgressCounters({"a": 500})
-    rotator = EgressRotator(pool, counters, poll_s=0.01, timeout_s=0.5)
+    # Two successful probes needed; the first costs a cold httpx client.
+    rotator = EgressRotator(pool, counters, poll_s=0.01, timeout_s=3.0)
     with respx.mock:
         respx.post("http://a:10001/rotate").respond(
             json={"ok": True, "results": [{"ok": True, "detail": ""}]}
