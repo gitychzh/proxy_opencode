@@ -104,6 +104,18 @@ def test_app_factory_configures_logging(monkeypatch):
     assert calls == [1], "create_app_from_env must configure logging first"
 
 
+def test_setup_logging_silences_httpx_access_lines(monkeypatch):
+    """Log red line: httpx logs every request at INFO with the FULL URL —
+    the egress pool probes carry the agent's Basic credentials in the URL
+    userinfo, so httpx/httpcore access chatter must stay below WARNING
+    (found 2026-10-25: healthz probe URLs leaked ZEN_EGRESS_SECRET into
+    the container log through httpx's INFO line).
+    """
+    setup_logging()
+    assert logging.getLogger("httpx").level >= logging.WARNING
+    assert logging.getLogger("httpcore").level >= logging.WARNING
+
+
 @pytest.mark.asyncio
 async def test_healthz_includes_version():
     from tests.test_gateway_routes import make_app

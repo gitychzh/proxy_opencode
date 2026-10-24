@@ -109,3 +109,11 @@ def setup_logging() -> None:
             ExtraFormatter(fmt=_TEXT_FORMAT, datefmt="%Y-%m-%d %H:%M:%S")
         )
     logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    # httpx logs every request line at INFO with the FULL URL — for the
+    # egress pool probes that URL carries the agent's Basic credentials in
+    # the userinfo (http://secret:secret@host:port/healthz), which would
+    # violate the log red line. Silence the httpx/httpcore access chatter;
+    # the pool's own structured probes (egress ip changed / probe failed)
+    # already cover everything those lines said, without secrets.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)

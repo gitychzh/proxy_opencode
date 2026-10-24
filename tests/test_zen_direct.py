@@ -136,8 +136,8 @@ async def test_headers_use_api_key_when_configured() -> None:
 
 @pytest.mark.asyncio
 async def test_body_bridge_note_by_default_and_merges_builtin_tools() -> None:
-    """Default marker mode is "bridge": tiny steering note, no 7.8k prompt."""
-    adapter = ZenDirectAdapter(make_settings())
+    """Explicit bridge mode: tiny steering note, no 12.8k prompt."""
+    adapter = ZenDirectAdapter(make_settings(zen_marker_mode="bridge"))
     body = adapter._build_body(
         {
             "model": "opencode/big-pickle",
@@ -159,6 +159,52 @@ async def test_body_bridge_note_by_default_and_merges_builtin_tools() -> None:
     names = {t["function"]["name"] for t in body["tools"]}
     assert {"bash", "edit", "glob", "read"} <= names
     assert body["tool_choice"] == "auto"
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_body_default_marker_mode_is_full_genuine_prompt() -> None:
+    """Round 5 (2026-10-25 live ablation): the upstream now gates the BODY —
+    a tiny system note (old default "bridge") gets 429 FreeUsageLimitError
+    even on a fresh session + bun transport + genuine tool schemas, while
+    the genuine captured opencode prompt passes. "full" is therefore the
+    default and "bridge" is documented as gate-dead.
+    """
+    adapter = ZenDirectAdapter(make_settings())
+    body = adapter._build_body(
+        {"model": "big-pickle", "messages": [{"role": "user", "content": "hi"}]},
+        "big-pickle",
+    )
+    msgs = body["messages"]
+    assert msgs[0]["role"] == "system"
+    # the genuine opencode prompt asset must be injected verbatim
+    assert "interactive CLI tool" in msgs[0]["content"]
+    prompt = zen_direct._default_prompt()
+    assert msgs[0]["content"].startswith(prompt[:200])
+    assert msgs[1] == {"role": "user", "content": "hi"}
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_zen_model_map_rewrites_public_alias_to_free_id() -> None:
+    """Round 5: the free tier only serves `-free` suffixed bare ids; a paid
+    bare id answers 401 AuthError "Missing API key" — the exact-map hit must
+    win over provider-prefix stripping.
+    """
+    adapter = ZenDirectAdapter(
+        make_settings(
+            zen_model_map={
+                "deepseek-ai/deepseek-v4.1-flash": "deepseek-v4.1-flash-free",
+            }
+        )
+    )
+    assert adapter._zen_model("deepseek-ai/deepseek-v4.1-flash") == (
+        "deepseek-v4.1-flash-free"
+    )
+    # unmapped ids keep the legacy strip-provider behaviour
+    assert adapter._zen_model("opencode/big-pickle") == "big-pickle"
+    assert adapter._zen_model("big-pickle") == "big-pickle"
+    assert adapter._zen_model(None) == "big-pickle"
     await adapter.aclose()
 
 

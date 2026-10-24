@@ -375,7 +375,40 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
 - 另证：容器内手动复现走 agent 隧道 + bun + 各桶出口全链路通畅，脚本
   资产（/data/pb/*）与 401/403/429/200 的判定链在 spec 级可复现。
 
-## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 四桶出口池）
+**第五轮定案（2026-10-25 凌晨，owin10 双桶消融——body 形状门 + 免费模型 ID 门）**：
+- opc2 永久下线，由 owin10（Windows 10 双上行）双桶顶替后，hermes 链路
+  仍整链 429。在 owin10-telecom（106.111.50.124，当日近乎零消耗）上分钟级
+  对照消融定案：
+  - B0 真 1.19.4 抓包克隆 body（38KB，big-pickle）→ **200**；
+  - B3 网关合成 body（bridge 注记 + tiny messages）→ 429；
+  - e8：最小 4 合成工具 schema + **克隆 messages** + max_tokens 32000 →
+    **200**（工具 schema 内容无罪）；e9：11 真工具 + tiny messages → 429；
+  - t5/t6/t7（`deepseek-v4.1-flash-free`）：**system prompt 是判别项**——
+    旧资产 prompt（8528B）+ max_tokens 32000 仍 429（t5）；换 1.19.4 实发
+    真身 prompt（12779B）→ 200（t6）；真身 prompt + `max_tokens: 50` 亦
+    200（t7）。旧资产恰为真身的前缀（新版新增 skills 段）。
+- 结论：**body 门 = system prompt 必须是当前真身 opencode prompt**；其 429
+  与层 2 配额 429 同形（`FreeUsageLimitError`），无法从响应区分。修复：
+  - 资产 `proxy_opencode/upstreams/zen_prompt_default.txt` 8528B → 12779B
+    （1.19.4 抓包实拍）；
+  - `ZEN_MARKER_MODE` 默认 `bridge` → **`full`**（bridge 注记 ~70 token
+    过不了门；ECS `.env` 已显式置 `full`）。
+- **模型门（401 新形态）**：免费层只服务 `-free` 后缀裸 ID；付费裸 ID
+  （`deepseek-v4.1-flash`）同 headers/body 回 **401 `AuthError: Missing
+  API key`**（非 403/429，不触发 failover 链）。匿名 GET
+  `https://opencode.ai/inference/v1/models`（`Bearer public`）可列免费目录
+  （85 个 ID，含 `deepseek-v4.1-flash-free`；GET 不烧额度）。对照实验：
+  同 headers 同 body 只改 model 字段，`glm-5.3-flash-free`/`big-pickle`
+  200、`deepseek-v4.1-flash` 401。新增 `ZEN_MODEL_MAP` 精确改写；
+  `PUBLIC_MODELS` 别名上游改为 `deepseek-v4.1-flash-free`。
+- **日志红线修复**：httpx INFO 访问日志打印完整 URL，池探针 URL 的
+  userinfo 携带 agent Basic 凭据 → secret 泄入容器日志；`setup_logging`
+  将 `httpx`/`httpcore` 压到 WARNING（不得回退，测试
+  `test_setup_logging_silences_httpx_access_lines`）。
+- 排障注记：本轮 401（付费模型）先于 body 门出现，failover 链不会因 401
+  触发；t5 的首跑输出丢失属实验脚手架问题，重测即闭环。
+
+## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 多桶出口池）
 
 ```text
 客户端（hermes / 任意 OpenAI SDK）
@@ -384,10 +417,11 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
   -> docker 容器 zen-gw（容器内 :10002, uvicorn）
   -> egress 池（按桶 CONNECT 到设备 agent，出口=设备各自公网 IP；上游 TLS/H2
       一跳由 bun forward.ts 子进程承担——传输指纹门，见 §0.5 第三轮定案）
-       opc2-wifi  http://100.109.57.26:10001   电信 180.117.204.0/24;121.226.0.0/16;106.110.0.0/16;106.111.0.0/16;114.239.0.0/16
-       opc2-eth   http://100.109.57.26:10002   移动 36.149.0.0/16;223.68.0.0/16
-       win10      http://100.121.137.118:10001  电信（家庭 WAN，与 opc2-wifi 同公网 IP；106.111.0.0/16 等，独立传输路径）
-       cc9        http://100.87.219.115:10001  联通 112.83.0.0/16;116.147.0.0/16;122.195.0.0/16
+       owin10-mobile http://100.109.109.108:10001 移动 223.68.24.82（bind_source 钉 192.168.1.222；与 win10 同 CGNAT 出口，额度共享）
+       owin10-telecom http://100.109.109.108:10002 电信 106.111.50.124（bind_source 钉 192.168.2.235；与旧 opc2-wifi 同公网 IP）
+       win10      http://100.121.137.118:10001  电信（家庭 WAN，与 owin10-mobile 同移动 CGNAT 公网 IP；106.111.0.0/16 等，独立传输路径）
+       cc9        http://100.87.219.115:10001  联通 112.83.0.0/16;116.147.0.0/16;122.195.0.0/16（2026-10-25 设备下线待恢复）
+       （opc2-wifi/opc2-eth 已于 2026-10-25 随 opc2 设备永久下线移除）
   -> OpenCode Zen
 ```
 
@@ -398,22 +432,24 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
 > 尚未拆除，因入口链路已从 ECS 断开，处于不可达闲置状态。
 
 0.7.x 权威描述见 `docs/ARCHITECTURE.md`。新栈对外只暴露一个掩码别名
-`deepseek-ai/deepseek-v4.1-flash`（→ 唯一被反代的上游模型 `big-pickle`；
+`deepseek-ai/deepseek-v4.1-flash`（→ 上游免费裸 ID `deepseek-v4.1-flash-free`，
+2026-10-25 前为 `big-pickle`；
 2026-10-17 起严格别名：上游裸 ID 不可请求、不可见，除隐藏端点
 `/v1/models_cus` 纯裸 ID 输出）。四桶中 win10 与 opc2-wifi 出口同一家庭 WAN
-（同一公网 IP 的上游额度共享，但独立一条 ECS↔本机的传输路径）；容器内
+（同一公网 IP 的上游额度共享，但独立一条 ECS↔本机的传输路径；2026-10-25 起
+win10 与 owin10-mobile 同移动 CGNAT 出口，同享额度）；容器内
 least-in-flight 选择、429/5xx/传输失败**桶间 failover**、cordon 冷却、P5 每窗口
 ≥500 或硬 429 自动换 IP（2026-10-17 起三桶 ONT 驱动全部实弹验证，见下表）。ECS/Tailscale 地址与凭据位置见 `ACCESS.md`，
 不要把真实密钥写入仓库。
 
-## 2. 部署与最近状态（0.7.x 新栈，最近部署 2026-10-19）
+## 2. 部署与最近状态（0.7.x 新栈，最近部署 2026-10-25）
 
 | 桶 | agent | 出口 IP | expect_prefix | 最近确认状态 |
 |---|---|---|---|---|
-| `opc2-wifi` | `100.109.57.26:10001`（egress-agent@wifi，User=opc2-bucket-a/uid1001） | `106.110.200.129` 电信 | `180.117.204.0/24;121.226.0.0/16;106.110.0.0/16;114.239.0.0/16` | healthy；HG8020C `huawei_ct` 驱动 2026-10-17 实弹两轮换 IP 成功；`114.239.0.0/16` 为后续轮换落到的电信新段（2026-10-17 补入，否则轮换校验必判失败）；**隧道持续抖动**（2026-10-19 全天 ~30s cordon/探针恢复循环，transport failover 吸收中，见 §0.2） |
-| `opc2-eth` | `100.109.57.26:10002`（egress-agent@eth，uid996） | `223.68.47.67` 移动 | `36.149.0.0/16;223.68.0.0/16` | healthy；P5 轮换真机验证通过；误出口修复=新建 opc2a-route(uid1001→表410@wlx) + 旧栈 wired-egress 停用 + keep-timer 改写（见 ARCHITECTURE §6）；2026-10-19 06:39Z 门槛标记后轮换所得新 IP |
-| `cc9` | `100.87.219.115:10001` | `112.83.208.101` 联通 | `112.83.0.0/16;116.147.0.0/16;122.195.0.0/16` | healthy；HG6142A-C `fenghuo` 驱动实弹受理通过（112.83.208.127→116.147.31.99→116.147.30.191→122.195.202.2）；chroot agent 由 Magisk 看门狗拉起；`122.195.0.0/16` 为后续轮换落到的联通新段（2026-10-17 补入）；2026-10-19 06:39Z 门槛标记后轮换所得新 IP |
-| `win10` | `100.121.137.118:10001`（Windows 本机 egress-agent，`.venv` python + `deploy/windows/start-egress-agent.ps1`，Startup 自启） | `106.111.50.124` 电信（与 opc2-wifi 同家庭 WAN） | `106.111.0.0/16;121.226.0.0/16;106.110.0.0/16;180.117.204.0/24;114.239.0.0/16` | healthy/probe ok；CONNECT 数据面真测通过（经本机隧道对 opencode.ai 200，2026-10-24 部署）；**无 ONT、不参与轮换**（不入 `ZEN_EGRESS_ROTATION`）；当日窗口配额随（同 WAN 共享的）IP 已烧穿（见 §0.5） |
+| `cc9` | `100.87.219.115:10001` | `112.83.208.101` 联通 | `112.83.0.0/16;116.147.0.0/16;122.195.0.0/16` | healthy；HG6142A-C `fenghuo` 驱动实弹受理通过（112.83.208.127→116.147.31.99→116.147.30.191→122.195.202.2）；chroot agent 由 Magisk 看门狗拉起；`122.195.0.0/16` 为后续轮换落到的联通新段（2026-10-17 补入）；2026-10-19 06:39Z 门槛标记后轮换所得新 IP；**2026-10-25 设备下线待恢复** |
+| `win10` | `100.121.137.118:10001`（Windows 本机 egress-agent，`.venv` python + `deploy/windows/start-egress-agent.ps1`，Startup 自启） 移动 CGNAT 公网 IP 族（与 owin10-mobile 同出口） | `106.111.0.0/16;121.226.0.0/16;106.110.0.0/16;180.117.204.0/24;114.239.0.0/16` | healthy/probe ok；CONNECT 数据面真测通过（经本机隧道对 opencode.ai 200，2026-10-24 部署）；**无 ONT、不参与轮换**（不入 `ZEN_EGRESS_ROTATION`）；当日窗口配额随（同 WAN 共享的）IP 已烧穿（见 §0.5） |
+| `owin10-mobile` | `100.109.109.108:10001`（Windows 10 owin10 有线口，`bind_source 192.168.1.222` 钉源出网，schtasks `EgressAgent-mobile` ONSTART SYSTEM 自启） | `223.68.24.82` 移动 | `223.68.0.0/16;36.149.0.0/16` | healthy（2026-10-25 部署，healthz+CONNECT 真测通过）；**无 ONT、不参与轮换**；与 win10 同 CGNAT 出口（上游额度共享）；当日窗口配额已烧穿（见 §0.5） |
+| `owin10-telecom` | `100.109.109.108:10002`（owin10 WiFi 口，`bind_source 192.168.2.235`，schtasks `EgressAgent-telecom`） | `106.111.50.124` 电信 | `106.111.0.0/16;121.226.0.0/16;106.110.0.0/16` | healthy；2026-10-25 body 门/模型门消融主力桶（克隆 200、合成 429、free-ID 200 全链定案，见 §0.5 第五轮）；**无 ONT、不参与轮换** |
 | `ecs` 本机桶 | （已剔除） | 115.29.231.25 | — | **2026-10-17 移出池**（机房 IP 免费额度被共享流量即耗，实测"几条就429"主因）；`egress-agent@ecs` 已停用 |
 | `hangzhou-ecs` | docker `zen-gw`（caddy→127.0.0.1:10010→容器:10002） | 115.29.231.25 入口 | — | healthy；failover 真机首测通过（wifi 429 → 换桶 → 客户端 200,2026-10-17 17:02 UTC） |
 

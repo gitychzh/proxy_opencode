@@ -25,7 +25,7 @@ inspection — and by design it never logs tunnel targets or content.
 | Platform | Status |
 |---|---|
 | Ubuntu / Linux (incl. Android chroots) | **P1 target** (this package, Python) |
-| Windows | placeholder, P6 (same package, `deploy/windows/`) |
+| Windows | 已落地（owin10 双桶 2026-10-25，`deploy/windows/README.md`：schtasks SYSTEM 自启 + `bind_source` 钉源） |
 | Android (native, Kotlin) | placeholder, `../egress-agent-android/` |
 
 ## Config

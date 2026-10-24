@@ -20,6 +20,26 @@ def test_defaults_zen_direct_mode(monkeypatch):
     assert s.zen_api_key == ""
     assert s.dev_open  # no gateway keys
     assert s.host == "127.0.0.1"
+    # round 5 defaults: genuine-prompt marker + free-id rewrite map empty
+    assert s.zen_marker_mode == "full"
+    assert s.zen_model_map == {}
+
+
+def test_zen_model_map_parsing(monkeypatch):
+    monkeypatch.setenv("UPSTREAM_MODE", "zen-direct")
+    monkeypatch.setenv(
+        "ZEN_MODEL_MAP",
+        "deepseek-ai/deepseek-v4.1-flash=deepseek-v4.1-flash-free, big-pickle=big-pickle",
+    )
+    s = config.load_settings()
+    assert s.zen_model_map == {
+        "deepseek-ai/deepseek-v4.1-flash": "deepseek-v4.1-flash-free",
+        "big-pickle": "big-pickle",
+    }
+    # malformed entries are skipped, not fatal
+    monkeypatch.setenv("ZEN_MODEL_MAP", "broken, ok=fine")
+    s = config.load_settings()
+    assert s.zen_model_map == {"ok": "fine"}
 
 
 def test_invalid_mode_rejected(monkeypatch):

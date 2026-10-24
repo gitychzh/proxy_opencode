@@ -110,18 +110,22 @@ class Settings:
 
     # zen-direct mode (direct OpenAI-compatible calls to OpenCode Zen).
     zen_base_url: str = "https://opencode.ai/zen/v1"
-    # Free-tier gate fingerprint (re-verified 2026-09-30 by live ablation):
-    # the gate requires opencode's builtin tool schemas in the body but NO
-    # LONGER checks the default system prompt (a one-line or missing system
-    # message passes; tools-only 403s). Marker injection is therefore
-    # configurable:
-    #   "bridge" (default) — prepend a tiny system note steering the model
-    #                        away from the injected builtin tools (~70 tokens)
-    #   "full"             — legacy: prepend opencode's default prompt +
-    #                        bridge note (~7.8k tokens; pre-gate-change
-    #                        behaviour, kept as a per-bucket fallback)
-    #   "none"             — no system message injected at all
-    zen_marker_mode: str = "bridge"
+    # Free-tier body gate (round 5, re-verified 2026-10-25 by live ablation
+    # on a fresh egress IP): in addition to the tool-name shape gate, the
+    # upstream requires the CURRENT genuine opencode system prompt in the
+    # body — a tiny bridge note (or any small system message) yields the
+    # layer-2-shaped 429 FreeUsageLimitError even with a fresh session,
+    # bun transport and genuine tool schemas. Tool schemas and the user
+    # message content/length stay irrelevant (4 synthetic schemas + a
+    # one-line user message pass, once the genuine prompt is present).
+    # Marker injection is therefore configurable:
+    #   "full" (default)  — prepend opencode's genuine default prompt
+    #                       (zen_prompt_default.txt asset) + bridge note;
+    #                       the only mode proven to pass the body gate
+    #   "bridge"          — tiny system note only (~70 tokens); FAILS the
+    #                       body gate since 2026-10-24 (429 masquerade)
+    #   "none"            — no system message injected at all; also fails
+    zen_marker_mode: str = "full"
     # Which builtin tool schemas to inject for the free-tier gate.
     # Live ablation 2026-09-30: the gate requires >= 2 tools whose NAMES are
     # opencode builtin names and ignores their schema content entirely.
@@ -145,6 +149,12 @@ class Settings:
     # Clients address models by public alias (PUBLIC_MODELS), never by these
     # raw ids.
     zen_models: list[str] = field(default_factory=lambda: list(DEFAULT_ZEN_MODELS))
+    # Requested model id -> upstream bare id rewrite (round 5, 2026-10-25):
+    # the anonymous free tier only serves the ``-free`` suffixed ids; a paid
+    # bare id (e.g. deepseek-v4.1-flash) answers 401 AuthError "Missing API
+    # key" even with an otherwise perfect body. Map public aliases to free
+    # ids here, e.g. ZEN_MODEL_MAP=deepseek-ai/deepseek-v4.1-flash=deepseek-v4.1-flash-free
+    zen_model_map: dict[str, str] = field(default_factory=dict)
     zen_timeout_s: int = 300
     # Stream stall watchdog: max tolerated silence between SSE body bytes
     # (covering both the first byte after the response headers and gaps
@@ -250,6 +260,16 @@ class Settings:
 
 def _csv(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _model_map(value: str) -> dict[str, str]:
+    """Parse ``ZEN_MODEL_MAP`` entries of the form ``from=to`` (csv)."""
+    mapping: dict[str, str] = {}
+    for part in _csv(value):
+        src, sep, dst = part.partition("=")
+        if sep and src and dst:
+            mapping[src] = dst
+    return mapping
 
 
 def _parse_kv(value: str) -> dict[str, str]:
@@ -381,7 +401,7 @@ def load_settings() -> Settings:
     )
     if not public_models:
         public_models = _parse_public_models(",".join(DEFAULT_PUBLIC_MODELS))
-    zen_marker_mode = os.environ.get("ZEN_MARKER_MODE", "bridge").strip().lower()
+    zen_marker_mode = os.environ.get("ZEN_MARKER_MODE", "full").strip().lower()
     if zen_marker_mode not in ("full", "bridge", "none"):
         raise ValueError(
             "ZEN_MARKER_MODE must be one of full|bridge|none, "
@@ -434,6 +454,7 @@ def load_settings() -> Settings:
             os.environ.get("OPENCODE_ZEN_MODELS", ",".join(DEFAULT_ZEN_MODELS))
         )
         or list(DEFAULT_ZEN_MODELS),
+        zen_model_map=_model_map(os.environ.get("ZEN_MODEL_MAP", "")),
         zen_timeout_s=int(os.environ.get("OPENCODE_ZEN_TIMEOUT_S", "300")),
         stream_stall_s=float(os.environ.get("STREAM_STALL_S", "60")),
         client_stall_s=float(os.environ.get("CLIENT_STALL_S", "60")),

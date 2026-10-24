@@ -819,11 +819,24 @@ class ZenDirectAdapter:
 
     # ------------------------------------------------------------ internals
 
-    @staticmethod
-    def _zen_model(model: Any) -> str:
+    def _zen_model(self, model: Any) -> str:
+        """Rewrite the requested model id to the upstream bare id.
+
+        Order (round 5): an exact ``ZEN_MODEL_MAP`` hit wins (public alias ->
+        free ``-free`` id — paid bare ids answer 401 AuthError); otherwise
+        the provider prefix is stripped exactly like opencode does; empty
+        falls back to the first configured zen model.
+        """
         raw = str(model or "")
+        mapped = self._settings.zen_model_map.get(raw)
+        if mapped:
+            return mapped
         _provider, _sep, model_id = raw.partition("/")
-        return model_id if _sep else (raw or "big-pickle")
+        return model_id if _sep else (raw or self._default_model())
+
+    def _default_model(self) -> str:
+        models = self._settings.zen_models
+        return models[0] if models else "big-pickle"
 
     def _headers(self, *, request_id: bool = True) -> dict[str, str]:
         """Reconstructed protocol headers, in the 1.19.4 capture's order."""

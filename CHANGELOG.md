@@ -1,11 +1,19 @@
 # Changelog
 
 > 2026-10-03 文档治理说明：早期版本日志中提及的历史文档已合并到 `docs/OPERATIONS.md`/`docs/ACCESS.md` 并移除。当前事实以 `AGENTS.md` 为准。
-> 2026-09-30 活体复测修正：免费层门槛为 `stream=true` + 至少两个内置工具名；system marker 并非强制条件。
+> ~~2026-09-30 活体复测修正：免费层门槛为 `stream=true` + 至少两个内置工具名；system marker 并非强制条件。~~ **2026-10-25 作废**：body 门复测确认 system prompt 真身为强制条件（见 Unreleased/AGENTS.md 硬约束 1）。
 
 ## [Unreleased]
 
 ### Added
+- **fix(zen): 第五轮免费层门槛定案——body 形状门（system prompt 真实性）+ 免费模型 ID 门** — 2026-10-25 经 owin10 双桶活体消融定案：
+  - **body 门**：同出口 IP、同 bun 传输、同样新 mint session 的分钟级对照——真 1.19.4 抓包 body（38KB）**200**，网关合成 body（tiny messages）**429**；再消融：最小 4 合成工具 schema 无罪（200）、`max_tokens` 无关（50 亦 200）、**system prompt 必须是当前真身**——资产 `zen_prompt_default.txt` 已从 8528B（旧版，恰为真身前缀）更新为 12779B（1.19.4 抓包实拍，新增 skills 段）；`ZEN_MARKER_MODE` 默认 `bridge`→`full`（bridge 注记 ~70 token 已过不了门，伪装成层 2 配额 429）。
+  - **模型门（401 新形态）**：免费层只服务 `-free` 后缀裸 ID；付费裸 ID（如 `deepseek-v4.1-flash`）同 body 回 **401 `AuthError: Missing API key`**（非 403/429）。上游免费目录 85 个 ID（匿名 GET `/inference/v1/models` 可列，不烧额度），含 `deepseek-v4.1-flash-free`。
+  - **feat(config): `ZEN_MODEL_MAP`**（`from=to` csv）——请求模型 ID → 上游裸 ID 精确改写，精确命中优先于 provider 前缀剥离；测试 `test_zen_model_map_rewrites_public_alias_to_free_id`/`test_zen_model_map_parsing`。
+  - **fix(log): httpx 访问日志静默（红线修复）**——httpx INFO 行打印完整 URL，池探针 URL 的 userinfo 携带 agent Basic 凭据 → `ZEN_EGRESS_SECRET` 泄入容器日志；`setup_logging` 现将 `httpx`/`httpcore` 压到 WARNING（池自身的结构化探测日志不涉密、信息量等价）。测试 `test_setup_logging_silences_httpx_access_lines`。
+- **feat(egress): 第五/六桶 `owin10-mobile`/`owin10-telecom`（Windows 10 双上行）接入出口池** — opc2 永久下线后由 owin10 顶替：单设备双实例（10001=有线移动 `bind_source 192.168.1.222`→223.68.24.82，10002=电信 WiFi `bind_source 192.168.2.235`→106.111.50.124），egress-agent 以 Python 直跑（`C:\egress-agent`，SFTP 部署最新包+aiohttp），Task Scheduler `ONSTART` SYSTEM 计划任务 `EgressAgent-mobile/-telecom` 开机自启，防火墙放行 TCP 10001/10002；`bind_source` 源地址钉死出站网卡（Windows 强主机模型，`curl --interface` 同源验证）。ECS `.env` 移除 opc2 两桶。注意：win10 与 owin10-mobile 同移动 CGNAT 出口（223.68.24.82，上游额度共享）；owin10-telecom=旧 opc2-wifi 同公网 IP（106.111.50.124）。文档：`deploy/windows/README.md`（P6 落地记录待补）。
+
+### Changed
 - **feat(egress): 第四桶 `win10`（Windows 本机）接入出口池** — 本机只提供代理与数据转发（egress-agent 的 CONNECT 隧道 + `/healthz`），网关编排仍全部在 ECS。部署件：`deploy/windows/start-egress-agent.ps1`（幂等防重 + healthz 自检，Startup 目录 launcher 开机自启），配置在用户目录 `%USERPROFILE%\.egress-agent\win10.json`（凭据不入仓，见 `docs/ACCESS.md`）；listener 只绑 Tailscale IP；无 ONT、不入 `ZEN_EGRESS_ROTATION`。ECS 侧 `.env` 三处接入（PROXIES 追加桶、EXPECT_PREFIX 新桶前缀 `106.111.0.0/16` 族、ROTATION 不列）+ wifi 桶前缀补今晨重拨段。真测：池四桶探针全绿、CONNECT 数据面经本机隧道 opencode.ai 200。注意：win10 与 opc2-wifi 同家庭 WAN（同一公网 IP，上游额度共享、传输路径独立）。文档：`docs/OPERATIONS.md` §1/§2/§0.5、`docs/ARCHITECTURE.md` §1/§2、`deploy/ecs/env.example`。
 - **docs: `docs/EGRESS_OBSERVABILITY.md`** — 新增 `egress_request` JSONL 埋点方案（Schema、失败分类、ContextVar+try/finally 埋点建议、logrotate、jq/python 统计示例）。
 - **feat(stream): `STREAM_STALL_S` SSE 停顿看门狗配置（默认 60s，0=关闭）** — 所有反代流的静默上限（覆盖响应头后首字节与字节间隔）；`deploy/ecs/env.example` 有注释说明，事实源在 `proxy_opencode/config.py`。
