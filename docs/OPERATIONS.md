@@ -237,6 +237,21 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
 失败时无处可去；如需双上游兜底，可在 hermes 配置第二个 provider
 （如 `proxykimi`），属客户端配置，不属本仓库。
 
+**部署与生产验证（同日，两轮修复均已上线并实测）**：
+- 02:39:17Z / 03:01:49Z `cordon_lifted` 两次在生产触发（opc2-eth
+  `24`→`.217`、`.217`→`.125`，均 in-prefix + 探针就绪）——配额 cordon 随
+  合法重拨 IP 解除的机制运转正常。
+- 03:04Z 冒烟链实测：eth 新 IP `.125` 首个真请求即 429 —— CGNAT 共享池的
+  "新 IP"可能**到手里时已被同池租户烧穿**；cordon-lift 只保证旧判决不
+  迁移，首个请求仍会重判并立即重新 cordon（行为符合 ADR，勿把"换 IP"
+  等同于"有额度"）。三桶全部 quota cordon 至窗口末（reset 2026-10-25
+  08:00 CST），期间网关的正确表现为透明 429 + 及时派发 cordoned 桶。
+- cc9 手动 admin 轮换（03:06Z）整 420s IP 未变——联通侧红拨当天拿不回
+  新地址，属环境项。opc2-wifi 腿对 `opencode.ai:443` TCP 可通但 TLS
+  失败（电信侧劣化，`ready=false` 正确压制）。**等待 08:00 窗口重置前
+  无代码可为**；hermes 在窗口重度自愈重试（15x）会持续放大上游调用量，
+  建议期间暂停或降频。
+
 ## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 三设备出口桶）
 
 ```text
