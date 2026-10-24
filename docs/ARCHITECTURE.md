@@ -42,8 +42,10 @@ ECS ┌────────────────────────�
         └───────────────┴──────────────┴────────────┴──▶ opencode.ai/zen/v1
 ```
 
-**为什么成立**：Zen 免费层门槛是 wire 层的（descending session ID、
-≥2 内置工具名、`stream:true`），全部由 ECS 网关铸造，与出口无关；额度
+**为什么成立**：Zen 免费层门槛是 wire 层的（两层门：**形状门 403**=
+descending session ID + **≥4 真名内置工具** + `stream:true`（2026-10-24
+消融定案；UA/头名/schema 内容不敏感）；**配额门 429**=每出口 IP/UTC 日，
+Retry-After 指向 UTC0），全部由 ECS 网关铸造，与出口无关；额度
 按出口 IP 计量，agent 的 CONNECT 出口就是各设备公网 IP，四/五桶隔离原样
 保留；字节量与今天逐跳一致（ECS↔设备那段从"LB→网关 HTTP"变为"网关→
 代理 CONNECT"），带宽与移动流量零新增。
@@ -202,16 +204,16 @@ agent 代理 basic auth 双保险）。
 | agent 语言 | ubuntu/windows=**Python**；android=**Kotlin**（占位） | 稳定优先、成熟优先；现有设备全部可跑 Python（含 Android chroot） |
 | 第三方依赖 | 用成熟库不自造轮子：HTTP 解析=aiohttp，ONT 重启=requests；唯独 CONNECT 双工管道自写 ~100 行 | proxy.py 评估后弃用：过重且源地址绑定能力不明确；依赖全部 pip 装本机，运行期零云端调用 |
 | TLS/证书 | IP 入口沿用自签 CA（hermes 已 pin，零成本）；客户入口=域名 + LE 真证书（DNS-01，A 记录灰云直指 ECS） | 公共 CA 不签裸 IP；域名走 CF 隧道会绕海外（实测慢 10 倍），灰云直连 ECS 后是国内直连 |
-| 计数器语义 | 每出口、日窗 [08:00, 08:00+1d) Asia/Shanghai（=UTC0 重置）；窗内 ≥500 触发换 IP；换完计数清零（新 IP=新额度桶） | 上游 per-IP 日配额 UTC0 重置；用户确认的语义 |
+| 计数器语义 | 每出口、日窗 [08:00, 08:00+1d) Asia/Shanghai（=UTC0 重置）；窗内 ≥500 触发换 IP；换完计数清零（新 IP=新额度桶）；**2026-10-24 修正：上游真实匿名日额度 ≪500 且按成功调用计**（win10 家宽十几发成功即 429-烧穿，Retry-After 62799s 精确指向 UTC0），500 阈值仅作存在性兜底 | 上游 per-IP 日配额 UTC0 重置；用户确认的语义+2026-10-24 实测 |
 | 429 兜底 | 上游 429 且（`Retry-After > 3600s` **或无 Retry-After 头**）= per-IP 日耗尽 → 立即换 IP（绕过 500 阈值，每窗口每桶至多一次） | 2026-10-16 实测补全：配额 429 可完全不带头（当天三次 cordon 全 null，0 轮换）；有头短值=短窗软限流（只 cordon 不换 IP） |
-| 403 门槛兜底 | 匿名模式下上游 403 `FreeTierError` = **出口 IP 被门槛标记**（同 body 换新 IP 即 200；2026-10-17 实测：设备 IP 403、ECS 宿主 IP 200）→ 释放租赁为失败（`free_tier_rejected`）、**立即 cordon 该桶**并**绕过阈值立即换 IP**（每窗口每桶至多一次，共用硬 429 的去重/失败冷却） | 此前 403 被当作"正常工作出口的请求级拒绝"按 ok 释放 → 桶一直"健康"地返回 403，用户持续报错；`/healthz` 探针只看 agent 就绪与 IP，**不检测门槛**，无法发现被标记的桶 |
+| 403 门槛兜底 | 匿名模式下上游 403 `FreeTierError` → 释放租赁为失败（`free_tier_rejected`）、**立即 cordon 该桶**并**绕过阈值立即换 IP**（每窗口每桶至多一次，共用硬 429 的去重/失败冷却）。**2026-10-24 重解读：主因是形状门（抽包消融证明 = 工具名 <4 真名，请求级），非单纯"IP 被标记"**；网关侧已按 ≥4 真名注入自愈，cordon/failover 仅作防御保留（若上游再收紧可自恢复） | 此前 403 被当作"正常工作出口的请求级拒绝"按 ok 释放 → 桶一直"健康"地返回 403，用户持续报错；2026-10-24 字节级克隆消融测得：**形状缺陷在干净出口上也 403**（同 IP、同窗、4 真名包 200），且形状门先于配额门判定 |
 | 桶间 failover | 请求级重试：`zen_direct.chat()` 上游 429/5xx/传输失败/**匿名 403 `FreeTierError`（出口 IP 被门槛标记）** → 释放租赁 → 换桶重试（SSE 未开播，客户端零字节，可安全重试）；上限 min(桶数, 3)；**其余**请求级 4xx 不换桶；SSE 开播后不换；**兜底耗尽（或无池直连）时最终 403 `FreeTierError` 不透传**，改回 **503 + `error.code=egress_unavailable`**（`_egress_gate_answer`，出口级失败的可重试语义） | 2026-10-17 实测：单桶 429 原样透传时别的桶还有额度；hermes 桌面端的自愈重试还会把请求放大 15+ 倍；403 门槛同理须换桶而非透传；2026-10-19 06:39Z 实测：三桶同时故障兜底透传 403，hermes 判为 layer=auth、retryable=false（约 90s 后轮换已恢复全池） |
 | cordon 的 IP 语义 | 429 烧穿（`free_quota_exhausted`，绑到窗口末）与 403 门槛标记（`free_tier_rejected`）是**对出口 IP 的判决**：探针观测到 agent 上报的出口 IP 变化、新 IP 落在 `expect_prefix` 内且探针就绪 → cordon **立即解除**（事件 `cordon_lifted`）；外前缀 IP 与探针未就绪不解除；transport streak cordon 保持原 deadline | 2026-10-24 实测：opc2-eth 烧穿 223.68.27.82 后 ISP 自行重拨出健康的 36.149.55.24，cordon 依旧行为绑到 UTC0 —— 健康新 IP 白白坐满全窗口，池被减员至 2 桶加剧 429 兜底透传；新 IP 若同样烧穿，会在第一个请求上重新 cordon |
 | 轮换失败语义 | `POST {agent}/rotate` **传输失败 ≠ 最终失败**：命令可能已送达（或 ONT 自行重拨），照常在 deadline 内轮询 IP 变化，观测到合法新 IP 即按成功收敛；明确的 HTTP 拒绝（状态码/`ok=false`）才是最终失败 | 2026-10-24 实测：opc2-eth 硬 429 轮换的 POST 撞隧道抖动 30s 超时报 `agent unreachable`，被记 `rotation_failed`，而 ONT 实际重拨成功 —— 失败记录颠倒因果，运维被迫手动重旋 |
 | agent `ready` 语义（两层防御） | agent 端 `payload.ready = egress_probe_ok is not False and 探针新鲜`：探针环每次尝试（成败皆）打单调点 `probe_at`，`PROBE_READY_GRACE_S=45s`（interval+15s）内算新鲜，环停转或最近一次探测失败 → `ready=false`；网关端 `_probe_one` 另把 `egress_probe_ok is False` 直接判 unhealthy 的第二道防线（旧 agent 缺该字段时行为不变） | 2026-10-24 实测：agent `/healthz` 的 `ready` 是硬编码 true，出口全灭（`bind_source` DHCP 漂移 + 电信腿不可达）数小时仍答 ready=true → 池以 ready 单一判据把客户端工作持续派给僵尸桶（502 燃料）；"agent 进程活着"不代表"出站可达"，须有 freshest 探测结果背书 |
 | 流停顿看门狗 + 租约结局 | `STREAM_STALL_S`（默认 60s）：SSE 静默（响应头后首字节与字节间隔）超时或中途传输异常 → 记 WARNING 后**合成 `finish_reason:"length"` + `[DONE]` 优雅收尾**，异常不再穿透掐断客户端连接；关闭钩子携带结局（completed / cut / stalled / interrupted / disconnected），`stalled`/`interrupted` 按**失败**释放（`kind=stream_stalled`/`stream_interrupted`，3 连败 cordon），`cut`（上游干净截断）与客户端断连仍按 ok | 2026-10-19 实测（hermes `stream_drop`）：opc2-wifi 死隧道令流零字节静默满 `OPENCODE_ZEN_TIMEOUT_S=300` → `httpx.ReadTimeout` 穿透 `StreamRelay` → uvicorn 掐断 SSE → 客户端报 stream_drop；且 `_released` 原本恒 `ok=True`，坏桶永不累计失败、永不 cordon |
 | 客户端写停滞看门狗 | `CLIENT_STALL_S`（默认 60s）：`relay_stream` 停在 `yield` 即=ASGI 写该块被背压阻塞（uvicorn `send()` 走 `flow.drain()`）——挂起超过阈值即判**客户端段已死**：WARNING `client write stalled`、结束理由 `client_stalled`，由监视任务自己取消响应任务、释放上游并写 `stream ended`；0 关闭 | 2026-10-19 实测：hermes 拿到 200 后 600s 零字节（公网段黑洞），网关侧上游仍在产块、卡在 `send()`，既无上游静默也无 TCP 断连可观测，直到 hermes 600s 自杀报 `stream_drop`；取消响应任务后 uvicorn 立即 `transport.close()`（spec 2.3 折叠任务组 → `__call__` 正常返回 → run_asgi 关连接），客户端秒级失败重试 |
-| 计数→阈值轮换 | **每桶每窗口 ≥500 完成(ok)请求**闸一次轮换(ONT 重启换 IP);修复 2026-10-17:`pool.release` 的 ok 提前 return 曾跳过 observer,count 恒 0,阈值从不触发 | 2026-10-17 修好后实测 count 正常累加;但实测免费额度远低于 500/IP/日,此阈值当前只作存在性兜底,主动换 IP 主要靠硬 429 |
+| 计数→阈值轮换 | **每桶每窗口 ≥500 完成(ok)请求**闸一次轮换(ONT 重启换 IP);修复 2026-10-17:`pool.release` 的 ok 提前 return 曾跳过 observer,count 恒 0,阈值从不触发 | 2026-10-17 修好后实测 count 正常累加;**2026-10-24 修正:上游匿名日额度按成功调用计且 ≪500**（win10 十几发即烧穿,Retry-After→UTC0）,500 阈值只是兜底,主动换 IP 主要靠硬 429;且**排障探针也会烧额度**(当日全池 429 即探针自烧所致),窗口内尽量少打直刺实验 |
 | 失败轮换重试 | 硬 429 触发的轮换失败后,冷却 `ROTATION_RETRY_COOLDOWN_S=900s` 可重试(防 ONT 连环重启);旧快照无 epoch 时从 last_rotation_at 解析恢复 | 2026-10-17 补全:此前一次失败(no onts/前缀误判)即锁死到窗口结束,三桶全中 |
 | 桶前缀校验 | `expect_prefix` 支持逗号分隔多段 CIDR（ISP 同区多段动态分配）；不匹配 → unhealthy 跳过 | 2026-10-17 移动桶轮换后 36.149.54/24 → 223.68.27.189，单段前缀造成永久 identity_mismatch |
 | updater 分级 | T1 自动（prompt 资产/UA 版本）；T2 冒烟后自动（算法常量，含全测试+真实请求）；T3 只报告 | 0.6.4 事故的教训：协议常量变化必须冒烟闸门 |

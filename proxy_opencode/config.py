@@ -7,7 +7,6 @@ one in README.md.
 from __future__ import annotations
 
 import os
-import uuid
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -61,8 +60,8 @@ def _default_public_models() -> list[dict[str, str]]:
 # (mitm, 2026-09). Kept as defaults so the zen-direct adapter speaks the same
 # protocol; overridable for forward-compatibility when opencode releases
 # newer client/runtime versions.
-DEFAULT_ZEN_CLIENT_VERSION = "1.18.32"
-DEFAULT_ZEN_BUN_VERSION = "1.3.14"
+DEFAULT_ZEN_CLIENT_VERSION = "1.19.4"
+DEFAULT_ZEN_BUN_VERSION = "1.4.4"
 
 
 @dataclass
@@ -183,10 +182,16 @@ class Settings:
     # its network was perfectly healthy. Coupling the egress path to ambient
     # machine state is fragile; route explicitly with ZEN_PROXY instead.
     upstream_trust_env: bool = False
-    # Session gate (enforced by Zen since 2026-09): anonymous free-tier
-    # requests MUST carry an `x-session-id` header (any stable UUID).
-    # Empty -> a fresh UUID is generated once per process.
+    # LEGACY (kept for env compatibility with openai-serve-era deployments):
+    # the 1.19.4 client no longer sends an `x-session-id` header at all,
+    # so the gateway does not either. Reading this env has no effect since
+    # 0.7.6.
     zen_session_id: str = ""
+    # 2026-10-24 mirror note: the live 1.19.4 client no longer sends
+    # `x-session-id` at all; it sends a 40-hex workspace hash in
+    # `x-opencode-project`. Empty -> a fixed instance-level hash is used;
+    # set OPENCODE_ZEN_PROJECT_ID to pin a specific captured value.
+    zen_project_id: str = ""
     zen_client_version: str = DEFAULT_ZEN_CLIENT_VERSION
     zen_bun_version: str = DEFAULT_ZEN_BUN_VERSION
     # 0.7.x egress pool: per-bucket device agents. Format:
@@ -421,16 +426,14 @@ def load_settings() -> Settings:
         client_stall_s=float(os.environ.get("CLIENT_STALL_S", "60")),
         zen_proxy=os.environ.get("ZEN_PROXY", "").strip(),
         upstream_trust_env=_env_bool("UPSTREAM_TRUST_ENV", False),
-        zen_session_id=(
-            os.environ.get("OPENCODE_ZEN_SESSION_ID", "").strip()
-            or str(uuid.uuid4())
-        ),
+        zen_session_id=os.environ.get("OPENCODE_ZEN_SESSION_ID", "").strip(),
         zen_client_version=os.environ.get(
             "OPENCODE_ZEN_CLIENT_VERSION", DEFAULT_ZEN_CLIENT_VERSION
         ),
         zen_bun_version=os.environ.get(
             "OPENCODE_ZEN_BUN_VERSION", DEFAULT_ZEN_BUN_VERSION
         ),
+        zen_project_id=os.environ.get("OPENCODE_ZEN_PROJECT_ID", "").strip(),
         zen_egress_proxies=_parse_kv(os.environ.get("ZEN_EGRESS_PROXIES", "")),
         zen_egress_expect_prefix=_parse_kv(
             os.environ.get("ZEN_EGRESS_EXPECT_PREFIX", "")

@@ -288,14 +288,44 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
   `x-opencode-client/project`（P6）—— 全部仍然是 429。唯二穿层者：
   无效 model 直接 400 `Model is unavailable`（P3/P5）—— 证明限流层在
   模型解析**之后**，与我们 fingerprint/UA/token/session 无关。
-- **结论（当日形态）**：429 由上游"匿名免费层"在**我们无法从客户端改动
-  的维度**上计数（最可能：匿名桶全局/区域级已耗），与出口 IP、
-  fingerprint、Bearer token、session 常量、opencode 头均无关；且该状态
-  在 UTC 日窗口内对**全新 IP 也预置为已耗**。网关侧当前只能
-  transparent 429；**真正的杠杆是配置真 key**（`OPENCODE_ZEN_API_KEY`
-  —— 代码路径已存在，_auth_free 走真 token 即绕开匿名层），或 hermes
-  侧配第二个 provider。窗口重置后复测"新 IP 首请求是否 200"（P7）以
-  判定是"匿名层区域性整天关闭"还是"per-IP 重置仍在"。
+- **结论（当日形态，**已被同日晚间消融推翻**——见下「破案与修复」）**：当时
+  判为"上游在客户端不可改动维度计数"；晚间字节级克隆消融证明该结论错误，
+  真差异在**工具名门槛**（形状门）与**配额窗口**（各 IP 当日额度早被探针
+  消耗）两层，且形状修复后同出口/同栈同造型请求可 200。本段仅存档。
+
+**破案与修复（06:15–07:20Z，决定性对照与消融阶梯）**：
+- **对照组建立**：本机跑官方 opencode v1.19.4 客户端（npmmirror
+  `opencode-windows-x64` 平台包，全新隔离目录、匿名、无 key）经 win10
+  家宽出口**成功拿到 200 "ok"**；而同出口/当时的**字节级克隆**（本地
+  HTTP 抓包服务器 `OPENCODE_CONFIG_CONTENT` 钓真客户端请求→原样重放，
+  python httpx / bun 1.4.2/1.4.4 / curl 三栈、含 fork 2.0.18 形状与
+  1.19.4 形状两组包）在**形状错误的包组**上稳定 429/403。
+- **决定性单变量**：1.19.4 官方形状包重放 → **200**（SSE 5 条）；换成
+  fork 2.0.18 抓包包（`x-session-id`/`x-session-affinity` 移名称 + 无
+  `max_tokens/temperature/reasoning_effort` 键 + `shell/question/subagent`
+  工具名集）→ 403/429。进一步消融锁定**唯一判定变量=tools 名集与数量**：
+  - 12 名真名真 schema → 200；4 名真名（bash/edit/glob/read）+ **空
+    schema/空 description** → 200；3/2/1 名真名 → 403；12 名中掺 1 个
+    改名（`tool_0`）→ 403；2 名合成 schema（旧-minimal）→ 403。
+  - **UA 完全不敏感**（换成 `opencode/latest/2.0.18/desktop` 同样 200）；
+    schema/description 内容不校验；`x-session-id` 类头名重命名不敏感
+    （1.19.4 名 ↔ 2.0 名互换 + b3/traceparent 加减均 200）。
+- **两层门定案（修正前文与 AGENTS 硬约束 1 的旧口径）**：
+  1. **形状门**（403 `FreeTierError`）= **≥4 个真名 opencode 工具**；
+  2. **配额门**（429 `FreeUsageLimitError`）= **per 出口 IP / UTC 日**
+     计数（`Retry-After` 精确指向 UTC0；实测 win10 家宽十几发成功调用
+     后烧穿，retry 值 62799s）；形状门先于配额门判定（相邻两请求分别
+     403/429 实证）。
+  3. **当日全池 429 的真正成因就是第 2 层**：白天数百发排障探针本身
+     即耗尽各桶 IP 的当日匿名额度（`egress_request` 账本 count=0 是因为
+     账本不含探针，非上游无计数）；官方客户端"能用"与我们"不能用"的
+     差异 = 形状门 + 各自残余额度，**不是 fingerprint/TLS/mihomo/IP 变换**。
+- **修复（随本轮已提交）**：`zen_direct` `minimal` 注入 2→4（bash/edit/
+  glob/read）、`captured2` 扩四具、UA 默认 `1.19.4/bun 1.4.4`、头集
+  对齐 1.19.4 抓包（新增 `x-opencode-session-id` 双头、去 `x-session-id`
+  与重复 `x-opencode-request-id`、`x-opencode-project` 固定 40-hex）；
+  403 failover/cordon 语义不变。门禁全绿（pytest 258+33 / ruff / mypy）。
+  **待 UTC0 重置后部署验证**（P7：新窗口首请求应 200）。
 
 ## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 四桶出口池）
 

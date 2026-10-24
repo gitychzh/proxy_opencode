@@ -25,6 +25,13 @@
 - **docs: 去除冗余段落** — 删除双桶性能对比、抓包复盘等多处重复的历史细节，避免旧拓扑/过期结论干扰当前事实。
 
 ### Fixed
+- **fix(zen): 免费层形状门槛复测=两层门（工具名 ≥4 真名 + 每-IP/UTC日额度），2026-10-24 全池 429 定案** — 今日全池匿名 429 的根因是**两层叠加**并被当日探针自证混淆（字节级证据与消融阶梯见 `docs/OPERATIONS.md` §0.5）：
+  - **层 1 形状门（`403 FreeTierError`）**：要求 **≥4 个真名 opencode 工具**（1/2/3 真名全 403；4 真名 200 且 **schema/description 内容不校验**；混入 1 个改名工具即 403）。UA 版本（2.0.18 UA 亦过）/头名/`b3`+`traceparent`/`x-opencode-client` 值*全部不敏感*（消融证）。旧"≥2 内置名 + 合成 schema"口径是 2026-09-30 时代结论，上游已收紧。
+  - **层 2 配额门（`429 FreeUsageLimitError`）**：按**出口 IP / UTC 日**计量，`Retry-After` 指向下一个 UTC 0 点（实测 62799s）；传输失败/TLS reset/403 不烧额度。**当日全池 429 的根因：数百发手工/容器探针把桶 IP 与 win10 家宽的当日匿名额度提前烧尽**（网关 `egress_request` 账本 count=0 因不含探针）——"整窗 count=0 却全池 429"由此闭环。
+  - 层 1 判定先于层 2：形状缺陷请求在配额已烧穿的 IP 上仍返回 403（相邻请求分获 403/429 实证）。
+  - 修复（`zen_direct`+`config`）：`minimal` 注入数 **2→4**（pool 前四位改 1.19.4 客户端实发的 `bash,edit,glob,read`）、`captured2` 同步扩为该 4 工具子集、UA 默认改 `1.19.4/ai-sdk 4.0.23/bun 1.4.4`；头集对齐 1.19.4 抓包——新增 **`x-opencode-session-id`**（与 `x-opencode-session` 同值双头）、移除 `x-session-id`（legacy 稳定 UUID 头，1.19.4 已不发送）与重复的 `x-opencode-request-id`；`x-opencode-project` 由 `"global"` 改固定 40-hex 实例哈希（`OPENCODE_ZEN_PROJECT_ID` 可覆盖）。403 failover/cordon 语义保持不变（防御保留）。
+  - 测试：`tests/test_zen_direct.py`、`tests/test_config.py` 同步；pytest 258+33、ruff、mypy 全绿。
+  - 文档：`AGENTS.md` 硬约束 1、`docs/ARCHITECTURE.md` §5、`docs/OPERATIONS.md` §0.5。
 - **fix(egress): 僵尸桶 ready 语义——agent `ready` 反映探针活性与最近探测结果；网关核实 `egress_probe_ok`（2026-10-24 同日第二缺口）** — 部署首轮修复（上一条）时复测发现：opc2-wifi 的 `/healthz` `ready` 是**硬编码 true**，出口整体死（`bind_source` DHCP 漂移 `192.168.2.138`→`.235` + 电信腿对 `opencode.ai:443` 自身不可达、连败数小时放行），agent 照答 ready=true，池以 ready 单一判据选桶 → 僵尸桶持续领客户端工作（502 燃料）。修复分两层防御：
   - agent `egress_agent/health.py`：`ready = egress_probe_ok is not False and 探针新鲜`——探针环每次尝试（成败皆）打单调点 `probe_at`，`PROBE_READY_GRACE_S=45s`（interval+15s）内视为新鲜；环停转（崩溃/卡死）或最近一次探测失败 → `ready: false`。旧字段 `egress_probe_ok` 保持不变。
   - 网关 `egress/pool._probe_one`：第二道防线——payload `egress_probe_ok is False` 即判 unhealthy（即便 agent 仍答 ready=true）；旧 agent 不带该字段行为不变。

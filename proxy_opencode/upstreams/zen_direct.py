@@ -1,42 +1,55 @@
 """zen-direct adapter: talks to OpenCode Zen's OpenAI-compatible API directly.
 
-UPSTREAM_MODE=zen-direct reconstructs the exact client protocol that the
-official opencode 1.18.x client sends to `https://opencode.ai/zen/v1`:
+UPSTREAM_MODE=zen-direct reconstructs the client protocol the official
+opencode 1.19.x client sends to `https://opencode.ai` (the inference
+service; endpoint shape mirrored from HEAD captures of a genuine client):
 
   * Endpoint: POST {base}/chat/completions (SSE streaming supported).
   * Auth: `Authorization: Bearer public` for the anonymous free tier, or a
     real Zen API key when OPENCODE_ZEN_API_KEY is set.
-  * Protocol headers (verified byte-for-byte against a mitm capture of the
-    genuine client):
+  * Protocol headers (verified byte-for-byte against a capture of the
+    genuine 1.19.4 CLI, 2026-10-24):
         Authorization: Bearer public
-        x-session-id: <stable UUID>   (Zen gate since 2026-09; without it
-                                        anonymous requests get AuthError
-                                        "Missing API key")
         Content-Type: application/json
-        User-Agent: opencode/<ver> ai-sdk/provider-utils/4.0.23 runtime/bun/<ver>
+        User-Agent: opencode/<ver> ai-sdk/provider-utils/<pv> runtime/bun/<bv>
         x-opencode-client: cli
-        x-opencode-project: global
-        x-opencode-session: ses_<26 chars>
-        x-opencode-request: msg_<26 chars>
+        x-opencode-project: <40-hex workspace hash>
+        x-opencode-session: ses_<26 chars>     (descending-minted)
+        x-opencode-session-id: ses_<26 chars>  (same value, second header)
+        x-opencode-request: msg_<26 chars>     (ascending-minted)
   * Identifiers replicate opencode's `packages/schema/src/identifier.ts`:
     26 chars = 12 hex chars of `(ms << 12) + counter` (low 48 bits) followed
     by 14 random chars from [0-9A-Za-z].
 
-  * Anonymous free-tier checks (live-verified 2026-10-13 against
-    opencode 1.19.0 / the inference-service cutover):
-      - `stream: true` and >= 2 tools whose names are opencode builtin
-        names are still required (unchanged from the 2026-09-30 ablation).
-      - NEW: the `x-opencode-session` header must be a *genuinely
-        opencode-shaped* session id: the 12-hex time part must be the
-        bitwise-INVERTED (descending) encoding of `(ms << 12) + counter`
-        (schema/src/session-id.ts uses `descending()`), and the counter
-        must stay below 64. Ascending session ids — what this adapter
-        emitted until 0.6.4 — are rejected with HTTP 403 FreeTierError
-        "OpenCode's free tier can only be used from within OpenCode".
-        `x-opencode-request` (msg_) stays ascending; no counter limit.
-      - The client's other headers are NOT checked: UA version, cli vs
-        desktop, x-opencode-project value, x-session-id, Accept, and the
-        marker prompt all passed either way.
+  * Anonymous free tier is a TWO-LAYER gate (live ablations 2026-10-24,
+    byte-clone replays of a genuine-1.19.4 request from a clean residential
+    egress):
+
+      Layer 1 — shape gate: HTTP 403 `FreeTierError`
+        - requires **>= 4 DISTINCT tools whose NAMES are opencode builtin
+          names** (1/2/3 real names all 403; 4 real names 200 with EMPTY
+          schemas; a renamed/unknown name 403s even amid 11 real ones).
+        - everything else is NOT checked: UA version (2.0.18 UA passed),
+          schema/description contents, `x-opencode-client`, the exact
+          session-header names (2.0-style renames passed), and the b3/
+          traceparent tracing headers are all tolerated or unnecessary.
+        - gate verdict arrives BEFORE the quota layer: a shape-faulted
+          request 403s even from an IP whose daily quota is exhausted.
+        - HISTORY: through 2026-10-23 the minimum was 2 real names with
+          synthetic schemas accepted; with the 2026-10-24 upstream the
+          count tightened to 4 real names (see _MIN_INJECTED_TOOLS).
+
+      Layer 2 — quota gate: HTTP 429 `FreeUsageLimitError`
+        - metered per EGRESS IP per UTC day; a fresh 200-serving IP can
+          exhaust its daily allowance within ~a few dozen successful
+          calls, and `Retry-After` points at the next UTC midnight
+          (measured win10 home egress, 2026-10-24).
+        - transfer failures / TLS resets / 403s do NOT burn quota.
+
+    Consequence for the pool: a batch of troubleshooting probes from a
+    bucket's egress IP can drain that IP's own daily allowance (the
+    2026-10-24 whole-pool 429 outage was exactly this); the 403 shape gate
+    must be fixed at the gateway level and never masked as an IP problem.
 
 Everything else is a faithful OpenAI passthrough: messages/params are
 forwarded via the shared whitelist, SSE chunks are relayed as-is, and
@@ -45,6 +58,7 @@ upstream errors are relayed with their original status code.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import secrets
@@ -94,31 +108,34 @@ _BRIDGE_NOTE_STANDALONE = (
     "of the client's latest message."
 )
 
-# Minimal builtin schema set that still satisfies the gate.
+# Minimal builtin schema set that still satisfies the shape gate.
 #
-# Live ablation on 2026-09-30 (ubuntu26 egress, reproducible) established the
-# exact rule: the gate requires **>= 2 tools whose NAMES are opencode builtin
-# names**, and ignores their schemas completely.
+# Live ablation 2026-10-24 (byte-clone replays of a genuine 1.19.4 request
+# from a clean residential egress) established the CURRENT rule set — the
+# gate TIGHTENED from the 2026-09-30 era where 2 real names passed:
 #
-#   bash+read, full captured schemas (7,872 ch)  -> 200
-#   bash+read, name + empty params   (246 ch)    -> 200
-#   bash+read, name only             (104 ch)    -> 200
-#   bash only                        (123 ch)    -> 403
-#   two non-builtin names            (~250 ch)   -> 403
-#   bash+read+edit                   (369 ch)    -> 200
+#   11 real captured tools (full schemas)         -> 200
+#   bash+edit+glob+read, empty desc/params (hollow) -> 200
+#   bash+edit+glob+read, real schemas             -> 200
+#   bash+edit+glob   (3 real)                     -> 403
+#   bash+edit        (2 real)                     -> 403
+#   bash alone       (1 real)                     -> 403
+#   11 real names + 1 renamed (tool_0)            -> 403
+#   2 synthetic schemas under real names (old era)  -> 403  (count < 4)
 #
-# So the mandatory fingerprint costs ~60 prompt tokens instead of ~1,970:
-# `ZEN_TOOLS_MODE=minimal` injects two synthesized tiny schemas.
-# `captured2` restores the old 2-tool subset of the captured asset and `all`
-# the full 11-tool list, as fallbacks if the gate ever tightens again.
+# So: >= 4 DISTINCT builtin names, schemas/descriptions NOT inspected.
+# `_MIN_INJECTED_TOOLS` sends 4 synthesized ~30-token schemas under real
+# names (~120 prompt tokens total); `captured2` injects the captured asset
+# subset below and `all` the full 11-tool list as fallbacks if the gate
+# ever changes again.
 #
-# A SECOND, independent gate appeared with the 2026-10-11 inference-service
-# cutover (first hit 2026-10-13): the `x-opencode-session` id must be a
-# descending-encoded opencode session id with counter < 64, else FreeTierError
-# 403. See opencode_id() and the module docstring.
-_MINIMAL_TOOL_NAMES = ("bash", "read")
+# A SECOND, independent quota gate appeared with the 2026-10-24 study as
+# the per-egress-IP/UTC-day allowance (FreeUsageLimitError + Retry-After
+# to UTC midnight) — separate from this shape gate; see the module
+# docstring.
+_MINIMAL_TOOL_NAMES = ("bash", "edit", "glob", "read")
 
-_MIN_INJECTED_TOOLS = 2
+_MIN_INJECTED_TOOLS = 4
 
 # Bucket-failover cap for 429/5xx/403-free-tier/transport retries across egress
 # buckets (0.7.x). A fully-drained pool must still surface its last upstream
@@ -126,12 +143,17 @@ _MIN_INJECTED_TOOLS = 2
 # extra attempts in the worst case.
 _FAILOVER_MAX_ATTEMPTS = 3
 
-# The free-tier gate's rejection type. Measured 2026-10-17: the gate is decided
-# by the *egress IP*, not the request — a byte-identical body returns 200 from a
-# fresh IP and 403 FreeTierError from an IP the gate has flagged (device IPs
-# flagged, ECS host IP passed). So a 403 FreeTierError in anonymous mode is an
-# egress-level failure to fail over and count against the bucket, unlike every
-# other 4xx, which is a final request-level answer through a working egress.
+# The shape gate's rejection type. Measured 2026-10-24 on a clean
+# residential egress (Home win-win, alive quota window): requests carrying
+# < 4 real builtin tool names get 403 FreeTierError from a healthy egress
+# — a REQUEST-level shape failure. It is kept in the egress-failure path
+# below as well (cordons + failover + 503 rewrite) because the two gates
+# cannot be told apart for certain from one answer alone, and a spurious
+# cordon on a shape fault costs nothing: the rotator lands a fresh IP and
+# the next request with the corrected shape re-opens the bucket. A quota
+# 429, by contrast, is pure egress level. (2026-10-17's "same body, device
+# IPs 403 / fresh IP 200" is now explained as shape-vs-clean-egress mixed
+# windows, not a per-IP shape flag.)
 _FREE_TIER_ERROR = "FreeTierError"
 
 
@@ -145,14 +167,11 @@ def _is_free_tier_rejection(status: Any, content: Any) -> bool:
 
 
 # Client-facing answer when a free-tier 403 is the FINAL outcome (failover
-# budget spent, or no pool to move to). The rejection is egress-level — the
-# gate flagged the gateway's egress IP — but a relayed 403 makes clients
-# blame their own credentials and stop retrying: measured 2026-10-19
-# 06:39Z, when two flagged IPs plus one dead tunnel spent all three
-# attempts and hermes surfaced the relayed 403 as an auth error with
-# retryable=false. A 503 says the same truth with the retry semantics that
-# match recovery (the rotator lands fresh egress IPs within ~90s; gate 403
-# rejections cost no quota).
+# budget spent, or no pool to move to). Kept as a defensive rewrite from
+# 0.7.5 (2026-10-19): a relayed 403 makes clients blame their credentials and
+# stop retrying — measured then, when the shape gate was still misdiagnosed
+# and two IPs plus a dead tunnel spent all three attempts. With the
+# 2026-10-24 toolshape fix the branch should stay cold.
 _EGRESS_UNAVAILABLE_MESSAGE = (
     "Upstream free-tier gate rejected the gateway's egress IP "
     "(403 FreeTierError): an egress-level restriction, not a problem with "
@@ -178,11 +197,13 @@ def _egress_unavailable_result() -> dict[str, Any]:
 
 # Injected names, in preference order. A name the client already uses is
 # skipped: injecting a duplicate would not add a distinct builtin name (the
-# gate counts names, not entries) and the old code dropped the builtin in that
-# case, which could push the count below two.
+# gate counts names, not entries) and dropping the builtin instead could
+# push the count below the four-name minimum. The first four names are the
+# ones the live 1.19.4 client itself sends (ablation 2026-10-24):
+# bash, edit, glob, read.
 _INJECT_NAME_POOL = (
-    "bash", "read", "todowrite", "skill", "task", "list",
-    "webfetch", "websearch", "glob", "grep", "edit", "write",
+    "bash", "edit", "glob", "read", "todowrite", "skill", "task",
+    "list", "webfetch", "websearch", "grep", "write",
 )
 
 
@@ -240,6 +261,17 @@ def opencode_id(prefix: str, *, descending: bool = False) -> str:
     alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
     rand = "".join(alphabet[b % 62] for b in secrets.token_bytes(14))
     return prefix + time_part + rand
+
+
+def _project_hash() -> str:
+    """Fixed 40-hex workspace hash for `x-opencode-project`.
+
+    The genuine client derives it from the workspace directory (sha1). The
+    gateway has no single workspace, so a backend-stable constant keeps the
+    header byte-stable without pretending to be one real directory.
+    """
+
+    return hashlib.sha1(b"opencode-gateway-workspace").hexdigest()
 
 
 def is_valid_opencode_id(value: str, prefix: str) -> bool:
@@ -374,6 +406,11 @@ class ZenDirectAdapter:
             trust_env=settings.upstream_trust_env,
         )
         self._auth_free = not settings.zen_api_key
+        # 40-hex workspace hash shape for `x-opencode-project` (see
+        # _headers). A previously captured genuine value can be pinned via
+        # OPENCODE_ZEN_PROJECT_ID; the default is a fixed instance-level
+        # sha1 so the header stays byte-stable across requests.
+        self._project_id = settings.zen_project_id or _project_hash()
         # tool_choice "auto" + stream_options mirror the genuine client body.
         self._builtin_tools = _builtin_tools()
         self._builtin_names = _tool_names(self._builtin_tools)
@@ -435,16 +472,17 @@ class ZenDirectAdapter:
         egress IPs.
 
         Bucket failover: an upstream 429 / 5xx / transport failure, or a 403
-        FreeTierError in anonymous mode (the gate flagged this bucket's egress
-        IP — the same body returns 200 from a fresh IP, measured 2026-10-17),
-        releases the lease and retries on the next lease — none of these
-        outcomes depend on the request itself, and no client-visible byte has
-        been sent (the SSE stream had not started), so another bucket with a
-        fresh egress IP can serve the same body. Retryable errors never retry
-        after bytes reached the client, and the loop is bounded so a fully-
-        drained pool answers instead of hanging; a final free-tier 403 is
-        answered as 503 `egress_unavailable` (egress-level, retryable)
-        rather than relayed as a client-blaming 403.
+        FreeTierError in anonymous mode (kept defensively: with the corrected
+        4-real-names shape this should not fire; if it does — e.g. the gate
+        tightens again — failing over plus cordon recovery matches the
+        2026-10-17 behaviour), releases the lease and retries on the next
+        lease — none of these outcomes depend on the request itself, and no
+        client-visible byte has been sent (the SSE stream had not started),
+        so another bucket can serve the same body. Retryable errors never
+        retry after bytes reached the client, and the loop is bounded so a
+        fully-drained pool answers instead of hanging; a final free-tier 403
+        is answered as 503 `egress_unavailable` (retryable) rather than
+        relayed as a client-blaming 403.
         """
         model = self._zen_model(payload.get("model"))
         body = self._build_body(payload, model)
@@ -496,11 +534,12 @@ class ZenDirectAdapter:
                 self._auth_free
                 and _is_free_tier_rejection(status, result.get("content"))
             ):
-                # 403 FreeTierError: the gate flagged this bucket's IP, not the
-                # request. Fail over to a bucket on a fresh IP; the flagged
-                # bucket was already released as a failure so the pool cordons
-                # it and the rotator re-dials. Measured 2026-10-17: device IPs
-                # gave FreeTierError, ECS host IP gave 200.
+                # Defensive failover on a shape-gate rejection. With the
+                # >= 4 real-name toolset injected this should not fire; if
+                # the gate tightens again, the cordons + rotator recover
+                # automatically. (2026-10-24: the shape gate is decided
+                # BEFORE the quota layer — such a 403 can also appear with
+                # a quota-dead IP, so it is not necessarily egress-level.)
                 attempts -= 1
                 if attempts <= 0:
                     # Egress-level rejection with no attempt left to spend:
@@ -516,13 +555,12 @@ class ZenDirectAdapter:
     def _egress_gate_answer(self, result: Any) -> Any:
         """Map a final anonymous free-tier 403 onto a client-facing 503.
 
-        `_is_free_tier_rejection` proves the 403 is about the egress IP, not
-        the request (measured 2026-10-17), so letting it through as a final
-        answer misreports our egress state as the client's auth failure —
-        measured 2026-10-19 06:39Z, when two flagged IPs plus one dead
-        tunnel spent every attempt and hermes showed the relayed 403 as a
-        non-retryable auth error. Keyed mode and other 403 bodies pass
-        through untouched: they really are request-level answers.
+        Kept from 0.7.5/2026-10-17 as a defensive UX rewrite: a relayed 403
+        makes clients blame their own credentials and stop retrying. With
+        the 2026-10-24 shape fix the branch should remain cold; if the
+        upstream ever re-tightens, the 503 keeps hermes-style clients in the
+        retry loop while the pool recovers. Keyed mode and other 403 bodies
+        pass through untouched: they really are request-level answers.
         """
         if (
             isinstance(result, dict)
@@ -581,11 +619,10 @@ class ZenDirectAdapter:
                     resp.status_code, result.get("content")
                 )
             ):
-                # The gate flagged this bucket's egress IP (measured
-                # 2026-10-17: the same body 200s from a fresh IP; device IPs
-                # gave FreeTierError, ECS host IP gave 200). Count it against
-                # the bucket so the pool cordons it and the rotator re-dials;
-                # chat() fails the request over to another bucket.
+                # Defensive release: kept from 0.7.5 (the 2026-10-17 era).
+                # With the 2026-10-24 shape fix in place this branch is
+                # expected to stay cold; keeping the cordon makes any
+                # future gate tightening self-healing via the rotator.
                 await self._release(lease, ok=False, kind="free_tier_rejected")
             else:
                 await self._release(lease, ok=True)
@@ -644,26 +681,32 @@ class ZenDirectAdapter:
         return model_id if _sep else (raw or "big-pickle")
 
     def _headers(self, *, request_id: bool = True) -> dict[str, str]:
-        """Reconstructed protocol headers, in the captured order."""
+        """Reconstructed protocol headers, in the 1.19.4 capture's order."""
         version = self._settings.zen_client_version
         ua = (
             f"opencode/{version} ai-sdk/provider-utils/4.0.23 "
             f"runtime/bun/{self._settings.zen_bun_version}"
         )
+        # Session ids are minted DESCENDING (~((ms<<12)+counter)) since
+        # opencode 1.19.0; the shape gate rejects ascending session ids
+        # with FreeTierError (verified live 2026-10-13, re-verified via
+        # byte-clone 2026-10-24). Request ids stay ascending, matching the
+        # genuine client. The genuine 1.19.4 client sends the minted value
+        # TWICE (`x-opencode-session` + `x-opencode-session-id`) and no
+        # legacy `x-session-id` stable header at all (the 2026-09 Zen
+        # header had already been dropped upstream by the 1.19.4 build).
+        session = opencode_id("ses_", descending=True)
         headers = {
             "Content-Type": "application/json",
-            # Session gate (Zen, 2026-09): anonymous free-tier requests are
-            # rejected with AuthError "Missing API key" unless a stable
-            # `x-session-id` UUID header is present.
-            "x-session-id": self._settings.zen_session_id,
             "User-Agent": ua,
             "x-opencode-client": "cli",
-            "x-opencode-project": "global",
-            # Session ids are minted DESCENDING (~((ms<<12)+counter)) since
-            # opencode 1.19.0; the free-tier gate rejects ascending session
-            # ids with FreeTierError (verified live 2026-10-13). Request ids
-            # stay ascending, matching the genuine client.
-            "x-opencode-session": opencode_id("ses_", descending=True),
+            # The captured client carries a 40-hex workspace hash here
+            # (sha1 of the workspace directory). "global" was fine in the
+            # 1.18 era but has no 2026-10-24 pass datapoint, so mirror the
+            # captured shape with a fixed instance-level hash.
+            "x-opencode-project": self._project_id,
+            "x-opencode-session": session,
+            "x-opencode-session-id": session,
             # Captured genuine client sends the well-known `Bearer public` on
             # the anonymous free tier (the console proxy strips anonymous auth
             # before the inference service sees it, so it is present on the
@@ -673,9 +716,7 @@ class ZenDirectAdapter:
         if self._settings.zen_api_key:
             headers["Authorization"] = f"Bearer {self._settings.zen_api_key}"
         if request_id:
-            rid = opencode_id("msg_")
-            headers["x-opencode-request"] = rid
-            headers["x-opencode-request-id"] = rid
+            headers["x-opencode-request"] = opencode_id("msg_")
         return headers
 
     def _build_body(self, payload: dict[str, Any], model: str) -> dict[str, Any]:

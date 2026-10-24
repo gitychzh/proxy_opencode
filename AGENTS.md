@@ -18,12 +18,13 @@
 
 ## 硬约束（不可违反）
 
-1. **免费层协议事实（活体复测：2026-09-30/2026-10-02/2026-10-13/2026-10-17）**
-   - 匿名请求门槛：至少 2 个工具，且 `function.name` 属于 OpenCode 内置工具集（`bash/edit/glob/grep/read/skill/task/todowrite/webfetch/websearch/write`），并且 `stream: true`。少于 2 个、使用两个非内置名、或 `stream: false` 均得到 403。默认 `ZEN_TOOLS_MODE=minimal` 注入两个合成最小 schema。
-   - **session ID 必须 descending 编码（opencode 1.19.0 起）**：`x-opencode-session` 必须是 descending 编码（`~((ms<<12)+counter)&0xFFFFFFFFFFFF`），同毫秒内 `counter < 64`。ascending 恒定 403 `FreeTierError`。`x-opencode-request`（`msg_`）仍为 ascending。详见实测边界。
-   - **出口 IP 门槛（2026-10-17 定位）**：仅"工具 + descending session"合规仍不够——同一份合规请求，从**被标记的出口 IP** 发出返回 403 `FreeTierError`，从**新 IP**（旋转换到的地址）或 ECS 宿主 IP 发出返回 200。即 403 常见根因是**出口 IP 被门槛标记**，而非工具/session/UA/版本。网关据此把匿名 403 `FreeTierError` 当作出口级失败：桶间 failover + cordon + 绕过阈值立即换 IP（见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5）。
-   - 模型目录自 2026-10-02 起使用裸 ID（如 `big-pickle`）；旧 `opencode/big-pickle` 已失效。
-   - 配额错误：`FreeUsageLimitError` 表示该出口 IP 当前触发免费额度限制（按出口 IP / UTC 日独立计量、UTC 0 点重置）。传输失败、TLS EOF、超时不是 429，不得据此判断配额。
+1. **免费层协议事实（活体复测：2026-09-30/2026-10-02/2026-10-13/2026-10-17/**2026-10-24 字节级克隆消融**）——两层门**
+   - **层 1 形状门（403 `FreeTierError`）**：至少 **4** 个 distinct 工具，且 `function.name` 属于 OpenCode 内置工具集（`bash/edit/glob/grep/read/skill/task/todowrite/webfetch/websearch/write`），并且 `stream: true`。**schema/description 内容不校验**（4 真名 + 空 schema 亦 200）；UA 版本/头名（含 2.0 系改名）/`b3`/`traceparent`/`x-opencode-client` 值均**不敏感**。少于 4 个真名（1/2/3）、掺入改名工具、或 `stream: false` 均得到 403。默认 `ZEN_TOOLS_MODE=minimal` 注入 4 个合成最小 schema（pool 前四位=1.19.4 客户端实发的 `bash,edit,glob,read`）。旧的"≥2 真名"口径是 2026-09-30 时代结论，上游已收紧。
+   - **session ID 必须 descending 编码（opencode 1.19.0 起）**：`x-opencode-session` 必须是 descending 编码（`~((ms<<12)+counter)&0xFFFFFFFFFFFF`），同毫秒内 `counter < 64`。ascending 恒定 403 `FreeTierError`。`x-opencode-request`（`msg_`）仍为 ascending。1.19.4 客户端实发双头 `x-opencode-session` + `x-opencode-session-id`（同值），**不再发送** legacy `x-session-id` 稳定 UUID，也不重复发送 `x-opencode-request-id`；`x-opencode-project` 为 40-hex 工作区哈希（非 `global`）。
+   - **层 2 配额门（429 `FreeUsageLimitError`）**：按**出口 IP / UTC 日**独立计量成功调用，UTC 0 点重置（实测额度口径很小而 ~数百发探针即可烧穿一个 IP；`Retry-After` 精确指向 UTC0）。传输失败、TLS EOF、超时、403 均不烧额度，不得据此判断配额。**层 1 先于层 2 判定**（配额烧穿的 IP 上形状缺陷请求仍 403）。
+   - **排障红线（2026-10-24 教训）**：任何从桶出口发出的活体探针都会**消耗该 IP 当日的匿名额度**——窗口内的直刺实验尽量少而精、原样先行（clone-first），防止自己把全池烧成 429（当日"整窗 count=0 却全池 429"即由此而来：`egress_request` 账本不含探针流量）。
+   - 403 failover/cordon/换 IP 的**防御性语义保留**（见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5），但根因归因以两层门模型为准。
+   - 模型目录自 2026-10-02 起使用裸 ID（如 `big-pickle`）；旧 `opencode/big-pickle` 已失效。官方 1.19.4 实发 UA：`opencode/1.19.4 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4`（UA 值不敏感但保持镜像）。
    - 诊断与更多细节见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
 
 2. **回环限定**

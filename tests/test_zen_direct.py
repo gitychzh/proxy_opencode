@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from typing import Any
 
@@ -98,10 +99,18 @@ async def test_headers_reconstruct_captured_protocol() -> None:
     assert headers["Authorization"] == "Bearer public"
     assert headers["Content-Type"] == "application/json"
     assert headers["User-Agent"] == (
-        "opencode/1.18.32 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+        "opencode/1.19.4 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4"
     )
     assert headers["x-opencode-client"] == "cli"
-    assert headers["x-opencode-project"] == "global"
+    # The genuine 1.19.4 client sends a 40-hex workspace hash here (never
+    # the legacy "global" literal); the gateway mirrors it with a fixed
+    # instance-level sha1 when OPENCODE_ZEN_PROJECT_ID is unset.
+    assert re.fullmatch(r"[0-9a-f]{40}", headers["x-opencode-project"])
+    # The captured shape carries the minted session id TWICE and never the
+    # legacy `x-session-id` stable header nor a duplicated request id.
+    assert headers["x-opencode-session-id"] == headers["x-opencode-session"]
+    assert "x-session-id" not in headers
+    assert "x-opencode-request-id" not in headers
     assert zen_direct.is_valid_opencode_id(headers["x-opencode-session"], "ses_")
     assert zen_direct.is_valid_opencode_id(headers["x-opencode-request"], "msg_")
     # session id must be the descending encoding (2026-10-13 gate); request id ascending
@@ -146,10 +155,9 @@ async def test_body_bridge_note_by_default_and_merges_builtin_tools() -> None:
     # the fat opencode default prompt must NOT be injected
     assert "interactive CLI tool" not in msgs[0]["content"]
     assert msgs[1] == {"role": "user", "content": "hi"}
-    # free tier gate: minimal builtin schemas {bash, read} must be present
+    # free tier gate (2026-10-24): >= 4 real builtin names must be present
     names = {t["function"]["name"] for t in body["tools"]}
-    assert {"bash", "read"} <= names
-    assert "edit" not in names  # ZEN_TOOLS_MODE=minimal is the default
+    assert {"bash", "edit", "glob", "read"} <= names
     assert body["tool_choice"] == "auto"
     await adapter.aclose()
 
@@ -167,21 +175,21 @@ async def test_body_tools_mode_all_restores_full_builtin_list() -> None:
 
 
 @pytest.mark.asyncio
-async def test_body_minimal_injection_is_two_tiny_schemas() -> None:
-    """Live ablation 2026-09-30: the gate only needs >=2 tools with builtin
-    names and ignores their schemas, so the mandatory fingerprint drops from
-    ~1,970 prompt tokens to ~60."""
+async def test_body_minimal_injection_is_four_tiny_schemas() -> None:
+    """Live ablation 2026-10-24: the shape gate tightened to >= 4 distinct
+    builtin names; schemas stay un-inspected, so the mandatory fingerprint
+    still costs only ~120 prompt tokens with tiny descriptions."""
     adapter = ZenDirectAdapter(make_settings())
     body = adapter._build_body(
         {"model": "big-pickle", "messages": [{"role": "user", "content": "hi"}]},
         "big-pickle",
     )
     tools = body["tools"]
-    assert len(tools) == 2
+    assert len(tools) == 4
     names = {t["function"]["name"] for t in tools}
-    assert names == {"bash", "read"}
+    assert names == {"bash", "edit", "glob", "read"}
     # tiny: the whole injected set must stay far under the captured ~7.9k chars
-    assert len(json.dumps(tools)) < 400
+    assert len(json.dumps(tools)) < 800
     for t in tools:
         assert t["function"]["parameters"] == {"type": "object", "properties": {}}
     await adapter.aclose()
@@ -190,7 +198,8 @@ async def test_body_minimal_injection_is_two_tiny_schemas() -> None:
 @pytest.mark.asyncio
 async def test_body_minimal_injection_avoids_client_claimed_names() -> None:
     """Injecting a name the client already uses adds no distinct builtin name
-    (the gate counts names) and the old code dropped the builtin instead."""
+    (the gate counts names) so the pool skips it; the inject count must
+    still reach the four-name minimum."""
     adapter = ZenDirectAdapter(make_settings())
     client_tools = [
         {"type": "function", "function": {"name": n, "parameters": {}}}
@@ -205,24 +214,25 @@ async def test_body_minimal_injection_avoids_client_claimed_names() -> None:
         "big-pickle",
     )
     names = [t["function"]["name"] for t in body["tools"]]
-    # client tools kept verbatim, plus two injected names that do not collide
+    # client tools kept verbatim, plus four injected names that do not collide
+    # (pool order: bash*skip, edit, glob, read*skip, todowrite, skill)
     assert names.count("bash") == 1
     assert names.count("read") == 1
-    injected = [n for n in names if n in ("todowrite", "skill", "task", "list")]
-    assert len(injected) == 2
-    assert len(names) == 4
+    asserted = {n for n in names if n in ("edit", "glob", "todowrite", "skill", "task", "list")}
+    assert asserted == {"edit", "glob", "todowrite", "skill"}
+    assert len(names) == 6
     await adapter.aclose()
 
 
 @pytest.mark.asyncio
-async def test_body_captured2_mode_uses_two_captured_schemas() -> None:
+async def test_body_captured2_mode_uses_four_captured_schemas() -> None:
     adapter = ZenDirectAdapter(make_settings(zen_tools_mode="captured2"))
     body = adapter._build_body(
         {"model": "big-pickle", "messages": [{"role": "user", "content": "hi"}]},
         "big-pickle",
     )
     tools = body["tools"]
-    assert {t["function"]["name"] for t in tools} == {"bash", "read"}
+    assert {t["function"]["name"] for t in tools} == {"bash", "edit", "glob", "read"}
     # the captured schemas are far larger than the synthesized ones
     assert len(json.dumps(tools)) > 5000
     await adapter.aclose()
@@ -1048,7 +1058,10 @@ async def test_chat_400_is_not_an_egress_failure() -> None:
     await adapter.aclose()
 
 
-# ------------------------------------- free-tier egress-IP gate (2026-10-17)
+# ------------------------------------- free-tier 403 (shape/egress defensive)
+# 2026-10-17 measured egress-style failover; 2026-10-24 re-derived these as
+# the shape gate (>= 4 real builtin names) with the cordon kept defensive.
+# The behaviour contract below is unchanged.
 
 _FREE_TIER_BODY = {
     "type": "error",
