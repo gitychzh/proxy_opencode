@@ -159,6 +159,22 @@ async def test_unmapped_model_id_passes_through() -> None:
     assert secondary.calls[0]["model"] == "other/model"
 
 
+async def test_default_model_catches_unmapped_ids() -> None:
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(
+        primary,
+        zen_fallback_default_model="deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    )
+    primary.outcomes = [relay(429)]
+    secondary.outcomes = [{"id": "ok"}]
+
+    # "big-pickle" is the route layer's resolved zen id: no map entry, so the
+    # catch-all must be used — the backup gateway has no such model.
+    await adapter.chat({"model": "big-pickle"})
+
+    assert secondary.calls[0]["model"] == "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+
+
 async def test_backup_unreachable_raises_loudly() -> None:
     primary = FakeAdapter()
     adapter, secondary = make_adapter(primary)

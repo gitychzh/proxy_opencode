@@ -526,6 +526,47 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
 注：`openai-api` 仍存在于 Hermes 内置目录，只是不再出现在 picker，也没有凭据可
 用——这是预期终态，不是残留。
 
+### 2.3 备用链路：proxy_ms（ModelScope 聚合网关，2026-10-25）
+
+主链路（zen-direct → OpenCode Zen 免费层）**出口级**故障时自动切到同机
+`proxy_ms`，window 过后自动切回。机制与触发条件见
+`docs/ARCHITECTURE.md` §4 的「备用链路」小节；此处记运维口径。
+
+- **proxy_ms 本体**：ECS 宿主 `0.0.0.0:10003`（`/opt/proxy_ms/env.list`），
+  容器经 docker bridge 网关 `172.17.0.1:10003` 访问（**不要写 `/v1` 后缀**：
+  网关适配器以 `base_url + /v1/chat/completions` 拼路径，带 `/v1` 会 404）。
+  鉴权用 `env.list` 的 `CLIENT_KEYS`。
+- **配置（ECS `deploy/ecs/.env`）**：
+  ```
+  ZEN_FALLBACK_BASE_URL=http://172.17.0.1:10003
+  ZEN_FALLBACK_API_KEY=<proxy_ms CLIENT_KEYS>
+  ZEN_FALLBACK_HOLD_S=120
+  ZEN_FALLBACK_MODEL_MAP=big-pickle=deepseek-ai/DeepSeek-V4.1-Flash-1017
+  ZEN_FALLBACK_DEFAULT_MODEL=deepseek-ai/DeepSeek-V4.1-Flash-1017
+  ```
+  映射键是**路由层解析后的上游 ID**（公网别名已是 `big-pickle`）；兜底模型
+  兜住未命中项。改后 `docker compose up -d`（代码改动需 `--build`）。
+- **看状态**：
+  ```bash
+  curl -s http://127.0.0.1:10010/healthz   # fallback.engaged / hold_remaining_s
+  docker logs zen-gw --since 1h 2>&1 | grep -E "FALLBACK"
+  ```
+- **手动演练（不动生产容器）**：起一个临时容器把主链路指到死端口，打一次
+  请求即可看到 `FALLBACK ENGAGED` + 备用真实回包：
+  ```bash
+  docker run -d --rm --name zen-gw-probe --network host \
+    --env-file /opt/zen-gw/src/deploy/ecs/.env -e HOST=127.0.0.1 -e PORT=18080 \
+    -e OPENCODE_ZEN_BASE_URL=http://127.0.0.1:9 -e ZEN_BUN_TRANSPORT=0 \
+    -e ZEN_EGRESS_PROXIES= zen-gw:0.7 \
+    python -m uvicorn --factory proxy_opencode.app:create_app_from_env \
+      --host 127.0.0.1 --port 18080
+  ```
+  （2026-10-25 实测：非流式与流式均自动落到 proxy_ms 并返回正常内容，演练后
+  `docker rm -f zen-gw-probe`。）
+- **注意**：备用链路的成功调用**不消耗 zen 免费额度**，但会消耗 proxy_ms
+  上游（ModelScope）的额度；熔断保持窗口内不会对主链路重试，避免给已烧穿的
+  出口继续施压。
+
 ## 3. 验证与常用操作
 
 ```bash

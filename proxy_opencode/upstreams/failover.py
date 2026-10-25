@@ -61,6 +61,7 @@ class FailoverAdapter:
         self._primary = primary
         self.name = primary.name
         self._model_map = dict(settings.zen_fallback_model_map)
+        self._default_model = settings.zen_fallback_default_model
         self._hold_s = max(1.0, float(settings.zen_fallback_hold_s))
         # Secondary client: the plain OpenAI passthrough adapter pointed at
         # the backup gateway (proxy_ms), reusing its stream relay semantics.
@@ -141,9 +142,16 @@ class FailoverAdapter:
 
     async def _via_secondary(self, payload: dict[str, Any], reason: str) -> Any:
         body = dict(payload)
-        mapped = self._model_map.get(str(body.get("model") or ""))
+        requested = str(body.get("model") or "")
+        mapped = self._model_map.get(requested) or self._default_model
         if mapped:
             body["model"] = mapped
+        logger.warning(
+            "FALLBACK ROUTING: model %r -> %r via %s",
+            requested,
+            body.get("model"),
+            self._secondary_name,
+        )
         try:
             return await self._secondary.chat(body)
         except ConnectionError as exc:

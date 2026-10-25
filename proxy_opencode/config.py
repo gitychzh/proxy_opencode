@@ -258,6 +258,12 @@ class Settings:
     zen_fallback_api_key: str = ""
     zen_fallback_hold_s: float = 120.0
     zen_fallback_model_map: dict[str, str] = field(default_factory=dict)
+    # Catch-all for ids the map misses: the zen catalogue's bare ids can never
+    # exist on the backup gateway, so an unmapped id would be rejected there.
+    # NOTE the wrapper receives ids AFTER the route layer's alias resolution
+    # (the public alias deepseek-ai/deepseek-v4.1-flash arrives as big-pickle),
+    # so map keys must be the resolved upstream ids, not the public ones.
+    zen_fallback_default_model: str = ""
 
     @property
     def dev_open(self) -> bool:
@@ -508,4 +514,7 @@ def load_settings() -> Settings:
         zen_fallback_model_map=_model_map(
             os.environ.get("ZEN_FALLBACK_MODEL_MAP", "")
         ),
+        zen_fallback_default_model=os.environ.get(
+            "ZEN_FALLBACK_DEFAULT_MODEL", ""
+        ).strip(),
     )

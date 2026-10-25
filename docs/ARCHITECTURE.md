@@ -206,6 +206,43 @@ agent 代理 basic auth 双保险）。
   才返回 OpenAI 形状（data/metadata）。**标准 `/v1/models` 保持只列公开
   别名**，不要再造 models/model 等普通变体端点（防被模型扫描 agent 捕获）。
 
+### 备用链路（2026-10-25 落地）：zen-direct 故障 → proxy_ms
+
+网关在内置出口池之上再挂一条**跨供应商备用链路**：主链路 `zen-direct`
+（OpenCode Zen 免费层）发生**出口级**故障时，请求自动改由同一台 ECS 上的
+`proxy_ms`（ModelScope 聚合网关，宿主 `172.17.0.1:10003`，见
+`docs/OPERATIONS.md` §2.3）服务，故障窗口结束后自动回到主链路。
+
+- **实现形态**：`upstreams/failover.py` 的 `FailoverAdapter` 包在
+  `build_adapter` 的原生适配器外面（一条包装覆盖 chat/completions、
+  completions、responses、/v1/models 全部表面）；`ZEN_FALLBACK_BASE_URL`
+  为空时完全不包装，行为零变化。
+- **触发条件（仅出口级）**：`ConnectionError`（隧道/上游不可达），或上游
+  错误中继的状态码 ∈ {429 配额, 500/502/503/504}。**请求级 4xx
+  （模型不存在、鉴权失败）不切换**，原样回给客户端——那是客户端的问题，
+  换供应商只会把错误变成另一种错误。503 含 zen 适配器自己的
+  `egress_unavailable` 出口闸门（全池耗尽）。
+- **熔断语义**：触发后进入 `ZEN_FALLBACK_HOLD_S`（默认 120s）保持窗口，
+  窗口内**不再打主链路**（避免给已烧穿/被标记的出口继续施压），全部走备用；
+  窗口后第一个请求对主链路做**半开探测**——成功即闭合并记录
+  `FALLBACK RECOVERED`，失败则重新进入保持窗口。
+- **模型 ID 改写**：备用网关用 ModelScope 目录 ID（如
+  `deepseek-ai/DeepSeek-V4.1-Flash-1017`），与 zen 裸 ID 不可能重合。
+  **注意包装层拿到的是路由层已解析的 ID**（公网别名
+  `deepseek-ai/deepseek-v4.1-flash` 到这里已是 `big-pickle`），所以
+  `ZEN_FALLBACK_MODEL_MAP` 的键必须是解析后的上游 ID；
+  `ZEN_FALLBACK_DEFAULT_MODEL` 兜住所有未命中项，避免把 zen 裸 ID 丢给
+  备用网关被白名单拒掉。
+- **醒目提醒（三处，全部不含消息内容/密钥，符合日志红线）**：
+  1. 日志 WARNING `FALLBACK ENGAGED` / `FALLBACK ROUTING` /
+     `FALLBACK RECOVERED` / ERROR `FALLBACK FAILED`（备用也挂）；
+  2. `egress_request` 同源的 JSONL 事件 `fallback_engaged` /
+     `fallback_recovered` / `fallback_failed`；
+  3. `GET /healthz` 新增 `fallback` 块：
+     `{"engaged": true, "secondary": "...", "hold_remaining_s": 119.1}`。
+- **双侧全挂**：备用不可达时记 `FALLBACK FAILED` 并抛 `ConnectionError`
+  （客户端可重试语义），熔断状态保留，不会因备用失败而误判主链路已恢复。
+
 ## 5. 关键决策记录（ADR 摘要）
 
 | 决策 | 结论 | 理由 |
