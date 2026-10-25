@@ -83,11 +83,18 @@ def make_router(
 
     @router.get("/healthz")
     async def healthz(request: Request) -> dict[str, Any]:
+        adapter = request.app.state.adapter
+        status = (
+            adapter.fallback_status()
+            if hasattr(adapter, "fallback_status")
+            else None
+        )
         return {
             "status": "ok",
             "version": __version__,
             "upstream_mode": settings.upstream_mode,
             "dev_open": settings.dev_open,
+            **({"fallback": status} if status is not None else {}),
         }
 
     @router.get("/v1/models")

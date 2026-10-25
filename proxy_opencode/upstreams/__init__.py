@@ -12,7 +12,7 @@ from typing import Any, Protocol
 
 from ..config import Settings
 from ..egress.pool import EgressPool
-from . import openai_http, opencode_serve, zen_direct
+from . import failover, openai_http, opencode_serve, zen_direct
 from .openai_http import StreamRelay
 from .opencode_serve import ServeCompletion
 
@@ -47,11 +47,20 @@ class UpstreamAdapter(Protocol):
 def build_adapter(
     settings: Settings, pool: EgressPool | None = None
 ) -> UpstreamAdapter:
+    primary: UpstreamAdapter
     if settings.is_opencode_serve:
-        return opencode_serve.ServeAdapter(settings)
-    if settings.is_zen_direct:
-        return zen_direct.ZenDirectAdapter(settings, pool=pool)
-    return openai_http.OpenAIHttpAdapter(settings)
+        primary = opencode_serve.ServeAdapter(settings)
+    elif settings.is_zen_direct:
+        primary = zen_direct.ZenDirectAdapter(settings, pool=pool)
+    else:
+        primary = openai_http.OpenAIHttpAdapter(settings)
+    if settings.zen_fallback_base_url:
+        # Backup-chain failover (2026-10-25): wrap the primary so egress-level
+        # faults (quota 429 / 5xx / transport) hand chat over to the backup
+        # gateway (proxy_ms) with a prominent log + JSONL event + /healthz
+        # status, and traffic returns automatically after the hold window.
+        return failover.FailoverAdapter(primary, settings)
+    return primary
 
 
 __all__ = [

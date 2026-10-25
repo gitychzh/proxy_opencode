@@ -244,6 +244,21 @@ class Settings:
     #   ZEN_EGRESS_EVENT_LOG="/data/egress_events.jsonl"
     zen_egress_event_log: str = ""
 
+    # Backup chain failover (2026-10-25): when the zen-direct chain fails at
+    # the egress level (quota 429 / 5xx / transport), serve chat through a
+    # backup OpenAI-compatible gateway (proxy_ms, ModelScope aggregation,
+    # same ECS host) and switch back automatically. Empty base URL disables
+    # the feature entirely (wrapper never engages; the adapter is the bare
+    # primary, so tests and existing deployments see zero behaviour change).
+    #   ZEN_FALLBACK_BASE_URL=http://172.17.0.1:10003/v1
+    #   ZEN_FALLBACK_API_KEY=<proxy_ms CLIENT_KEYS value>
+    #   ZEN_FALLBACK_HOLD_S=120        (breaker hold window after a trip)
+    #   ZEN_FALLBACK_MODEL_MAP=deepseek-ai/deepseek-v4.1-flash=deepseek-ai/DeepSeek-V4.1-Flash-1017
+    zen_fallback_base_url: str = ""
+    zen_fallback_api_key: str = ""
+    zen_fallback_hold_s: float = 120.0
+    zen_fallback_model_map: dict[str, str] = field(default_factory=dict)
+
     @property
     def dev_open(self) -> bool:
         """No GATEWAY_API_KEYS configured -> open dev mode (loopback only use)."""
@@ -487,4 +502,10 @@ def load_settings() -> Settings:
         zen_egress_event_log=os.environ.get(
             "ZEN_EGRESS_EVENT_LOG", ""
         ).strip(),
+        zen_fallback_base_url=os.environ.get("ZEN_FALLBACK_BASE_URL", "").strip(),
+        zen_fallback_api_key=os.environ.get("ZEN_FALLBACK_API_KEY", "").strip(),
+        zen_fallback_hold_s=float(os.environ.get("ZEN_FALLBACK_HOLD_S", "120")),
+        zen_fallback_model_map=_model_map(
+            os.environ.get("ZEN_FALLBACK_MODEL_MAP", "")
+        ),
     )
