@@ -379,3 +379,84 @@ async def test_bun_response_aiter_lines_splits_and_closes() -> None:
     lines = [line async for line in resp.aiter_lines()]
     assert lines == ["data: one", "data: two", "last"]
     assert proc.killed  # closed once the stream ends
+
+
+# ------------------------------------------------- header (TTFB) deadline
+#
+# 2026-10-25 production evidence: five client requests in 12h finished at
+# 305-315s with a fast stream afterwards. The whole-exchange 300s
+# AbortController was the only bound, so a blackholed egress hop (dead
+# tunnel / ONT rebooting / CONNECT that never answers) consumed the entire
+# request budget before the failover ladder could try another bucket. The
+# header deadline is a separate, much shorter timer.
+
+
+async def test_post_env_carries_header_deadline(tmp_path: Path, monkeypatch) -> None:
+    bin_path, script = _write_assets(tmp_path)
+    transport = BunTransport(
+        bin_path=str(bin_path), script_path=str(script), ttfb_s=45.0
+    )
+    proc = _ok_proc([])
+    spawn = _install_spawn(monkeypatch, proc)
+    await transport.post(**_post_kwargs())
+    assert spawn["kwargs"]["env"]["ZEN_BUN_TTFB_MS"] == "45000"
+    assert spawn["kwargs"]["env"]["ZEN_BUN_TIMEOUT_MS"] == "12000"
+
+
+async def test_post_without_header_deadline_omits_env(
+    tmp_path: Path, monkeypatch
+) -> None:
+    bin_path, script = _write_assets(tmp_path)
+    transport = BunTransport(
+        bin_path=str(bin_path), script_path=str(script), ttfb_s=0.0
+    )
+    proc = _ok_proc([])
+    spawn = _install_spawn(monkeypatch, proc)
+    await transport.post(**_post_kwargs())
+    assert "ZEN_BUN_TTFB_MS" not in spawn["kwargs"]["env"]
+
+
+async def test_post_fails_fast_when_no_headers(tmp_path: Path, monkeypatch) -> None:
+    """A hop that never answers must fail in seconds, not in 300s."""
+
+    import asyncio
+    import time
+
+    bin_path, script = _write_assets(tmp_path)
+    transport = BunTransport(
+        bin_path=str(bin_path),
+        script_path=str(script),
+        meta_timeout_s=0.1,
+        ttfb_s=0.1,
+    )
+
+    class _Hanging(_FakeProcess):
+        async def readline(self) -> bytes:
+            await asyncio.sleep(10.0)
+            return b""
+
+    _install_spawn(monkeypatch, _Hanging(b"", []))
+    started = time.monotonic()
+    with pytest.raises(BunTransportError) as excinfo:
+        await transport.post(**_post_kwargs())
+    elapsed = time.monotonic() - started
+    # 12s total budget; the header budget is 0.1 + 0.1 meta slack.
+    assert elapsed < 2.0
+    assert "before response headers" in str(excinfo.value)
+
+
+async def test_header_deadline_never_exceeds_whole_request_budget(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A ttfb larger than timeout_s must not extend the wait."""
+
+    bin_path, script = _write_assets(tmp_path)
+    transport = BunTransport(
+        bin_path=str(bin_path), script_path=str(script), ttfb_s=999.0
+    )
+    proc = _ok_proc([])
+    spawn = _install_spawn(monkeypatch, proc)
+    await transport.post(**_post_kwargs())
+    # The script side still gets the ttfb it was configured with; the python
+    # wait budget stays bounded by timeout_s.
+    assert spawn["kwargs"]["env"]["ZEN_BUN_TTFB_MS"] == "999000"

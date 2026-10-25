@@ -20,6 +20,8 @@ import json
 import re
 from typing import Any
 
+from ..errors import InvalidRequest
+
 CONTRACT_HEADER = """You are being called through an OpenAI-compatible API that supports
 function calling. The caller program executes tools for you; you must
 request them by emitting JSON.
@@ -137,7 +139,7 @@ def build_prompt(
             parts.append(f"tool_result({name}):\n{_msg_text(msg.get('content'))}")
 
     if not any(p.startswith(("user:", "tool_result")) for p in parts):
-        raise ValueError("messages contain no usable user content")
+        raise InvalidRequest("messages contain no usable user content")
     return "\n\n".join(parts)
 
 

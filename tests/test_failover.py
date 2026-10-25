@@ -242,3 +242,77 @@ async def test_build_adapter_wraps_when_configured() -> None:
     adapter = build_adapter(settings)
     assert hasattr(adapter, "fallback_status")
     assert adapter.name == "openai"
+
+
+# ------------------------------------------------ recovery hysteresis
+#
+# 2026-10-25 production evidence: a primary that served roughly every other
+# request produced engaged/recovered churn at request rate (57 engaged and
+# 11 recovered events in a day, six round trips in 20 minutes). Every cycle
+# switched the model served to the client, because the backup speaks a
+# different id.
+
+
+async def test_recovery_needs_consecutive_successes(caplog) -> None:  # type: ignore[no-untyped-def]
+    import time
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(
+        primary, zen_fallback_hold_s=3600.0, zen_fallback_recover_after=2
+    )
+    primary.outcomes = [relay(429)]
+    secondary.outcomes = [{"id": "via-ms"}]
+    await adapter.chat({"model": "m"})
+
+    # Hold window over: the next requests are half-open probes.
+    adapter._fallback_until = time.monotonic() - 1.0
+    with caplog.at_level("WARNING", logger="proxy_opencode.failover"):
+        primary.outcomes = [{"id": "p1"}]
+        assert await adapter.chat({"model": "m"}) == {"id": "p1"}
+        assert "FALLBACK RECOVERED" not in caplog.text
+
+        primary.outcomes = [{"id": "p2"}]
+        assert await adapter.chat({"model": "m"}) == {"id": "p2"}
+        assert caplog.text.count("FALLBACK RECOVERED") == 1
+
+
+async def test_failure_resets_the_recovery_streak() -> None:
+    import time
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(
+        primary, zen_fallback_hold_s=3600.0, zen_fallback_recover_after=2
+    )
+    primary.outcomes = [relay(429)]
+    secondary.outcomes = [{"id": "via-ms"}]
+    await adapter.chat({"model": "m"})
+
+    adapter._fallback_until = time.monotonic() - 1.0
+    primary.outcomes = [{"id": "p1"}]
+    await adapter.chat({"model": "m"})
+    # One failure between two successes re-arms and zeroes the streak.
+    primary.outcomes = [relay(503)]
+    secondary.outcomes = [{"id": "via-ms-2"}]
+    assert await adapter.chat({"model": "m"}) == {"id": "via-ms-2"}
+    assert adapter.fallback_status()["engaged"] is True
+
+
+async def test_re_trip_is_logged_as_continuation(caplog) -> None:  # type: ignore[no-untyped-def]
+    """The second trip of one outage must not read like a new incident."""
+
+    import time
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary, zen_fallback_hold_s=3600.0)
+    primary.outcomes = [relay(429)]
+    secondary.outcomes = [{"id": "via-ms"}]
+    await adapter.chat({"model": "m"})
+
+    adapter._fallback_until = time.monotonic() - 1.0
+    primary.outcomes = [relay(429)]
+    secondary.outcomes = [{"id": "via-ms-2"}]
+    caplog.clear()
+    with caplog.at_level("INFO", logger="proxy_opencode.failover"):
+        await adapter.chat({"model": "m"})
+    assert caplog.text.count("FALLBACK ENGAGED") == 0
+    assert caplog.text.count("FALLBACK RE-ENGAGED") == 1

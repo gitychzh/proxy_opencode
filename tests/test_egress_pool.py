@@ -410,12 +410,14 @@ async def test_quota_cordon_lifted_when_isp_changes_ip(tmp_path) -> None:  # typ
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_quota_cordon_survives_out_of_prefix_ip_change(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """A foreign address (eth leg flapping onto wifi) must NOT lift cordon.
+async def test_quota_cordon_lifted_for_out_of_prefix_ip_change(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A changed IP lifts the IP-scoped cordon even outside ``expect_prefix``.
 
-    This is exactly the measured mixed-bucket failure: the leg's truth is
-    verified by the prefix, and a cordon must never be lifted for an IP
-    the bucket is not supposed to own.
+    ``expect_prefix`` is an audit allowlist (ARCHITECTURE §6), not an
+    availability gate: on 2026-10-25 owin10-telecom dialled a legitimate
+    ``117.95.178.237`` that no prefix listed, so gating the lift here kept a
+    perfectly healthy bucket benched until the window reset and turned 11 of
+    21 rotations into recorded failures. The mismatch is reported instead.
     """
 
     pool = EgressPool(
@@ -432,9 +434,10 @@ async def test_quota_cordon_survives_out_of_prefix_ip_change(tmp_path) -> None: 
             json={"ready": True, "egress_ip": "9.9.9.9"}
         )
         await pool._probe_one(state)  # noqa: SLF001
-        assert state.cordoned(time.monotonic()) is True
-        assert "free_quota" in state.cordon_reason
-        assert [e["event"] for e in read()] == ["egress_ip_observed"]
+        assert state.cordoned(time.monotonic()) is False
+        assert state.cordon_reason == ""
+        events = [e["event"] for e in read()]
+        assert events == ["egress_ip_observed", "cordon_lifted", "prefix_mismatch"]
     finally:
         cleanup()
 
@@ -457,7 +460,13 @@ async def test_quota_cordon_not_lifted_when_probe_not_ready(tmp_path) -> None:  
         )
         await pool._probe_one(state)  # noqa: SLF001
         assert state.cordoned(time.monotonic()) is True
-        assert [e["event"] for e in read()] == ["egress_ip_observed"]
+        # ready=false is an unhealthy transition: the bucket must stop
+        # receiving work immediately instead of after three request failures.
+        assert state.healthy is False
+        assert [e["event"] for e in read()] == [
+            "egress_ip_observed",
+            "probe_failed",
+        ]
     finally:
         cleanup()
 
@@ -556,3 +565,129 @@ def test_lease_client_requires_started_egress() -> None:
         _ = Lease(state).client
     state.client = httpx.AsyncClient()
     assert isinstance(Lease(state).client, httpx.AsyncClient)
+
+
+# ------------------------------------------------- cordon state transitions
+#
+# 2026-10-25 production evidence: a drained pool re-cordoned an
+# already-cordoned bucket on every subsequent 429 — 48 ERROR lines per 6h
+# and ~250 `cordon` events per day for three buckets, drowning the ledger
+# that is the project's only attribution tool.
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_repeated_429_reports_one_cordon_transition(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    pool = make_pool("a")
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    state.egress_ip = "3.3.3.3"
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        for _ in range(5):
+            lease = await pool.acquire()
+            await pool.release(lease, ok=False, kind="http_429", retry_after_s=27000.0)
+        cordons = [e for e in read() if e["event"] == "cordon"]
+        assert len(cordons) == 1
+        assert cordons[0]["cordon_reason"] == "free_quota_exhausted"
+        # The verdict still holds for the whole day.
+        assert state.cordoned(time.monotonic()) is True
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_soft_429_cordons_for_retry_after_not_the_whole_day(
+    tmp_path,  # type: ignore[no-untyped-def]
+) -> None:
+    """A short Retry-After is a burst throttle, not a burned daily quota.
+
+    Benching the bucket until UTC midnight for a 60s throttle cost it the
+    rest of the day's capacity.
+    """
+
+    pool = make_pool("a")
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        lease = await pool.acquire()
+        await pool.release(lease, ok=False, kind="http_429", retry_after_s=60.0)
+        assert state.cordon_reason.startswith("free_quota_soft")
+        remaining = state.cordon_remaining_s(time.monotonic())
+        assert 25.0 <= remaining <= 65.0
+        assert seconds_to_window_reset() > 3000.0  # sanity: window is hours away
+        cordons = [e for e in read() if e["event"] == "cordon"]
+        assert cordons[0]["cordon_reason"] == "free_quota_soft"
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_late_hard_429_does_not_shorten_a_live_cordon() -> None:
+    """A soft 429 arriving after a hard one must not reopen the bucket."""
+
+    pool = make_pool("a")
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    lease = await pool.acquire()
+    await pool.release(lease, ok=False, kind="http_429", retry_after_s=27000.0)
+    before = state.cordoned_until
+    lease = await pool.acquire()
+    await pool.release(lease, ok=False, kind="http_429", retry_after_s=30.0)
+    assert state.cordoned_until == before
+    assert state.cordon_reason.startswith("free_quota_exhausted")
+
+
+# ------------------------------------------------------- probe robustness
+#
+# 2026-10-25: a ConnectTimeout against an agent escaped to the probe loop,
+# which logged a full traceback as "probe failed unexpectedly" and left
+# healthy/last_probe_ok untouched — the dead bucket kept receiving client
+# work until three request-level failures piled up ("10 consecutive
+# failures (transport)" streaks, 305s header stalls on the same bucket).
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_probe_connect_timeout_marks_bucket_unhealthy(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    pool = make_pool("a")
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    state.egress_ip = "3.3.3.3"
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://a:10001/healthz").mock(
+            side_effect=httpx.ConnectTimeout("tailnet down")
+        )
+        await pool._probe_one(state)  # noqa: SLF001 - must not raise
+        assert state.healthy is False
+        assert state.last_probe_ok is False
+        assert [e["event"] for e in read()] == ["probe_failed"]
+        assert state.egress_ip == "3.3.3.3"  # nothing invented from a dead probe
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_probe_failure_logs_once_per_transition(
+    tmp_path, caplog  # type: ignore[no-untyped-def]
+) -> None:
+    pool = make_pool("a")
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://a:10001/healthz").mock(
+            side_effect=httpx.ConnectTimeout("tailnet down")
+        )
+        with caplog.at_level("WARNING", logger="proxy_opencode.egress"):
+            for _ in range(3):
+                await pool._probe_one(state)  # noqa: SLF001
+        assert len([e for e in read() if e["event"] == "probe_failed"]) == 1
+        assert caplog.text.count("bucket marked unhealthy") == 1
+    finally:
+        cleanup()

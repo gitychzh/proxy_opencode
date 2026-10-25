@@ -26,7 +26,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from ..config import Settings
-from ..errors import GatewayHttpError, openai_error
+from ..errors import GatewayHttpError, InvalidRequest, openai_error
 from ..registry import ModelRegistry, UnknownModelError
 from ..upstreams.fields import filter_payload
 from ..upstreams.opencode_serve import ServeError, WaitTimeoutError
@@ -230,9 +230,29 @@ async def dispatch(
     except ConnectionError as exc:
         call.log(logger, 502)
         return on_error(502, str(exc), "api_connection_error", "upstream_unreachable")
-    except ValueError as exc:
+    except InvalidRequest as exc:
+        # Only an explicit request-shape fault is the client's fault.
         call.log(logger, 400)
         return on_error(400, str(exc), "invalid_request_error", None)
+    except ValueError as exc:
+        # A bare ValueError from deep inside an adapter is an accident in the
+        # gateway (an upstream body that failed to parse, a bad ``int()``),
+        # not a malformed client request. Answering 400 here blamed the
+        # caller and also suppressed the egress failover ladder, which never
+        # retries request-level errors (2026-10-25 production instance).
+        call.log(logger, 500)
+        logger.error(
+            "adapter raised an unexpected ValueError",
+            extra={
+                "request_id": call.request_id,
+                "model": call.upstream_model,
+                "client": call.client,
+                "error": type(exc).__name__,
+            },
+        )
+        return on_error(
+            500, "internal gateway error while calling the upstream", "api_error", None
+        )
     except Exception:
         call.log(logger, 500)
         logger.exception(

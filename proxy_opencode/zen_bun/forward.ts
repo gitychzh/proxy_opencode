@@ -25,11 +25,15 @@
 //   ZEN_UPSTREAM_BASE    upstream base, e.g. https://opencode.ai/inference/openai/v1
 //   ZEN_BUN_HEADERS      JSON object of request headers (Host excluded)
 //   ZEN_BUN_TIMEOUT_MS   hard deadline for the whole fetch (default 300000)
+//   ZEN_BUN_TTFB_MS      deadline for the response HEADERS only (default 60000,
+//                        0 disables). A blackholed egress hop otherwise burns
+//                        the whole 300s before the caller can fail over.
 //   HTTPS_PROXY          optional bucket agent (HTTP CONNECT) — set by caller
 
 const UPSTREAM = (process.env.ZEN_UPSTREAM_BASE ?? "").replace(/\/+$/, "");
 const PATH = process.argv[2] ?? "/chat/completions";
 const TIMEOUT_MS = Number(process.env.ZEN_BUN_TIMEOUT_MS ?? "300000") || 300000;
+const TTFB_MS = Number(process.env.ZEN_BUN_TTFB_MS ?? "60000") || 0;
 
 // hop-by-hop names the gateway must not see relayed (bun sets its own
 // Host/Content-Length; the proxy connection layer is not the caller's).
@@ -74,6 +78,17 @@ async function main(): Promise<number> {
 
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
+  // Header deadline. Cleared as soon as fetch() resolves: from that point on
+  // the silence budget belongs to the caller's stream watchdog, which is
+  // measured (not guessed) on the SSE body.
+  let ttfbFired = false;
+  let ttfbTimer: ReturnType<typeof setTimeout> | undefined;
+  if (TTFB_MS > 0 && TTFB_MS < TIMEOUT_MS) {
+    ttfbTimer = setTimeout(() => {
+      ttfbFired = true;
+      ac.abort();
+    }, TTFB_MS);
+  }
   try {
     const body = await readStdinBody();
     const res = await fetch(url, {
@@ -83,6 +98,10 @@ async function main(): Promise<number> {
       redirect: "manual",
       signal: ac.signal,
     });
+    if (ttfbTimer !== undefined) {
+      clearTimeout(ttfbTimer);
+      ttfbTimer = undefined;
+    }
     const echo: Record<string, string> = {};
     for (const name of ECHO_RESPONSE_HEADERS) {
       const value = res.headers.get(name);
@@ -105,7 +124,11 @@ async function main(): Promise<number> {
     }
     return 0;
   } catch (exc: unknown) {
-    const name = exc instanceof Error ? exc.name : "unknown";
+    const name = ttfbFired
+      ? "TtfbTimeout"
+      : exc instanceof Error
+        ? exc.name
+        : "unknown";
     const message = exc instanceof Error ? String(exc.message).slice(0, 200) : "unknown";
     process.stderr.write(
       `META ${JSON.stringify({ status: 0, error: `${name}: ${message}` })}\n`,
@@ -113,6 +136,7 @@ async function main(): Promise<number> {
     return 1;
   } finally {
     clearTimeout(timer);
+    if (ttfbTimer !== undefined) clearTimeout(ttfbTimer);
   }
 }
 

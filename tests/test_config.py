@@ -189,3 +189,32 @@ def test_builtin_public_models_use_env_parsing():
     assert s.public_models == config._parse_public_models(
         ",".join(config.DEFAULT_PUBLIC_MODELS)
     )
+
+
+def test_ttfb_deadline_default_and_env(monkeypatch):
+    """The header deadline is separate from the 300s whole-request budget.
+
+    2026-10-25: without it a blackholed egress hop cost 305-315s per client
+    request before the failover ladder could try another bucket.
+    """
+
+    monkeypatch.setenv("UPSTREAM_MODE", "zen-direct")
+    monkeypatch.delenv("ZEN_TTFB_S", raising=False)
+    s = config.load_settings()
+    assert s.zen_ttfb_s == 60.0
+    assert s.zen_ttfb_s < s.zen_timeout_s
+
+    monkeypatch.setenv("ZEN_TTFB_S", "12.5")
+    assert config.load_settings().zen_ttfb_s == 12.5
+    # 0 disables the extra timer (legacy behaviour)
+    monkeypatch.setenv("ZEN_TTFB_S", "0")
+    assert config.load_settings().zen_ttfb_s == 0.0
+
+
+def test_fallback_recover_after_floor(monkeypatch):
+    monkeypatch.setenv("UPSTREAM_MODE", "zen-direct")
+    monkeypatch.delenv("ZEN_FALLBACK_RECOVER_AFTER", raising=False)
+    assert config.load_settings().zen_fallback_recover_after == 2
+    # A nonsense value must not disable recovery entirely.
+    monkeypatch.setenv("ZEN_FALLBACK_RECOVER_AFTER", "0")
+    assert config.load_settings().zen_fallback_recover_after == 1

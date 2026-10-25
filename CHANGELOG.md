@@ -7,6 +7,65 @@
 
 ### Fixed
 
+- **fix(errors): 只有显式请求错才回 400，其余 ValueError 一律 500** — 管线把适配器
+  抛出的**任何** `ValueError` 映射成 `invalid_request_error`，包括上游响应体解析
+  意外（线上 2026-10-25 一例：2.2s、`usage=null`、HTTP 400）。后果有两层：把上游
+  故障说成"你的请求有错"，且请求级 4xx **不参与桶间 failover**，等于同时损失可用
+  性。新增 `errors.InvalidRequest(ValueError)` 作为唯一的客户端错标记
+  （`_build_body` / `tools_contract` / `anthropic_proto` 三处校验改用它），
+  `dispatch` 仅对 `InvalidRequest` 回 400，其余 `ValueError` 回 500 并记 ERROR
+  （不带正文）。同时 `_aggregate_sse` 对非数值 `created` 容忍。测试
+  `test_bare_valueerror_from_adapter_is_a_500_not_a_400` /
+  `test_invalid_request_still_maps_to_400`。
+
+- **fix(zen): 上游跳增加首字节（响应头）超时** — 生产实测 12h 内 5 次客户端请求
+  在 305–315s 完成、其后流本身只需 0.5–4s：`zen_timeout_s=300` 是整个交换的唯一
+  上界，黑洞隧道（agent 掉线 / ONT 重启 / CONNECT 不响应）会用掉全部预算才轮到换
+  桶。`forward.ts` 新增 `ZEN_BUN_TTFB_MS`（响应头到达即清除该定时器，之后的静默
+  交给既有流看门狗），Python 侧 `post()` 的 META 等待也改用该预算兜底，配置项
+  `ZEN_TTFB_S`（默认 60s，0 关闭）。同时 `_log_failover` 带上传输失败原因——此前
+  300s 悬挂在日志里**零痕迹**，因此长期未被发现。测试
+  `test_post_fails_fast_when_no_headers` /
+  `test_post_env_carries_header_deadline` /
+  `test_ttfb_deadline_default_and_env`。
+- **fix(egress): 探针传输失败即判不健康（消灭僵尸桶）** — `_probe_one` 的
+  `ConnectTimeout` 会逃逸到探针循环，被 `logger.exception` 打成完整 traceback
+  「probe failed unexpectedly」，且 `healthy`/`last_probe_ok` 完全不更新：agent
+  已死的桶继续接客，直到 3 次请求级失败（线上出现「10 consecutive failures
+  (transport)」连续串与同桶 305s 悬挂）。现在传输异常/未就绪一律落为
+  `healthy=false`、`probe_failed` 事件、单行 WARNING（仅按状态跃迁记录），探针
+  改用共享连接池。测试 `test_probe_connect_timeout_marks_bucket_unhealthy` /
+  `test_probe_failure_logs_once_per_transition`。
+- **fix(egress): cordon 只在状态跃迁时记账 + 软 429 缩短租约** — 每个 429 都会
+  重新 cordon 到 UTC0 并重发 ERROR 与 `cordon` 事件（单 6h 48 条 ERROR、单日
+  ~250 条事件），把唯一可用于归因的事件账本淹掉；且 `Retry-After` 为软限流
+  （≤3600s）时同样被禁到当日窗口末，等于一个 30s 节流罚掉一整天容量。现在重复
+  判决只静默延长、跃迁才记账，软 429 按 `Retry-After` 设短租约，更短的判决不得
+  覆盖更长的存活 cordon。测试 `test_repeated_429_reports_one_cordon_transition` /
+  `test_soft_429_cordons_for_retry_after_not_the_whole_day` /
+  `test_late_hard_429_does_not_shorten_a_live_cordon`。
+- **fix(egress): `expect_prefix` 降级为审计字段** — 前缀是手工维护的白名单，却被
+  当作「解除 cordon」与「轮换成功」的硬前置。线上 owin10-telecom 合法出口
+  `117.95.178.237`（及多个 `49.x`/`121.234.x`）不在名单内，导致 cordon 永不解除、
+  单日 11/21 次轮换被判失败，与 ARCHITECTURE §6「前缀只作审计」自相矛盾。现在 IP
+  真的变化即可解除 IP 域 cordon 并接受轮换结果，不符时记 WARNING +
+  `prefix_mismatch` 事件，提醒维护名单。`rotate` 仍拒绝「IP 未变」（ISP 重发同址）。
+  测试 `test_quota_cordon_lifted_for_out_of_prefix_ip_change` /
+  `test_prefix_violation_accepted_and_flagged`。
+- **fix(failover): 熔断闭合加迟滞，抑制抖动** — 单次主链路成功即 `FALLBACK
+  RECOVERED`、单次失败即 `FALLBACK ENGAGED`，主链路约一半成功率时按请求速率来回
+  切换（线上单日 57 engaged / 11 recovered，20 分钟内 6 次往返），每次切换都把
+  客户端正在用的模型换成备用网关的 ID。改为连续 N 次成功才闭合
+  （`ZEN_FALLBACK_RECOVER_AFTER`，默认 2），同一轮故障内的再次跳闸记为 INFO
+  `FALLBACK RE-ENGAGED`（事件保留 `re_trip` 字段）。备用返回错误时释放窗口的
+  既有语义不变。测试 `test_recovery_needs_consecutive_successes` /
+  `test_failure_resets_the_recovery_streak` /
+  `test_re_trip_is_logged_as_continuation`。
+- **fix(egress): 免费层 403 触发也受 30 分钟轮换下限约束** — `should_rotate_on_
+  free_tier` 此前不看 `HARD_ROTATE_MIN_INTERVAL_S`，形状门若收紧会按 403 频率
+  连续重启光猫；body/形状故障换 IP 无效，故与硬 429 路径统一。测试
+  `test_free_tier_trigger_respects_the_rotation_floor`。
+
 - **fix(zen): body 门是「prompt 快照新鲜度」而非「真身文本」** — hermes 端到端
   `429 insufficient balance`（备用链路 proxy_ms 计费错误原样透传）+ 主链路三桶
   同时 `429 FreeUsageLimitError`。同出口 IP、同分钟、同 bun 传输、每次新 mint

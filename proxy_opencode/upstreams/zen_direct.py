@@ -93,6 +93,7 @@ import httpx
 
 from ..config import Settings
 from ..egress.pool import EgressPool, Lease
+from ..errors import InvalidRequest
 from .openai_http import ResponseLike, StreamRelay, _raw_relay_body
 from .zen_bun_transport import BunTransport, BunTransportError
 
@@ -418,17 +419,30 @@ def _retry_after_seconds(
     return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
 
 
-def _log_failover(*, kind: str, remaining: int) -> None:
+def _log_failover(*, kind: str, remaining: int, detail: str = "") -> None:
     """Record one upstream failure handed to the failover loop.
 
     Counts live in the message body (they are not whitelisted extras);
-    never any request content.
+    never any request content. ``detail`` carries the transport failure
+    class/message — without it a 300s header stall on a dead tunnel left no
+    trace at all (2026-10-25: five 305-315s requests, zero error lines),
+    which is why the failure was invisible for days.
     """
 
+    suffix = f" [{detail}]" if detail else ""
     logger.warning(
         f"egress failover: upstream {kind} on one bucket, "
-        f"retrying on another ({remaining} attempt(s) left)"
+        f"retrying on another ({remaining} attempt(s) left){suffix}"
     )
+
+
+def _transport_error(exc: BaseException) -> ConnectionError:
+    """Wrap a transport failure once (the inner layer already prefixes it)."""
+
+    message = str(exc)
+    if message.startswith("zen request failed"):
+        return ConnectionError(message)
+    return ConnectionError(f"zen request failed: {message}")
 
 
 # StreamRelay close-hook outcome -> (pool release ok, kind).
@@ -601,8 +615,10 @@ class ZenDirectAdapter:
                 # ConnectionError).
                 attempts -= 1
                 if attempts <= 0:
-                    raise ConnectionError(f"zen request failed: {exc}") from exc
-                _log_failover(kind="transport", remaining=attempts)
+                    raise _transport_error(exc) from exc
+                _log_failover(
+                    kind="transport", remaining=attempts, detail=str(exc)[:120]
+                )
                 lease = await self._pool.acquire()
                 continue
             if isinstance(result, StreamRelay):
@@ -952,7 +968,7 @@ class ZenDirectAdapter:
         body["model"] = model
         messages = _clean_messages(body.get("messages") or [])
         if not messages:
-            raise ValueError(
+            raise InvalidRequest(
                 "messages must contain at least one usable turn "
                 "(content or tool_calls)"
             )
@@ -1088,7 +1104,13 @@ async def _aggregate_sse(resp: ResponseLike, model: str) -> dict[str, Any]:
         if chunk.get("id"):
             completion_id = str(chunk["id"])
         if chunk.get("created"):
-            created = int(chunk["created"])
+            # Upstream normally sends an int here; a stringified or malformed
+            # value must not abort the aggregation (it used to escape as a
+            # bare ValueError and reach the client as a fake 400).
+            try:
+                created = int(chunk["created"])
+            except (TypeError, ValueError):
+                pass
         if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
             usage = chunk["usage"]
         for choice in chunk.get("choices") or []:

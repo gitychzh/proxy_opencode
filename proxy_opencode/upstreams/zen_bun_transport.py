@@ -79,6 +79,7 @@ class BunTransport:
         bin_path: str,
         script_path: str,
         meta_timeout_s: float = 30.0,
+        ttfb_s: float = 60.0,
     ) -> None:
         self._bin = bin_path
         self._script = script_path
@@ -86,6 +87,12 @@ class BunTransport:
         # aborted). 300s request timeouts are bounded inside the script
         # via its AbortController; this only guards spawn/protocol hangs.
         self._meta_timeout = max(1.0, float(meta_timeout_s))
+        # Response-header deadline. The script enforces the same bound with
+        # its own timer; this second layer covers a child that hangs before
+        # the timer can fire (spawn stall, unread stderr). Keeping both is
+        # deliberate: the python guard is the one the adapter's failover
+        # ladder can rely on regardless of the script version on disk.
+        self._ttfb_s = max(0.0, float(ttfb_s))
 
     @classmethod
     def from_settings(cls, settings: object) -> BunTransport | None:
@@ -110,7 +117,11 @@ class BunTransport:
                 extra={"zen_bun_script": script_path},
             )
             return None
-        return cls(bin_path=bin_path, script_path=script_path)
+        return cls(
+            bin_path=bin_path,
+            script_path=script_path,
+            ttfb_s=float(getattr(settings, "zen_ttfb_s", 60.0) or 0.0),
+        )
 
     async def post(
         self,
@@ -152,6 +163,8 @@ class BunTransport:
         env["ZEN_UPSTREAM_BASE"] = base_url
         env["ZEN_BUN_HEADERS"] = json.dumps(dict(headers))
         env["ZEN_BUN_TIMEOUT_MS"] = str(int(timeout_s * 1000))
+        if self._ttfb_s > 0:
+            env["ZEN_BUN_TTFB_MS"] = str(int(self._ttfb_s * 1000))
         try:
             proc = await asyncio.create_subprocess_exec(
                 self._bin,
@@ -165,7 +178,13 @@ class BunTransport:
         except OSError as exc:
             raise BunTransportError(f"spawn bun failed: {exc}") from exc
 
-        deadline = timeout_s + self._meta_timeout
+        # Wait for META under the header deadline, not the whole-request one:
+        # a hop that never answers must cost one failover step, not the
+        # client's entire patience budget.
+        budget = timeout_s
+        if 0 < self._ttfb_s < budget:
+            budget = self._ttfb_s
+        deadline = budget + self._meta_timeout
         try:
             if proc.stdin is not None:
                 proc.stdin.write(body)
@@ -179,7 +198,10 @@ class BunTransport:
             )
         except (TimeoutError, OSError) as exc:
             await self._terminate(proc)
-            raise BunTransportError(f"bun forwarder stuck: {type(exc).__name__}") from exc
+            raise BunTransportError(
+                f"bun forwarder stuck before response headers "
+                f"({type(exc).__name__}, budget {deadline:.0f}s)"
+            ) from exc
         if not meta_line.startswith(_META_PREFIX_BYTES):
             await self._terminate(proc)
             raise BunTransportError("bun forwarder died before META")

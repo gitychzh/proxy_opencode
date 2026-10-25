@@ -45,6 +45,13 @@ _WINDOW_TZ = timezone(timedelta(hours=8))
 # counters must agree with the pool on "one window down to the second").
 window_tz = _WINDOW_TZ
 
+# A 429 whose Retry-After exceeds an hour is the upstream's per-IP daily
+# allowance verdict; anything shorter is a burst throttle that clears on its
+# own. Defined here (not in counters) because the pool needs it to pick the
+# cordon lifetime; counters imports it for the rotation trigger so the two
+# layers cannot drift apart.
+HARD_QUOTA_RETRY_AFTER_S = 3600.0
+
 logger = logging.getLogger("proxy_opencode.egress")
 
 
@@ -239,6 +246,8 @@ class EgressPool:
         self._failure_threshold = failure_threshold
         self._observer = observer
         self._probe_task: asyncio.Task[None] | None = None
+        self._probe_timeout = httpx.Timeout(10.0, connect=5.0)
+        self._probe_client: httpx.AsyncClient | None = None
         self._closed = False
         # Round-robin cursor for tie-breaking (see acquire).
         self._rr = itertools.count()
@@ -287,6 +296,11 @@ class EgressPool:
                 trust_env=False,
                 timeout=self._timeout,
             )
+        # Probes talk to the agents directly over the tailnet (never through
+        # a bucket's own proxy), so they get their own connection pool.
+        self._probe_client = httpx.AsyncClient(
+            trust_env=False, timeout=self._probe_timeout
+        )
         self._probe_task = asyncio.create_task(self._probe_loop())
         logger.info(
             "egress pool started",
@@ -301,6 +315,9 @@ class EgressPool:
                 await self._probe_task
             except asyncio.CancelledError:
                 pass
+        if self._probe_client is not None:
+            await self._probe_client.aclose()
+            self._probe_client = None
         for state in self._states:
             if state.client is not None:
                 await state.client.aclose()
@@ -431,61 +448,129 @@ class EgressPool:
         state.last_error = kind or "error"
         state.last_error_at = now
         if kind == "http_429":
-            # Deadline on the monotonic clock: duration to the wall-clock
-            # window reset, never the epoch timestamp itself.
-            state.cordoned_until = now + seconds_to_window_reset()
-            state.cordon_reason = "free_quota_exhausted (per-IP daily quota)"
-            logger.error(
-                "egress cordoned: upstream daily quota exhausted",
-                extra={
-                    "egress": state.spec.name,
-                    "reset_at": datetime.fromtimestamp(
-                        next_window_reset(), tz=_WINDOW_TZ
-                    ).isoformat(),
-                    "retry_after_s": round(retry_after_s, 1)
-                    if retry_after_s is not None
-                    else None,
-                },
+            # Soft throttling (short Retry-After) is NOT a daily-quota
+            # verdict: benching the bucket until UTC midnight for a 30s
+            # throttle used to cost the bucket the rest of the day. Only the
+            # hard shape (Retry-After > 1h, or none at all) means the IP's
+            # allowance is gone.
+            soft_s = (
+                retry_after_s
+                if retry_after_s is not None and retry_after_s <= HARD_QUOTA_RETRY_AFTER_S
+                else None
             )
-            EVENTS.emit(
-                "cordon",
-                egress=state.spec.name,
-                cordon_reason="free_quota_exhausted",
-                retry_after_s=retry_after_s,
-                egress_ip=state.egress_ip,
-            )
+            if soft_s is not None:
+                self._enter_cordon(
+                    state,
+                    now + max(30.0, float(soft_s)),
+                    "free_quota_soft (short Retry-After)",
+                    event_reason="free_quota_soft",
+                    detail={"retry_after_s": round(float(soft_s), 1)},
+                )
+            else:
+                self._enter_cordon(
+                    state,
+                    now + seconds_to_window_reset(),
+                    "free_quota_exhausted (per-IP daily quota)",
+                    event_reason="free_quota_exhausted",
+                    detail={
+                        "reset_at": datetime.fromtimestamp(
+                            next_window_reset(), tz=_WINDOW_TZ
+                        ).isoformat(),
+                        "retry_after_s": round(retry_after_s, 1)
+                        if retry_after_s is not None
+                        else None,
+                    },
+                )
         elif kind == "free_tier_rejected":
             # The free-tier gate flagged this bucket's egress IP: it cannot
             # serve the free tier until the agent re-dials (measured 2026-10-17:
             # byte-identical body 200s from a fresh IP, 403 from flagged IP).
             # Cordon it now so selection skips it while the rotator re-dials; a
             # successful rotation clears the cordon immediately.
-            state.cordoned_until = now + self._cordon_s
-            state.cordon_reason = "free_tier_rejected (egress IP flagged by gate)"
-            logger.error(
-                "egress cordoned: free-tier gate flagged this egress IP",
-                extra={"egress": state.spec.name, "egress_ip": state.egress_ip},
-            )
-            EVENTS.emit(
-                "cordon",
-                egress=state.spec.name,
-                cordon_reason="free_tier_rejected",
-                egress_ip=state.egress_ip,
+            self._enter_cordon(
+                state,
+                now + self._cordon_s,
+                "free_tier_rejected (egress IP flagged by gate)",
+                event_reason="free_tier_rejected",
+                detail={"egress_ip": state.egress_ip},
             )
         elif state.failures >= self._failure_threshold:
-            state.cordoned_until = now + self._cordon_s
-            state.cordon_reason = f"{state.failures} consecutive failures ({kind})"
-            logger.warning(
-                "egress cordoned after repeated failures",
-                extra={"egress": state.spec.name, "reason": state.cordon_reason},
-            )
-            EVENTS.emit(
-                "cordon",
-                egress=state.spec.name,
-                cordon_reason=state.cordon_reason[:120],
-                egress_ip=state.egress_ip,
+            self._enter_cordon(
+                state,
+                now + self._cordon_s,
+                f"{state.failures} consecutive failures ({kind})",
+                event_reason=None,
+                detail={"egress_ip": state.egress_ip},
             )
         self._notify_observer(state, ok, kind, retry_after_s)
+
+    def _enter_cordon(
+        self,
+        state: EgressState,
+        until: float,
+        reason: str,
+        *,
+        event_reason: str | None,
+        detail: dict[str, object],
+    ) -> None:
+        """Cordon a bucket, reporting only real state transitions.
+
+        Every 429 used to re-cordon and re-emit at ERROR even though the
+        bucket was already benched, so a drained pool produced 48 ERROR
+        lines per 6h and ~250 ``cordon`` events per day for three buckets —
+        the event ledger, which is the project's only attribution tool,
+        drowned in duplicates. Repeated verdicts now extend the deadline
+        silently (DEBUG) and only a fresh transition logs/emits.
+        """
+
+        core = reason.split(" (", 1)[0]
+        now_mono = time.monotonic()
+        live = state.cordoned(now_mono)
+        already = live and state.cordon_reason.split(" (", 1)[0] == core
+        # Never shorten or relabel a live cordon: a soft throttle arriving
+        # after a daily-quota verdict must not turn a full-day bench into a
+        # 30s cooldown (nor mislabel what the bucket is waiting for).
+        if already or (live and until <= state.cordoned_until):
+            if not already:
+                logger.debug(
+                    "shorter cordon verdict ignored",
+                    extra={"egress": state.spec.name, "reason": core},
+                )
+                return
+            state.cordoned_until = max(state.cordoned_until, until)
+            logger.debug(
+                "cordon extended (already cordoned)",
+                extra={"egress": state.spec.name, "reason": core},
+            )
+            return
+        state.cordoned_until = until
+        state.cordon_reason = reason
+        if core == "free_quota_exhausted":
+            logger.error(
+                "egress cordoned: upstream daily quota exhausted",
+                extra={"egress": state.spec.name, **detail},
+            )
+        elif core == "free_quota_soft":
+            logger.warning(
+                "egress cordoned: upstream soft throttle",
+                extra={"egress": state.spec.name, "reason": reason, **detail},
+            )
+        elif core == "free_tier_rejected":
+            logger.error(
+                "egress cordoned: free-tier gate flagged this egress IP",
+                extra={"egress": state.spec.name, **detail},
+            )
+        else:
+            logger.warning(
+                "egress cordoned after repeated failures",
+                extra={"egress": state.spec.name, "reason": reason, **detail},
+            )
+        EVENTS.emit(
+            "cordon",
+            egress=state.spec.name,
+            cordon_reason=event_reason or reason[:120],
+            **detail,
+        )
 
     def _notify_observer(
         self, state: EgressState, ok: bool, kind: str, retry_after_s: float | None
@@ -531,31 +616,54 @@ class EgressPool:
         after its rotate call was unreachable and the healthy new
         ``36.149.55.24`` stayed benched until the window reset.
 
-        Preconditions: the probe just succeeded (``ok``), the new IP
-        satisfies the bucket prefix, and the cordon reason is one of the
-        IP-scoped verdicts. Anything else (transport streaks, plain
-        cooldowns) keeps its deadline; a fresh IP that is also exhausted
-        will re-cordon on its own first 429.
+        Preconditions: the probe just succeeded (``ok``), the IP really
+        changed, and the cordon reason is one of the IP-scoped verdicts.
+        Anything else (transport streaks, plain cooldowns) keeps its
+        deadline; a fresh IP that is also exhausted will re-cordon on its
+        own first 429.
+
+        ``expect_prefix`` is deliberately NOT a precondition here (it is an
+        audit field, per ARCHITECTURE §6). Gating availability on a
+        hand-maintained CIDR allowlist deadlocked the pool: on 2026-10-25
+        owin10-telecom dialled a legitimate ``117.95.178.237`` that no
+        prefix listed, so its cordon could never lift and 11 of 21
+        rotations were recorded as failures while the bucket served fine.
+        A mismatch is reported instead of enforced.
         """
 
-        if not state.spec.matches_prefix(new_ip):
-            return
         reason = state.cordon_reason.split(" (", 1)[0]
         if reason not in self._IP_SCOPED_CORDON_REASONS:
             return
         state.cordoned_until = 0.0
         state.cordon_reason = ""
         state.failures = 0
+        in_prefix = state.spec.matches_prefix(new_ip)
         logger.info(
             "cordon lifted: egress IP changed, the old verdict does not carry over",
-            extra={"egress": state.spec.name, "cordon_reason": reason, "ip": new_ip},
+            extra={
+                "egress": state.spec.name,
+                "cordon_reason": reason,
+                "ip": new_ip,
+                "matches_prefix": in_prefix,
+            },
         )
         EVENTS.emit(
             "cordon_lifted",
             egress=state.spec.name,
             cordon_reason=reason,
             ip_to=new_ip,
+            matches_prefix=in_prefix,
         )
+        if not in_prefix:
+            # Keep the stale allowlist visible without letting it decide
+            # availability: operators need to refresh expect_prefix.
+            logger.warning(
+                "egress ip outside the configured prefix (audit only)",
+                extra={"egress": state.spec.name, "ip": new_ip},
+            )
+            EVENTS.emit(
+                "prefix_mismatch", egress=state.spec.name, egress_ip=new_ip
+            )
 
     async def _probe_one(self, state: EgressState) -> None:
         headers = {}
@@ -566,12 +674,35 @@ class EgressPool:
                 f"{self._agent_secret}:{self._agent_secret}".encode()
             ).decode()
             headers["Authorization"] = f"Basic {token}"
-        timeout = httpx.Timeout(10.0, connect=5.0)
-        async with httpx.AsyncClient(trust_env=False, timeout=timeout) as client:
-            resp = await client.get(
-                f"{state.spec.agent_url.rstrip('/')}/healthz", headers=headers
-            )
-            payload = resp.json() if resp.status_code == 200 else {}
+        # One long-lived client for every probe (three buckets every 30s used
+        # to open a fresh connection pool each round, which both churned
+        # sockets on the tailnet and made a connect timeout indistinguishable
+        # from a programming error).
+        client = self._probe_client
+        try:
+            if client is None:  # pragma: no cover - start() always sets it
+                async with httpx.AsyncClient(
+                    trust_env=False, timeout=self._probe_timeout
+                ) as one_off:
+                    resp = await one_off.get(
+                        f"{state.spec.agent_url.rstrip('/')}/healthz", headers=headers
+                    )
+                    payload = resp.json() if resp.status_code == 200 else {}
+            else:
+                resp = await client.get(
+                    f"{state.spec.agent_url.rstrip('/')}/healthz", headers=headers
+                )
+                payload = resp.json() if resp.status_code == 200 else {}
+        except (httpx.HTTPError, ValueError) as exc:
+            # A transport failure against the agent IS the health verdict.
+            # Previously the exception escaped to the probe loop, which
+            # logged a full traceback as "probe failed unexpectedly" and left
+            # ``healthy``/``last_probe_ok`` untouched: a dead agent kept
+            # receiving client work until three request-level failures piled
+            # up (2026-10-25: "10 consecutive failures (transport)" streaks
+            # and 305s header stalls on the same bucket).
+            self._mark_probe_failed(state, type(exc).__name__)
+            return
         now = time.monotonic()
         state.last_probe_at = now
         ok = bool(payload.get("ready")) and resp.status_code == 200
@@ -582,6 +713,7 @@ class EgressPool:
         # previous behaviour (default true).
         if payload.get("egress_probe_ok") is False:
             ok = False
+        previous_ok = state.healthy
         state.last_probe_ok = ok
         ip = payload.get("egress_ip") if isinstance(payload, dict) else None
         ip_changed = False
@@ -612,15 +744,48 @@ class EgressPool:
             state.egress_ip_at = str(payload.get("egress_ip_at") or "")
         # ip-matching is informational only (do not gate health)
         state.healthy = ok
-        if ok and ip_changed:
+        if not ok:
+            self._mark_probe_failed(
+                state,
+                f"status {resp.status_code}"
+                if resp.status_code != 200
+                else "agent not ready",
+                was_healthy=previous_ok,
+            )
+            return
+        if ip_changed:
             # Only lift on a *proven-good* probe: a ready=false answer with
             # a fresh IP means the agent is still mid-recovery.
             self._lift_ip_scoped_cordon(state, current_ip)
+        if previous_ok is False:
+            logger.info("egress agent reachable again", extra={"egress": state.spec.name})
         if state.healthy and state.failures > 0 and not state.cordoned(now):
             state.failures = 0
             state.cordon_reason = ""
             logger.info("egress recovered", extra={"egress": state.spec.name})
             EVENTS.emit("egress_recovered", egress=state.spec.name)
+
+    def _mark_probe_failed(
+        self, state: EgressState, reason: str, *, was_healthy: bool | None = None
+    ) -> None:
+        """Fold an unreachable/unready agent into the health state.
+
+        One WARNING line per transition (an agent that stays down must not
+        re-log every 30s) and no traceback: a connect timeout is a normal
+        operating condition on this network, not a defect.
+        """
+
+        state.last_probe_at = time.monotonic()
+        state.last_probe_ok = False
+        if was_healthy is None:
+            was_healthy = state.healthy
+        state.healthy = False
+        if was_healthy:
+            logger.warning(
+                "egress agent probe failed: bucket marked unhealthy",
+                extra={"egress": state.spec.name, "reason": reason[:80]},
+            )
+            EVENTS.emit("probe_failed", egress=state.spec.name, reason=reason[:80])
 
     # ---------------------------------------------------------------- views
 

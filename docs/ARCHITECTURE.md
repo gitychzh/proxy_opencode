@@ -95,20 +95,29 @@ cordon、换 IP、failover 语义与传输无关。
 - **选桶**：least-inflight + 轮转 tie-break，全空闲时不会钉死字母序最前的桶。
 - **健康**：`healthy = agent ready 且探针 HTTP 200`。设备侧 `ready` 还要求探针
   新鲜（`PROBE_READY_GRACE_S=45s`）且最近一次探测未失败；网关侧再把
-  `egress_probe_ok is False` 直接判 unhealthy（两层防御，防僵尸桶）。IP 前缀
-  匹配只作审计字段，不参与健康判定。
+  `egress_probe_ok is False` 直接判 unhealthy（两层防御，防僵尸桶）。**探针自身
+  的传输异常（连不上 agent）同样是健康判决**：落 `healthy=false` + `probe_failed`
+  事件，按状态跃迁记一行 WARNING，不打 traceback（2026-10-25 前此处异常会逃逸，
+  死 agent 继续接客直到 3 次请求级失败）。IP 前缀匹配只作审计字段，不参与健康
+  判定，也不作为 cordon 解除的前置。
 - **cordon**：429 烧穿（`free_quota_exhausted`，绑到窗口末）与 403 门槛
-  （`free_tier_rejected`）都是**对出口 IP 的判决**——探针观测到 IP 变化、新 IP
-  在 `expect_prefix` 内且就绪时立即解除（`cordon_lifted`）；外前缀 IP 与未就绪
-  不解除；传输连败 streak cordon 保持原 deadline。
+  （`free_tier_rejected`）都是**对出口 IP 的判决**——探针观测到 IP 变化且就绪时
+  立即解除（`cordon_lifted`，IP 不在 `expect_prefix` 内时另记 `prefix_mismatch`
+  审计事件）；传输连败 streak cordon 保持原 deadline。**软 429**（`Retry-After`
+  ≤3600s）是突发节流而非额度判决，只 cordon 该时长（`free_quota_soft`）。重复
+  判决只静默延长租约、不重复记事件，更短的判决不得覆盖更长的存活 cordon。
+- **首字节（TTFB）超时**：`ZEN_TTFB_S`（默认 60s；实测 TTFB p95=21s、p99=305s）只约束**响应头**，到达即解除；
+  之后的静默由 `STREAM_STALL_S` 管。此前整个交换只有 `zen_timeout_s=300` 一个
+  上界，隧道黑洞会让单个请求先烧掉 300s 再换桶（实测 305–315s）。
 - **换 IP**：每桶日窗 `[08:00, 08:00+1d)` Asia/Shanghai（=UTC0）计数，达到
   `ZEN_EGRESS_ROTATION` 阈值触发；硬 429 / 403 门槛绕过阈值立即触发，二者共用
   "每窗口每桶一次"去重与失败冷却（`ROTATION_RETRY_COOLDOWN_S=900s`），硬 429
   路径另有 `ZEN_EGRESS_ROTATE_MIN_INTERVAL_S=1800s` 下限防风暴。
   编排：标记 rotating（选桶跳过、在途自然收尾）→ `POST {agent}/rotate` →
-  轮询 `/healthz` 等 IP **变化且落在 `expect_prefix` 内** → 清 cordon、计数
-  归零。**`POST` 传输失败不等于最终失败**：命令可能已送达或 ONT 自行重拨，
-  照常轮询到 deadline，观测到合法新 IP 即成功；明确 HTTP 拒绝才是失败。
+  轮询 `/healthz` 等 IP **变化**（落在 `expect_prefix` 内只作审计，不符时记
+  `prefix_mismatch`，不再判失败）→ 清 cordon、计数归零。**`POST` 传输失败不等于
+  最终失败**：命令可能已送达或 ONT 自行重拨，照常轮询到 deadline，观测到合法新
+  IP 即成功；明确 HTTP 拒绝、或 IP 在 deadline 内未变，才是失败。
   计数快照落 `ZEN_EGRESS_COUNTS_PATH`（`/data` 卷），跨重启存活。
 - **流看门狗**：`STREAM_STALL_S`（上游静默）与 `CLIENT_STALL_S`（客户端写被
   背压阻塞）默认 60s；超时合成 `finish_reason:"length"` + `[DONE]` 优雅收尾，
@@ -132,7 +141,11 @@ cordon、换 IP、failover 语义与传输无关。
   {429, 500/502/503/504}（含 zen 自己的 `egress_unavailable` 闸门）。
   **请求级 4xx 不切换**——换供应商只会把错误变成另一种错误。
 - **熔断**：触发后进入 `ZEN_FALLBACK_HOLD_S`（默认 120s），窗口内不再打主链路；
-  窗口后第一个请求做半开探测，成功即闭合（`FALLBACK RECOVERED`），失败重入。
+  窗口后第一个请求做半开探测。**闭合需要连续 `ZEN_FALLBACK_RECOVER_AFTER`（默认 2）
+  次主链路成功**，任一次失败即清零重入——单次成功就闭合会让主链路半好时按请求速率
+  来回切换（2026-10-25：单日 57 engaged / 11 recovered，且每次都把客户端正在用的
+  模型换成备用的 ID）。同一轮故障内的再次跳闸只记 INFO `FALLBACK RE-ENGAGED`
+  （事件带 `re_trip=true`），真正的恢复才记 WARNING `FALLBACK RECOVERED`。
 - **模型改写**：包装层拿到的是路由层已解析的 ID（别名到此处已是 `big-pickle`），
   所以 `ZEN_FALLBACK_MODEL_MAP` 的键必须是解析后的上游 ID，
   `ZEN_FALLBACK_DEFAULT_MODEL` 兜住未命中项。

@@ -359,13 +359,22 @@ class EgressRotator:
     async def _wait_for_ip_change(
         self, spec: EgressSpec, ip_from: str | None, *, deadline: float
     ) -> IpPollResult:
-        """Poll /healthz until the IP is back, changed and in-prefix.
+        """Poll /healthz until the egress is back with a changed IP.
 
         An unchanged IP (the ISP sometimes re-issues the same address) is
         a failed rotation: logged loudly, recorded in the counters, and
-        the operator can re-trigger via the admin API. A changed IP that
-        violates ``expect_prefix`` is exactly the measured eth-falls-back-
-        to-wifi failure — refuse instead of silently leaking quota.
+        the operator can re-trigger via the admin API.
+
+        A *changed* IP outside ``expect_prefix`` is accepted and flagged.
+        The prefix is a manually maintained audit allowlist (ARCHITECTURE
+        §6), and enforcing it as a hard precondition cost real availability:
+        on 2026-10-25 owin10-telecom's legitimate ``117.95.178.237`` and
+        several ``49.x``/``121.234.x`` addresses were not listed, so 11 of
+        21 rotations were recorded as failures and the bucket stayed
+        cordoned for the rest of the day. The measured failure the check
+        was built for (opc2's eth leg silently falling back to the wifi
+        uplink) cannot happen on the Windows buckets, which pin the source
+        address with ``bind_source``.
         """
 
         while time.monotonic() < deadline:
@@ -376,12 +385,12 @@ class EgressRotator:
             if ip == ip_from:
                 continue
             if not spec.matches_prefix(ip):
-                return IpPollResult(
-                    ok=False,
-                    detail=(
-                        f"new ip {ip} outside bucket prefix {spec.expect_prefix}"
-                    ),
+                logger.warning(
+                    "rotated egress ip is outside the configured prefix "
+                    "(audit only; refresh ZEN_EGRESS_EXPECT_PREFIX)",
+                    extra={"egress": spec.name, "ip": ip},
                 )
+                EVENTS.emit("prefix_mismatch", egress=spec.name, egress_ip=ip)
             return IpPollResult(
                 ok=True,
                 detail=f"egress ip {ip_from or '?'} -> {ip}",

@@ -44,10 +44,15 @@ ZEN_BUN_TRANSPORT=1            # 传输栈门：生产必须走 bun
 ZEN_MARKER_MODE=full           # bridge 注记过不了 body 门
 PUBLIC_MODELS=deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle
 ZEN_EGRESS_ROTATE_MIN_INTERVAL_S=1800   # 硬 429 换 IP 下限，防轮换风暴
+ZEN_TTFB_S=60                  # 响应头超时（只约束首字节，默认 60s）
 ZEN_FALLBACK_BASE_URL / _API_KEY / _MODEL_MAP / _DEFAULT_MODEL   # 备用链路，见 §3
+ZEN_FALLBACK_RECOVER_AFTER=2   # 主链路连续成功多少次才算恢复（防抖动）
 ```
 
-**EXPECT_PREFIX 必须覆盖当日实际落段**，否则换 IP 后 `cordon_lifted` 解不开。
+**EXPECT_PREFIX 是审计字段，不是可用性开关**（2026-10-25 起）：IP 一变即解除
+IP 域 cordon 并接受轮换结果，前缀不符只记 `prefix_mismatch` 事件 + WARNING。它
+仍应保持与当日实际落段同步——名单长期漂移会让审计事件失去意义（线上
+`owin10-telecom` 落在 `117.95.x`/`49.x`，名单只写了 `106.x`/`121.x`）。
 
 ### 2.1 备用链路运维（proxy_ms）
 
@@ -129,6 +134,15 @@ IP 解决。**不得仅凭 429 触发换 IP**（2026-10-25 曾因此单日换 IP
 `403 FreeTierError` = 形状门（<4 个真名内置工具或 `stream:false`）+ 出口 IP 门槛
 （防御路径）；网关已自动注入 4 真名工具并 cordon/failover。
 
+**慢请求（>60s）先分相，再谈归因**：`chat completion.latency_ms` 与同 request_id
+的 `stream ended.duration_ms` 之差就是「首字节前」的耗时。
+
+- 差值 ≈ 300s：上游跳首字节悬挂（旧隧道黑洞），属 `ZEN_TTFB_S` 覆盖范围；修复前
+  会一直等满 `zen_timeout_s`（实测 305–315s，12h 内 5 次）。日志里看
+  `egress failover: ... [TtfbTimeout]` / `before response headers`。
+- 差值小、`duration_ms` 大：上游真在慢速生成，与网关无关。
+- `stream ended.reason=stalled`：流中途静默超过 `STREAM_STALL_S`。
+
 ### 4.2 看桶
 
 ```bash
@@ -176,6 +190,7 @@ docker logs zen-gw 2>&1 | grep -E "bun upstream attempt|answering 503|FALLBACK"
 | 10-25 | body 门 | prompt 必须现场渲染（模型/日期/工作区）；冻结快照 = 同形 429 |
 | 10-25 | 换 IP 风暴 | 32/20/13 次轮换源于把非配额 429 当配额 → 加 30 分钟下限与 429 归因红线 |
 | 10-25 | 备用链路 | proxy_ms 欠费透传 → 备用返回错误即释放熔断窗口 |
+| 10-25/26 | 305s 慢请求 + 日志噪音 | 首字节无超时（300s 唯一上界）、探针异常未判不健康、cordon 非幂等、`expect_prefix` 挡住 cordon 解除、熔断无迟滞 —— 五项同时修复，见 CHANGELOG |
 
 ## 6. 风险与待办
 

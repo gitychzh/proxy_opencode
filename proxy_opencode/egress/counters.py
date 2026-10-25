@@ -37,14 +37,15 @@ from datetime import datetime
 from typing import Any
 
 from .eventlog import EVENTS
-from .pool import next_window_reset, window_tz
+from .pool import HARD_QUOTA_RETRY_AFTER_S, next_window_reset, window_tz
 
 logger = logging.getLogger("proxy_opencode.egress.counters")
 
 # ADR 0.7.x: an upstream 429 whose Retry-After exceeds one hour means the
 # per-IP daily quota is exhausted (soft short-window throttling also exists
-# and must NOT be treated as exhaustion). Fixed by decision record.
-HARD_QUOTA_RETRY_AFTER_S = 3600.0
+# and must NOT be treated as exhaustion). Fixed by decision record; the
+# constant lives in the pool so the cordon lifetime and this trigger cannot
+# drift apart, and is re-exported here for callers/tests.
 
 # A FAILED rotation attempt may be retried on the next hard 429 once this
 # much time has passed (measured 2026-10-17: all three buckets failed their
@@ -188,11 +189,24 @@ class EgressCounters:
         so trigger immediately — deduped to one rotation per window per bucket,
         with the failed-attempt retry cooldown so one broken ONT config cannot
         block the bucket's IP reset for the whole day.
+
+        The hard-429 floor applies here too: a 403 storm (the shape gate
+        re-tightening upstream) must not reboot an ONT every few minutes
+        either. Rotating does not fix a body/shape fault, so the floor is the
+        correct conservative answer.
         """
 
         ts = now if now is not None else time.time()
         rec = self._record_for(name, ts)
-        return self._rotation_available(rec, ts)
+        if not self._rotation_available(rec, ts):
+            return False
+        if (
+            rec.last_rotation_ok is True
+            and rec.last_rotation_epoch > 0.0
+            and (ts - rec.last_rotation_epoch) < self._hard_min_interval
+        ):
+            return False
+        return True
 
     def record(self, name: str, *, now: float | None = None) -> bool:
         """Fold one completed (ok) request; True iff the threshold now fires.

@@ -156,6 +156,27 @@ class Settings:
     # ids here, e.g. ZEN_MODEL_MAP=deepseek-ai/deepseek-v4.1-flash=deepseek-v4.1-flash-free
     zen_model_map: dict[str, str] = field(default_factory=dict)
     zen_timeout_s: int = 300
+    # First-byte (response header) deadline for one upstream attempt.
+    #
+    # zen_timeout_s bounds the WHOLE exchange, so an egress hop that accepts
+    # the TCP connection and then blackholes the request (a dead tunnel, an
+    # ONT mid-reboot, a CONNECT that never answers) used the full 300s before
+    # the adapter could fail over: measured 2026-10-25 on the production pool,
+    # 5 client requests in 12h finished at 305-315s with a fast stream
+    # afterwards, i.e. 300s of pure wait plus one quick retry on another
+    # bucket. The stream watchdogs cannot see this phase — they only start
+    # once response headers arrived.
+    #
+    # This is the header deadline, enforced in the bun forwarder (abort the
+    # fetch) and on the python side (META line). It must stay well under
+    # zen_timeout_s so a blackholed bucket costs one attempt, not the whole
+    # request budget. 0 disables the extra timer (legacy behaviour).
+    #
+    # 60s is the measured compromise (354 requests, 12h): time-to-headers is
+    # p50 5.9s / p90 12.2s / p95 21.3s, with one legitimate 50.4s outlier and
+    # then a clear gap to the six 300s+ hangs. 60s keeps every healthy
+    # request and still cuts a hung hop by 5x.
+    zen_ttfb_s: float = 60
     # Stream stall watchdog: max tolerated silence between SSE body bytes
     # (covering both the first byte after the response headers and gaps
     # mid-stream) before StreamRelay stops waiting, synthesises a terminal
@@ -264,6 +285,15 @@ class Settings:
     zen_fallback_base_url: str = ""
     zen_fallback_api_key: str = ""
     zen_fallback_hold_s: float = 120.0
+    # Consecutive primary successes required to declare the primary healthy
+    # again after the hold window expired. 1 reproduces the old behaviour
+    # (a single success closed the breaker), which flapped: on 2026-10-25 the
+    # pool alternated engaged/recovered six times in 20 minutes while the
+    # primary was serving roughly every other request, and every transition
+    # switched the served model under the client. 2 keeps the half-open probe
+    # (the first success still gets served by the primary) while requiring
+    # evidence of sustained recovery before announcing it.
+    zen_fallback_recover_after: int = 2
     zen_fallback_model_map: dict[str, str] = field(default_factory=dict)
     # Catch-all for ids the map misses: the zen catalogue's bare ids can never
     # exist on the backup gateway, so an unmapped id would be rejected there.
@@ -484,6 +514,7 @@ def load_settings() -> Settings:
         or list(DEFAULT_ZEN_MODELS),
         zen_model_map=_model_map(os.environ.get("ZEN_MODEL_MAP", "")),
         zen_timeout_s=int(os.environ.get("OPENCODE_ZEN_TIMEOUT_S", "300")),
+        zen_ttfb_s=float(os.environ.get("ZEN_TTFB_S", "60")),
         stream_stall_s=float(os.environ.get("STREAM_STALL_S", "60")),
         client_stall_s=float(os.environ.get("CLIENT_STALL_S", "60")),
         zen_proxy=os.environ.get("ZEN_PROXY", "").strip(),
@@ -521,6 +552,9 @@ def load_settings() -> Settings:
         zen_fallback_base_url=os.environ.get("ZEN_FALLBACK_BASE_URL", "").strip(),
         zen_fallback_api_key=os.environ.get("ZEN_FALLBACK_API_KEY", "").strip(),
         zen_fallback_hold_s=float(os.environ.get("ZEN_FALLBACK_HOLD_S", "120")),
+        zen_fallback_recover_after=max(
+            1, int(os.environ.get("ZEN_FALLBACK_RECOVER_AFTER", "2"))
+        ),
         zen_fallback_model_map=_model_map(
             os.environ.get("ZEN_FALLBACK_MODEL_MAP", "")
         ),

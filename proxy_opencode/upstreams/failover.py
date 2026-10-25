@@ -80,6 +80,15 @@ class FailoverAdapter:
         # Breaker state (monotonic clock): 0 = closed (primary active).
         self._fallback_until = 0.0
         self._secondary_name = settings.zen_fallback_base_url
+        # Hysteresis for the closing edge. A single primary success used to
+        # close the breaker, so a primary that served ~half of its requests
+        # produced engaged/recovered churn at request rate (2026-10-25: 57
+        # engaged / 11 recovered events in a day, six round trips in 20
+        # minutes). Each cycle also switched the model the client was served
+        # by, since the backup speaks a different id.
+        self._recover_after = max(1, int(settings.zen_fallback_recover_after))
+        self._primary_streak = 0
+        self._last_trip_at = 0.0
 
     # ------------------------------------------------------------ status
 
@@ -114,9 +123,13 @@ class FailoverAdapter:
             return await self._trip(
                 payload, f"upstream HTTP {result['__status__']}"
             )
-        if self._fallback_until:
-            # Half-open probe succeeded: close the breaker, announce it.
+        # The primary answered this request. Past the hold window that makes
+        # this request a half-open probe; the breaker only closes once
+        # ``_recover_after`` consecutive probes have succeeded.
+        self._primary_streak += 1
+        if self._fallback_until and self._primary_streak >= self._recover_after:
             self._fallback_until = 0.0
+            self._primary_streak = 0
             self._announce_recovery()
         return result
 
@@ -124,19 +137,39 @@ class FailoverAdapter:
 
     async def _trip(self, payload: dict[str, Any], reason: str) -> Any:
         self._fallback_until = time.monotonic() + self._hold_s
-        logger.warning(
-            "FALLBACK ENGAGED: primary upstream %s unavailable (%s); "
-            "serving via backup gateway for the next %.0fs",
-            self.name,
-            reason,
-            self._hold_s,
+        self._primary_streak = 0
+        # Distinguish the first trip of an outage from the re-trips that a
+        # flapping primary produces: the former is an incident (WARNING), the
+        # latter is the same incident continuing (INFO). Both keep their
+        # JSONL event so attribution is unchanged.
+        now = time.monotonic()
+        re_trip = self._last_trip_at > 0.0 and (now - self._last_trip_at) < (
+            self._hold_s * 2
         )
+        self._last_trip_at = now
+        if re_trip:
+            logger.info(
+                "FALLBACK RE-ENGAGED: primary upstream %s failed its recovery "
+                "probe (%s); backup continues for %.0fs",
+                self.name,
+                reason,
+                self._hold_s,
+            )
+        else:
+            logger.warning(
+                "FALLBACK ENGAGED: primary upstream %s unavailable (%s); "
+                "serving via backup gateway for the next %.0fs",
+                self.name,
+                reason,
+                self._hold_s,
+            )
         EVENTS.emit(
             "fallback_engaged",
             primary=self.name,
             reason=reason[:120],
             hold_s=self._hold_s,
             secondary=self._secondary_name,
+            re_trip=re_trip,
         )
         return await self._via_secondary(payload, reason)
 
@@ -201,6 +234,8 @@ class FailoverAdapter:
         return result
 
     def _announce_recovery(self) -> None:
+        self._last_trip_at = 0.0
+        self._primary_streak = 0
         logger.warning(
             "FALLBACK RECOVERED: primary upstream %s is serving again; "
             "traffic returned to the primary chain",

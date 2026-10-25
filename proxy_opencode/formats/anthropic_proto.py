@@ -16,6 +16,7 @@ import json
 import uuid
 from typing import Any, AsyncIterator
 
+from ..errors import InvalidRequest
 from .sse_iter import parse_sse_chunks
 
 
@@ -147,7 +148,7 @@ def to_chat_payload(body: dict[str, Any]) -> dict[str, Any]:
     if not messages:
         # Every turn was empty/unconvertible; the chat upstream rejects an
         # empty messages array outright, so surface it as a client error.
-        raise ValueError("messages must contain at least one usable turn")
+        raise InvalidRequest("messages must contain at least one usable turn")
 
     payload: dict[str, Any] = {
         "model": str(body.get("model") or ""),

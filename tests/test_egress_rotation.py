@@ -697,8 +697,16 @@ async def test_unchanged_ip_times_out_as_failed_rotation() -> None:
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_prefix_violation_refused() -> None:
-    """A reboot that lands the leg on another uplink must NOT be applied."""
+async def test_prefix_violation_accepted_and_flagged(caplog) -> None:  # type: ignore[no-untyped-def]
+    """A changed IP outside ``expect_prefix`` is applied, with a warning.
+
+    The prefix is a hand-maintained allowlist, so enforcing it as a rotation
+    precondition deadlocked real buckets (2026-10-25: owin10-telecom's
+    legitimate 117.95/49.x addresses were not listed; 11 of 21 rotations
+    were recorded as failures while the bucket served fine). The new IP is
+    real and the ONT did re-dial — that is a successful rotation; the stale
+    allowlist is reported instead.
+    """
     pool = make_pool("a")
     # Cold-start probes cost hundreds of ms; keep the deadline generous.
     rotator = make_rotator(pool, {"a": 3}, poll_s=0.01, timeout_s=3.0)
@@ -709,14 +717,16 @@ async def test_prefix_violation_refused() -> None:
     respx.get("http://a:10001/healthz").respond(
         json={"ready": True, "egress_ip": "36.149.54.30"}
     )
-    task = rotator.request_rotation("a", trigger="admin")
-    assert task is not None
-    outcome = await asyncio.wait_for(task, timeout=5.0)
-    assert outcome.ok is False
-    assert "outside bucket prefix" in outcome.detail
+    with caplog.at_level("WARNING", logger="proxy_opencode.egress.rotate"):
+        task = rotator.request_rotation("a", trigger="admin")
+        assert task is not None
+        outcome = await asyncio.wait_for(task, timeout=5.0)
+    assert outcome.ok is True
+    assert outcome.ip_to == "36.149.54.30"
+    assert "outside the configured prefix" in caplog.text
     state = pool.find("a")
     assert state is not None
-    assert state.egress_ip == OLD_IP  # the foreign IP is not folded in
+    assert state.egress_ip == "36.149.54.30"
 
 
 @respx.mock
@@ -941,3 +951,22 @@ async def test_zen_429_release_carries_retry_after() -> None:
     assert result["__status__"] == 429
     assert pool.releases == [("bucket-a", False, "http_429", 7200.0)]
     await adapter.aclose()
+
+
+def test_free_tier_trigger_respects_the_rotation_floor() -> None:
+    """A 403 storm must not reboot the ONT every few minutes either.
+
+    The shape gate can re-tighten upstream, and a body/shape fault is never
+    cured by a new address — so the same 30-minute floor that guards the
+    hard-429 path applies to the free-tier verdict.
+    """
+
+    counters = EgressCounters({"a": 500})
+    now = ts_cst(16, 15, 40)
+    assert counters.should_rotate_on_free_tier("a", now=now) is True
+    counters.note_rotation_started("a", now=now)
+    counters.reset("a", now=now)
+    counters.note_rotation_result("a", ok=True, detail="ip 1 -> 2", now=now)
+    assert counters.should_rotate_on_free_tier("a", now=now) is False
+    assert counters.should_rotate_on_free_tier("a", now=now + 1799.0) is False
+    assert counters.should_rotate_on_free_tier("a", now=now + 1800.0) is True

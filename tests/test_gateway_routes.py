@@ -268,3 +268,60 @@ async def test_payload_dump_covers_all_three_protocols(tmp_path):
         )
     slugs = sorted(p.name.rsplit("_", 1)[-1] for p in tmp_path.glob("*.json"))
     assert slugs == ["chat.json", "messages.json", "responses.json"]
+
+
+# --------------------------------------------------- error attribution
+#
+# 2026-10-25: one client request got HTTP 400 "invalid_request_error" with an
+# empty usage after 2.2s. The pipeline mapped EVERY adapter ValueError onto
+# 400, including accidental ones from upstream-body parsing — blaming the
+# caller and, worse, suppressing the egress failover ladder (request-level
+# 4xx is never retried on another bucket).
+
+
+@pytest.mark.asyncio
+async def test_bare_valueerror_from_adapter_is_a_500_not_a_400():
+    from proxy_opencode.errors import InvalidRequest
+
+    app, fake = make_app()
+
+    async def boom(payload):
+        raise ValueError("invalid literal for int(): ''")
+
+    fake.chat = boom  # type: ignore[method-assign]
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "deepseek-ai/deepseek-v4.1-flash",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            headers=GW_HEADERS,
+        )
+    assert resp.status_code == 500
+    assert resp.json()["error"]["type"] == "api_error"
+    assert InvalidRequest is not ValueError
+
+
+@pytest.mark.asyncio
+async def test_invalid_request_still_maps_to_400():
+    from proxy_opencode.errors import InvalidRequest
+
+    app, fake = make_app()
+
+    async def boom(payload):
+        raise InvalidRequest("messages must contain at least one usable turn")
+
+    fake.chat = boom  # type: ignore[method-assign]
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/v1/chat/completions",
+            json={"model": "deepseek-ai/deepseek-v4.1-flash", "messages": []},
+            headers=GW_HEADERS,
+        )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["type"] == "invalid_request_error"
