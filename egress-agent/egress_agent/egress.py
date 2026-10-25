@@ -53,6 +53,27 @@ def interface_address(name: str) -> str | None:
         sock.close()
 
 
+def source_address(value: str | None) -> str | None:
+    """IPv4 source address used to pin this uplink's outbound sockets.
+
+    ``value`` is a Linux interface name (resolved via ``SIOCGIFADDR``) or a
+    literal IPv4 address. The literal form is what hosts without an ioctl
+    path (Windows/Android) have to use: two uplinks can front ONTs that share
+    ``192.168.1.1``, and the source address is then the only discriminator —
+    exactly the ``curl --interface 192.168.2.235`` trick, expressed in config.
+    """
+
+    if not value:
+        return None
+    resolved = interface_address(value)
+    if resolved:
+        return resolved
+    try:
+        return str(ipaddress.IPv4Address(value))
+    except ValueError:
+        return None
+
+
 def local_addr_for(bind_source: str | None) -> tuple[str, int] | None:
     """``local_addr`` argument for asyncio/aiohttp outbound connections."""
 

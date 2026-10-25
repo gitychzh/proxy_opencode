@@ -12,6 +12,7 @@ from egress_agent.egress import (
     interface_address,
     listen_socket,
     local_addr_for,
+    source_address,
 )
 
 
@@ -41,6 +42,20 @@ def test_interface_address_ioctl_failure_returns_none() -> None:
 
     with mock.patch.object(fcntl, "ioctl", side_effect=OSError):
         assert interface_address("nope0") is None
+
+
+def test_source_address_literal_ipv4() -> None:
+    """Windows/Android configs name the source address directly."""
+
+    assert source_address("192.168.2.235") == "192.168.2.235"
+    assert source_address(None) is None
+    assert source_address("") is None
+    assert source_address("not-an-iface") is None
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="SIOCGIFADDR is Linux-only")
+def test_source_address_linux_interface_name() -> None:
+    assert source_address("lo") == "127.0.0.1"
 
 
 def test_describe_bind_never_leaks_secrets() -> None:

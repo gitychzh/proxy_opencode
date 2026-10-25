@@ -30,6 +30,7 @@
 | **ONT 凭据（光猫）** | 设备侧：`/etc/egress-agent/*.json`（600 权限） | 仅存放于各桶设备，**不提交至仓库**。详见 [`scripts_local/ont-credentials.md`](../scripts_local/ont-credentials.md)（仓库外、gitignored）。 |
 | **agent 共享 secret（Windows 桶：win10 / owin10）** | 本机：`C:\Users\<user>\.egress-agent\<桶名>.json`（`listener.username/password` 均为共享值，与 ECS `ZEN_EGRESS_SECRET` 一致；**不提交至仓库**） | 值从 ECS 容器 env 取（经 SSH 管道直写文件、不打印）；启动脚本 `egress-agent/deploy/windows/README.md` 部署路径只读路径不含值。 |
 | **SSH 密钥** | 各设备授权文件（仓库外） | 公钥授权，不在仓库记录私钥。 |
+| **GitHub 访问（SSH）** | 各机 `~/.ssh/`（仓库外） | 见 §6，公钥已在账号侧授权，仓库内不记录私钥。 |
 | **临时探测 Key** | 运行时临时生成 | 用后吊销，不落盘至仓库文件。 |
 
 ## 4. 远程命令纪律
@@ -46,3 +47,28 @@
 - **被反代裸 ID 清单：** `GET /v1/models_cus`（需鉴权，排障专用）
 
 更多拓扑、端口、三桶身份与出口见 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)。运维操作、排障清单见 [`docs/OPERATIONS.md`](OPERATIONS.md)。
+
+## 6. GitHub 访问方式（各机）
+
+仓库远端：`git@github.com:gitychzh/proxy_opencode.git`（账号 `gitychzh`）。
+**统一走 SSH over 443**（`ssh.github.com:443`）——国内网络下 `github.com:22` 常被阻断，443 稳定。
+
+`~/.ssh/config` 模板（私钥不入仓）：
+
+```sshconfig
+Host github.com
+  HostName ssh.github.com
+  Port 443
+  User git
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+  StrictHostKeyChecking accept-new
+```
+
+| 机器 | 私钥 | 说明 |
+|---|---|---|
+| 本机（DESKTOP-SGEDRR5，Windows 桌面） | `~/.ssh/id_ed25519` | 已授权；git 远端用 `gh-ssh` alias（同 ssh.github.com:443）；`http.proxy=127.0.0.1:7897` 仅影响 https 拉取 |
+| owin10（100.109.109.108:2222） | `~/.ssh/id_ed25519` | 2026-10-25 接入：同钥部署（原 `github_ed25519` 未授权，已备份为 `.bak-20261025`）；工作副本 `C:\Users\Owin10\github\proxy_opencode` |
+
+**验证**：`ssh -T git@github.com` 应回 `Hi gitychzh! You've successfully authenticated`（GitHub 不提供 shell，退出码 1 属正常）。
+**初始化**：`git config --global user.name gitychzh`、`user.email 47948154+gitychzh@users.noreply.github.com`；`gh` CLI **未安装**，不要依赖 `gh auth`（owin10 上的旧 gh token 已失效并已从 hermes 凭据池移除）。

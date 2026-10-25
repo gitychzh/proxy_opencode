@@ -45,7 +45,7 @@ from typing import Any
 import aiohttp
 
 from .config import OntConfig
-from .egress import interface_address, local_addr_for
+from .egress import local_addr_for, source_address
 
 log = logging.getLogger("egress_agent.rotate")
 
@@ -117,9 +117,7 @@ class RotationResult:
 def ont_bind_source(ont: OntConfig) -> str | None:
     """Source address for reaching this ONT (interface wins over nothing)."""
 
-    if ont.interface:
-        return interface_address(ont.interface)
-    return None
+    return source_address(ont.interface)
 
 
 def _session(bind_source: str | None,

@@ -440,11 +440,11 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
 不可请求、不可见，除隐藏端点 `/v1/models_cus` 纯裸 ID 输出）。
 2026-10-25 终态回笼单别名（`.env.bak-singlemodel` 备份）：第二别名
 `opencode/big-pickle` 已撤，`PUBLIC_MODELS=deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle`，
-端到端 200 实测（非流式/流式均落 owin10 双桶）。四桶中 win10 与 opc2-wifi 出口同一家庭 WAN
-（同一公网 IP 的上游额度共享，但独立一条 ECS↔本机的传输路径；2026-10-25 起
-win10 与 owin10-mobile 同移动 CGNAT 出口，同享额度）；容器内
-least-in-flight 选择、429/5xx/传输失败**桶间 failover**、cordon 冷却、P5 每窗口
-≥500 或硬 429 自动换 IP（2026-10-17 起三桶 ONT 驱动全部实弹验证，见下表）。ECS/Tailscale 地址与凭据位置见 `ACCESS.md`，
+端到端 200 实测（非流式/流式均落 owin10 双桶）。2026-10-25 起现役池只保留
+`owin10-mobile`（移动有线）与 `owin10-telecom`（电信 WiFi）两桶，`win10` 因与
+`owin10-mobile` 同 CGNAT 出口且无换 IP 能力已移出池（`cc9` 设备下线同批移出）；
+容器内 least-in-flight 选择、429/5xx/传输失败**桶间 failover**、cordon 冷却、P5 每窗口
+≥500 或硬 429 自动换 IP（2026-10-17 起 ONT 驱动全部实弹验证，见下表；2026-10-25 后现役仅 `owin10-mobile`/`owin10-telecom` 两桶带 ONT）。ECS/Tailscale 地址与凭据位置见 `ACCESS.md`，
 不要把真实密钥写入仓库。
 
 ## 2. 部署与最近状态（0.7.x 新栈，最近部署 2026-10-25）
@@ -452,9 +452,9 @@ least-in-flight 选择、429/5xx/传输失败**桶间 failover**、cordon 冷却
 | 桶 | agent | 出口 IP | expect_prefix | 最近确认状态 |
 |---|---|---|---|---|
 | `cc9` | `100.87.219.115:10001` | `112.83.208.101` 联通 | `112.83.0.0/16;116.147.0.0/16;122.195.0.0/16` | healthy；HG6142A-C `fenghuo` 驱动实弹受理通过（112.83.208.127→116.147.31.99→116.147.30.191→122.195.202.2）；chroot agent 由 Magisk 看门狗拉起；`122.195.0.0/16` 为后续轮换落到的联通新段（2026-10-17 补入）；2026-10-19 06:39Z 门槛标记后轮换所得新 IP；**2026-10-25 设备下线待恢复** |
-| `win10` | `100.121.137.118:10001`（Windows 本机 egress-agent，`.venv` python + `deploy/windows/start-egress-agent.ps1`，Startup 自启） 移动 CGNAT 公网 IP 族（与 owin10-mobile 同出口） | `106.111.0.0/16;121.226.0.0/16;106.110.0.0/16;180.117.204.0/24;114.239.0.0/16` | healthy/probe ok；CONNECT 数据面真测通过（经本机隧道对 opencode.ai 200，2026-10-24 部署）；**无 ONT、不参与轮换**（不入 `ZEN_EGRESS_ROTATION`）；当日窗口配额随（同 WAN 共享的）IP 已烧穿（见 §0.5） |
-| `owin10-mobile` | `100.109.109.108:10001`（Windows 10 owin10 有线口，`bind_source 192.168.1.222` 钉源出网，schtasks `EgressAgent-mobile` ONSTART SYSTEM 自启） | `223.68.24.82` 移动 | `223.68.0.0/16;36.149.0.0/16` | healthy（2026-10-25 部署，healthz+CONNECT 真测通过）；**无 ONT、不参与轮换**；与 win10 同 CGNAT 出口（上游额度共享）；当日窗口配额已烧穿（见 §0.5） |
-| `owin10-telecom` | `100.109.109.108:10002`（owin10 WiFi 口，`bind_source 192.168.2.235`，schtasks `EgressAgent-telecom`） | `106.111.50.124` 电信 | `106.111.0.0/16;121.226.0.0/16;106.110.0.0/16` | healthy；2026-10-25 body 门/模型门消融主力桶（克隆 200、合成 429、free-ID 200 全链定案，见 §0.5 第五轮）；**无 ONT、不参与轮换** |
+| `win10` | `100.121.137.118:10001`（Windows 本机 egress-agent，`.venv` python + `deploy/windows/start-egress-agent.ps1`，Startup 自启） 移动 CGNAT 公网 IP 族（与 owin10-mobile 同出口） | `106.111.0.0/16;121.226.0.0/16;106.110.0.0/16;180.117.204.0/24;114.239.0.0/16` | **2026-10-25 移出池**：与 `owin10-mobile` 同 CGNAT 出口（额度共享、无独立换 IP 能力），`ZEN_EGRESS_PROXIES`/`EXPECT_PREFIX`/`ROTATION` 三处均已删除；代理端仍在跑但网关不再调度 |
+| `owin10-mobile` | `100.109.109.108:10001`（Windows 10 owin10 有线口，`bind_source 192.168.1.222` 钉源出网，schtasks `EgressAgent-mobile` ONSTART SYSTEM 自启） | `223.68.27.206` 移动 | `223.68.0.0/16;36.149.0.0/16` | healthy；**ONT 已接（2026-10-25）**：`cmcc-v173` / `kind=huawei` / `http://192.168.1.1` / `interface=192.168.1.222`，入 `ZEN_EGRESS_ROTATION=500`，实弹轮换成功（223.68.24.82→223.68.24.122→27.206）；见 §6 |
+| `owin10-telecom` | `100.109.109.108:10002`（owin10 WiFi 口，`bind_source 192.168.2.235`，schtasks `EgressAgent-telecom`） | `106.111.50.165` 电信 | `106.111.0.0/16;121.226.0.0/16;106.110.0.0/16` | healthy；**ONT 已接（2026-10-25）**：`hg8020c` / `kind=huawei_ct` / `http://192.168.1.1` / `interface=192.168.2.235`，入 `ZEN_EGRESS_ROTATION=500`，实弹轮换成功（106.111.50.124→.165）；2026-10-25 body 门/模型门消融主力桶（见 §0.5 第五轮） |
 | `ecs` 本机桶 | （已剔除） | 115.29.231.25 | — | **2026-10-17 移出池**（机房 IP 免费额度被共享流量即耗，实测"几条就429"主因）；`egress-agent@ecs` 已停用 |
 | `hangzhou-ecs` | docker `zen-gw`（caddy→127.0.0.1:10010→容器:10002） | 115.29.231.25 入口 | — | healthy；failover 真机首测通过（wifi 429 → 换桶 → 客户端 200,2026-10-17 17:02 UTC） |
 
@@ -485,6 +485,46 @@ least-in-flight 选择、429/5xx/传输失败**桶间 failover**、cordon 冷却
   于修复后终止，转为 `egress_ip_observed` 迁移事件。
 - 已知非问题：healthz 版本串仍显示 `0.7.0a1`（陈旧显示）；`llm.223722.xyz:10002`
   域名入口未配置，IP 字面量入口可用。
+
+### 2.2 owin10 上 Hermes 客户端只保留 `oc_uni`（2026-10-25）
+
+**症状**：`hermes model` 候选列表除 `oc_uni` 外仍有 `openai-api`，重启 Hermes
+不消失。**根因两条，都不在 `config.yaml` 里**：
+
+1. `openai-api` 是 Hermes **内置** provider 定义（`hermes_cli/auth.py:180`、
+   `hermes_cli/models_catalog_static.py:325` 硬编码），picker 永远列出它，删不掉；
+   想让它不出现只能用官方隐藏开关（下面第 2 步）。
+2. 它会"看起来被配上"是因为 `auth.json` 的 `credential_pool` 由 backing source
+   **反复播种**：`openai-api` ← 环境变量 `OPENAI_API_KEY`，`copilot` ←
+   `gh auth token`。`load_pool()` 每次调用都重新播种，所以只删 JSON 里的行会在
+   几分钟内复活（实测改后 5 分钟被写回）。
+
+**清理（三步，缺一不可）**：
+
+1. `auth.json`：`providers`/`credential_pool` 置空，并写 `suppressed_sources`
+   —— 这是**防复活**的唯一持久手段（`hermes auth remove` 会走 RemovalStep 自动写）：
+   ```json
+   "suppressed_sources": {
+     "openai-api": ["env:OPENAI_API_KEY"],
+     "copilot": ["gh_cli", "env:GH_TOKEN", "env:GITHUB_TOKEN"]
+   }
+   ```
+2. `config.yaml`：`providers:` 只留 `oc_uni_id`（`model.provider: oc_uni_id`），
+   并把内置 provider 从 picker 隐藏（官方开关，必须是 YAML 真 list；写成字符串
+   `'["openai-api"]'` 会被所有 reader 静默忽略）：
+   ```yaml
+   model_catalog:
+     excluded_providers:
+       - openai-api
+       - copilot
+   ```
+3. 重启 Hermes（gateway 与桌面版各自的进程都读配置；桌面版还会缓存
+   `provider_models_cache.json`，必要时 `hermes model --refresh`）。
+
+**验证**：`hermes config get model_catalog.excluded_providers` 回 list；
+`hermes auth list` 无 pooled 条目；`auth.json` 的 `providers` 为 `{}`。
+注：`openai-api` 仍存在于 Hermes 内置目录，只是不再出现在 picker，也没有凭据可
+用——这是预期终态，不是残留。
 
 ## 3. 验证与常用操作
 

@@ -25,7 +25,9 @@ Semantics:
   route points elsewhere (Linux). ``null`` = OS routing decides.
 * ``onts[].interface``: source interface used to REACH the ONT console. On
   opc2 the wired and wireless ONTs share 192.168.1.1, so the interface is
-  the only reliable discriminator.
+  the only reliable discriminator. Linux resolves an interface name through
+  ``SIOCGIFADDR``; hosts without that ioctl path (Windows/Android) may put
+  the uplink's literal IPv4 address here instead.
 * ``onts[].password`` is secret: never commit the real file, and
   :meth:`AgentConfig.summary` redacts it for ``egress-agent status``.
 """

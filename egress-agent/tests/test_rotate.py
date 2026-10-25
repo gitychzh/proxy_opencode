@@ -17,7 +17,7 @@ from urllib.parse import parse_qs
 import pytest
 
 from egress_agent.config import OntConfig
-from egress_agent.rotate import restart_ont
+from egress_agent.rotate import ont_bind_source, restart_ont
 
 TOKEN = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
 ONTTOKEN = "0123456789abcdef0123456789abcdef01234567"
@@ -493,3 +493,19 @@ async def test_fenghuo_reboot_mangled_response_still_ok() -> None:
         assert result.ok is True
     finally:
         await ont_mock.stop()
+
+
+def test_ont_bind_source_accepts_literal_ipv4() -> None:
+    """Hosts without an ioctl path (Windows) name the source address itself.
+
+    Both ONTs can live on 192.168.1.1, so the source address is the only
+    discriminator there; a silently-unused ``interface`` would reboot the
+    ONT of the other uplink.
+    """
+
+    assert ont_bind_source(OntConfig(name="ct", interface="192.168.2.235")) == (
+        "192.168.2.235"
+    )
+    assert ont_bind_source(OntConfig(name="ct")) is None
+    # an unresolvable interface name must not silently bind to nothing usable
+    assert ont_bind_source(OntConfig(name="ct", interface="nope9")) is None

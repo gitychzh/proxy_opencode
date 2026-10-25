@@ -123,9 +123,12 @@ agent 代理 basic auth 双保险）。
 - **`/admin/egresses`** 快照新增 `counters` 字段；新增
   `POST /admin/egresses/{name}/rotate`（管理员 key）= 手动触发，用于现场
   调试 wifi/cc9 光猫 API 与"IP 被重发同值"后的补一枪。
-- **设备侧 ONT 驱动**（2026-10-17 全部落地）：opc2-wifi HG8020C
-  `kind="huawei_ct"`、cc9 HG6142A-C `kind="fenghuo"`（协议细节与实弹记录见
-  §6 与 git 历史；各桶 ONT stanza 已写入设备 `/etc/egress-agent/*.json`）。
+- **设备侧 ONT 驱动**（2026-10-17 落地，2026-10-25 owin10 双桶接续）：opc2-wifi
+  HG8020C `kind="huawei_ct"`、cc9 HG6142A-C `kind="fenghuo"`（协议细节与实弹
+  记录见 §6 与 git 历史）；2026-10-25 起现役为 owin10 双桶——`owin10-mobile`
+  V173-50 `kind="huawei"`、`owin10-telecom` HG8020C `kind="huawei_ct"`，两份
+  stanza 在设备 `C:\egress-agent\{mobile,telecom}.json`（`interface` 写字面
+  IPv4，见 §6 坑④），实弹轮换各成功一次。
   opc2 现有"ONT 每日 7 次定时重启" cron 必须在启用 `ZEN_EGRESS_ROTATION`
   时停掉，否则双重换 IP。
 
@@ -227,25 +230,33 @@ agent 代理 basic auth 双保险）。
 | ONT 轮换后恢复 | ONT 重启会打掉 eth 的 DHCP 租约与策略表默认路由；恢复 = dhclient 续租 + 补默认路由 + 删 dhclient 多装的抢占路由（幂等脚本，P5 落 `post_rotate_cmd`） | 2026-10-14 真机实测踩通 |
 | 桶身份校验 | 池按 `expect_prefix` 校验 agent 上报的出口 IP；不符（如 eth 掉线回落 wifi 出口）立即 cordon | 防“静默偷别的桶额度”，真机实测该回落真实存在 |
 
-## 6. 可换 IP 的三个桶（ONT）— 拓扑与凭据去向
+## 6. 可换 IP 的桶（ONT）— 拓扑与凭据去向
 
-2026-10-17 实测（三桶现状，凭据值只存设备 JSON 与 `scripts_local/ont-credentials.md`，
-本表只记型号/拓扑）：
+2026-10-25 现役两桶（owin10 单设备双上行）实弹验证；opc2 三桶为已下线的历史
+拓扑，保留作协议参考。凭据值只存设备 JSON 与 `scripts_local/ont-credentials.md`，
+本表只记型号/拓扑：
 
 | 桶 | 出口 | ONT 管理地址 | 型号 | 驱动 `kind` | 重启验证 |
 |---|---|---|---|---|---|
-| opc2-eth | 36.149.x/223.68.x 移动 | 192.168.1.1（enp12s0 进） | 华为 V173-50（CMCC） | `huawei`（四步 HTTP） | 生产已验证（36.149.54.237→.180；2026-10-16 P5 真机再验证） |
-| opc2-wifi | 电信（宿迁段漂移：180.117.204.x / 106.110.x / 121.226.x） | 192.168.1.1（wlx 经中兴路由 192.168.2.1 进） | 华为 HG8020C（电信 e8-C JSCT） | `huawei_ct`（GetRandCount token + 无状态 Cookie 头登录 + CtcApp set.cgi ResetBoard） | **已实弹**：180.117.204.212→106.110.200.190→121.226.169.135（两轮换桶） |
-| cc9 | 116.147.x/112.83.x 联通（宿迁段） | 192.168.1.1（手机 wifi 192.168.3.34 经 FTTR 从网关进） | 烽火 HG6142A-C（联通 FTTR） | `fenghuo`（get_login_user 必带 tkn=完整 UA；sha256(loginpd) 登录；logintoken cookie；ajaxmethod=reboot） | **已实弹**：112.83.208.127→116.147.31.99→116.147.30.191 |
-| pad / win10 | 218.93.215.38 / 111.55.73.65 | — | — | — | 本期不做换 IP |
+| `owin10-mobile` | 223.68.x / 36.149.x 移动 | 192.168.1.1（有线口 `interface=192.168.1.222` 进） | 华为 V173-50（CMCC） | `huawei`（四步 HTTP） | **已实弹**（2026-10-25）：223.68.24.82→223.68.24.122→223.68.27.206 |
+| `owin10-telecom` | 106.111.x 电信 | 192.168.1.1（WiFi 经 `interface=192.168.2.235` 进） | 华为 HG8020C（电信 e8-C JSCT） | `huawei_ct`（GetRandCount token + 无状态 Cookie 头登录 + CtcApp set.cgi ResetBoard） | **已实弹**（2026-10-25）：106.111.50.124→106.111.50.165 |
+| ~~opc2-eth~~（历史） | 36.149.x/223.68.x 移动 | 192.168.1.1（enp12s0 进） | 华为 V173-50（CMCC） | `huawei`（四步 HTTP） | 生产已验证（36.149.54.237→.180；2026-10-16 P5 真机再验证） |
+| ~~opc2-wifi~~（历史） | 电信（宿迁段漂移：180.117.204.x / 106.110.x / 121.226.x） | 192.168.1.1（wlx 经中兴路由 192.168.2.1 进） | 华为 HG8020C（电信 e8-C JSCT） | `huawei_ct`（GetRandCount token + 无状态 Cookie 头登录 + CtcApp set.cgi ResetBoard） | **已实弹**：180.117.204.212→106.110.200.190→121.226.169.135（两轮换桶） |
+| ~~cc9~~（历史） | 116.147.x/112.83.x 联通（宿迁段） | 192.168.1.1（手机 wifi 192.168.3.34 经 FTTR 从网关进） | 烽火 HG6142A-C（联通 FTTR） | `fenghuo`（get_login_user 必带 tkn=完整 UA；sha256(loginpd) 登录；logintoken cookie；ajaxmethod=reboot） | **已实弹**：112.83.208.127→116.147.31.99→116.147.30.191 |
 
 两条驱动共性实测坑（写进 `rotate.py` 常量注释）：①电信 CtcApp 页树会间歇
 404（47 字节 "The requested URL..."），需整周期重试（`CT_ARM_ATTEMPTS=2`）；
 ②烽火 login GET 不带 `tkn` 只回 `random_string`；③光猫对短时连续重启有
-防抖（受理但不重启），轮换路径自带 900s 冷却兜底。
+防抖（受理但不重启），轮换路径自带 900s 冷却兜底；④**Windows 侧
+`onts[].interface` 必须写该上行的字面 IPv4**——Python 的 `SIOCGIFADDR`
+ioctl 只存在于 Linux，写接口名在 Windows 上会被静默忽略、源地址不钉死，
+两个 ONT 都在 `192.168.1.1` 时会打错光猫（`source_address()` 同时接受
+接口名与字面 IPv4，测试 `test_source_address_literal_ipv4` /
+`test_ont_bind_source_accepts_literal_ipv4`）。
 
-**凭据铁律**：ONT 账号口令只写设备上的 `/etc/egress-agent/<实例>.json`
-（600），**不进 repo**；`egress-agent status` 输出按构造脱敏。型号/拓扑
+**凭据铁律**：ONT 账号口令只写设备上的 agent 实例 JSON（Linux
+`/etc/egress-agent/<实例>.json` 600、Windows `C:\egress-agent\<实例>.json`），
+**不进 repo**；`egress-agent status` 输出按构造脱敏。型号/拓扑
 （非密）记录在本表。
 
 **迁移项（opc2 ONT 定时重启 cron 清理，2026-10-16 设备复核=闭环，无需动作）**：
