@@ -1,107 +1,162 @@
 # Changelog
 
-> 2026-10-03 文档治理说明：早期版本日志中提及的历史文档已合并到 `docs/OPERATIONS.md`/`docs/ACCESS.md` 并移除。当前事实以 `AGENTS.md` 为准。
-> ~~2026-09-30 活体复测修正：免费层门槛为 `stream=true` + 至少两个内置工具名；system marker 并非强制条件。~~ **2026-10-25 作废**：body 门复测确认 system prompt 真身为强制条件（见 Unreleased/AGENTS.md 硬约束 1）。
+语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
+协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
 ## [Unreleased]
 
 ### Fixed
-- **fix(failover): 备用链路返回错误时立即释放 120s 保持窗口（2026-10-25 PM）** — 实测 proxy_ms 自身欠费回 `429 insufficient balance`，熔断仍把后续 120s 的流量全部压在它上面，客户端把这句当成自己的计费错误并 `retryable:false` 放弃，而主链路的 429 可能只是 body 快照门误伤（修复后同 IP 已 200）。现在 `_via_secondary` 收到错误中继（非连接失败）时：原样回传客户端、记 ERROR `FALLBACK FAILED: ... answered HTTP <n>` + JSONL `fallback_failed{status}`、并把 `_fallback_until` 清零让下一个请求重新探测主链路；备用**不可达**（`ConnectionError`）仍保留熔断（原语义）。测试 `test_backup_error_relay_releases_hold_for_next_primary_probe`。
-- **fix(zen): 第六轮——body 门是「prompt 快照新鲜度」而非「真身文本」，并修正换 IP 误判（2026-10-25 PM）** — hermes 端到端 `429 insufficient balance`（备份链路 proxy_ms 计费错误原样透传）+ 主链路三桶同时 `429 FreeUsageLimitError`。同出口 IP（`121.234.130.245`）、同分钟、同 bun 传输、每次新 mint session 的 2×2 消融定案：
-  - 官方 1.19.3 客户端匿名直跑 **200**，网关请求 **429**（`retry-after→UTC0`）⇒ 该 IP **没有烧穿**，是 body 门伪装成配额门；
-  - UA / 工具集 / AGENTS 附录**单独都不是判别项**（换掉任一项仍 429）；**system prompt 的 `Today's date:` 停在抓包当天就 429，刷成当天即 200**；模型名与工作区路径属同类「旧抓包重放」信号；
-  - 根因：`zen_prompt_default.txt` 是**冻结快照**（`Sat Oct 24 2026` + `glm-5.3-flash-free` + `D:\proxy_opencode`），而官方客户端每请求现场渲染这些字段。gateway 把同形 429 当成"IP 配额烧穿"→ 反复 ONT 换 IP（当日 32/20/13 次）→ 换 IP 无效并打散隧道。
-  - 修复：资产换为 2026-10-25 官方客户端实拍真身（9559B，去掉捕获工作区的 AGENTS 附录）；新增 `_render_prompt(model)` 每请求重写 `model named X` / `The exact model ID is opencode/X`（用别名映射后的实际上游 ID）/ `Today's date: <UTC 当天>` / `Working directory|Workspace root folder → /workspace/opencode`；`_inject_marker(messages, model)` 传入实际发送模型。实测同一桶 **3/3 200**（修复前同一请求体 4/4 429）。
-  - 新增归因红线：`429 FreeUsageLimitError` 四因同形（传输栈 / body 快照 / session 复用 / 真实 IP 配额），**换 IP 只对最后一因有效**；排障顺序写入 `AGENTS.md` 硬约束 1 与 `docs/OPERATIONS.md` §0.5 第六轮。
-  - 测试：`test_prompt_asset_is_a_live_client_capture`、`test_render_prompt_binds_model_date_and_workspace`、`test_prompt_date_matches_client_date_string`、`test_body_marker_renders_requested_model_not_capture_model`。
+
+- **fix(zen): body 门是「prompt 快照新鲜度」而非「真身文本」** — hermes 端到端
+  `429 insufficient balance`（备用链路 proxy_ms 计费错误原样透传）+ 主链路三桶
+  同时 `429 FreeUsageLimitError`。同出口 IP、同分钟、同 bun 传输、每次新 mint
+  session 的 2×2 消融定案：官方 1.19.3 客户端匿名直跑 **200**，网关请求 **429**
+  （`retry-after`→UTC0）⇒ 该 IP **没有烧穿**，是 body 门伪装成配额门。UA / 工具集
+  / AGENTS 附录单独都不是判别项；**system prompt 的 `Today's date:` 停在抓包当天
+  就 429，刷成当天即 200**，模型名与工作区路径属同类「旧抓包重放」信号。修复：
+  `zen_prompt_default.txt` 换为 2026-10-25 官方客户端实拍真身（9559B），新增
+  `_render_prompt(model)` 每请求重写模型名 / UTC 当天日期 / 工作区路径，
+  `_inject_marker()` 传实际发送的上游 ID。实测同桶 **3/3 200**（修复前同一请求体
+  4/4 429）。同时确立 **429 归因红线**：四因同形，换 IP 只对真实 IP 配额有效，
+  排障顺序 = 传输 → prompt 新鲜度 → session → IP。测试
+  `test_prompt_asset_is_a_live_client_capture` /
+  `test_render_prompt_binds_model_date_and_workspace` /
+  `test_prompt_date_matches_client_date_string` /
+  `test_body_marker_renders_requested_model_not_capture_model`。
+- **fix(failover): 备用链路返回错误时立即释放保持窗口** — proxy_ms 欠费回
+  `429 insufficient balance`，旧行为把后续 120s 流量全压在它上面，客户端判
+  `billing/retryable:false` 放弃，而主链路 429 可能只是 body/传输/session 门误伤。
+  现在 `_via_secondary` 收到错误中继（非连接失败）时原样回传、记 ERROR
+  `FALLBACK FAILED` + JSONL `fallback_failed{status}`，并清零 `_fallback_until`
+  让下个请求重新探测主链路；备用**不可达**仍保留熔断。测试
+  `test_backup_error_relay_releases_hold_for_next_primary_probe`。
+- **fix(zen): 每次上游试探重新 mint 会话（session 单次使用）** — 上游对复用会话
+  一律回层 2 同款 429（同 IP：新 mint=200、立即重放=429，且该 IP 随后仍连续服务
+  新 mint ≥3 发）。旧 `chat()` 每客户端请求 mint 一次贯穿三条 failover 腿 = 从
+  第二腿起重放已消费会话。改为 in-loop 逐试探 `_headers()`；测试
+  `test_chat_mints_fresh_session_per_upstream_attempt`。
+- **fix(zen): 免费层形状门收紧为「≥4 真名内置工具」** — 1/2/3 真名全 403；4 真名
+  200 且 schema/description 内容不校验；混入 1 个改名工具即 403。UA 版本 / 头名
+  （含 2.0 系改名）/ `b3` / `traceparent` / `x-opencode-client` 值均不敏感。
+  `ZEN_TOOLS_MODE=minimal` 注入数 2→4（`bash,edit,glob,read`）、UA 改
+  `1.19.4/ai-sdk 4.0.23/bun 1.4.4`、头集对齐 1.19.4（新增
+  `x-opencode-session-id` 双头、去 legacy `x-session-id` 与重复
+  `x-opencode-request-id`、`x-opencode-project` 改固定 40-hex）。
+- **fix(zen): 兜底耗尽的匿名 403 改回 503 `egress_unavailable`** — 出口级 403
+  原样透传会被客户端判 `auth/retryable:false`；轮换约 90s 后全池即可恢复。非门槛
+  403 与带 key 模式仍按请求级透传。`zen_direct._egress_gate_answer`。
+- **fix(stream): SSE 停顿看门狗 + 租约按结局释放** — 死隧道令流零字节静默满 300s
+  读超时，异常穿透 `StreamRelay` 掐断客户端 SSE（hermes `stream_drop`）。
+  `STREAM_STALL_S`（默认 60s）超时或中途传输异常 → 合成
+  `finish_reason:"length"` + `[DONE]`；关闭钩子携带结局，`stalled`/`interrupted`
+  按失败释放（3 连败 cordon），`cut` 与客户端断连仍按 ok。
+- **fix(stream): 客户端写停滞看门狗** — `CLIENT_STALL_S`（默认 60s）：生成器停在
+  `yield` = ASGI 写被背压阻塞，超阈值即判客户端段死 → WARNING
+  `client write stalled`、取消响应任务、释放上游并写终态。监视任务自行完成释放
+  与日志（被取消的响应任务会让生成器成环，依赖 close 会拖到 GC）。
+- **fix(deploy): 容器启动补 `setup_logging()`** — Dockerfile 走
+  `uvicorn --factory`，从未经过 `python -m proxy_opencode`，容器根 logger 无
+  handler：全部 INFO 被丢弃、WARNING 走 lastResort 无 extras，无法归因到桶。
+- **fix(log): httpx 访问日志静默（红线）** — httpx INFO 行打印完整 URL，池探针
+  URL 的 userinfo 携带 agent Basic 凭据 → 泄入容器日志。`setup_logging` 将
+  `httpx`/`httpcore` 压到 WARNING，不得回退（
+  `test_setup_logging_silences_httpx_access_lines`）。
+- **fix(egress): 配额/门槛 cordon 随 ISP 换 IP 解除** — cordon 是对出口 IP 的
+  判决：探针观测到 IP 变化、新 IP 在 `expect_prefix` 内且就绪 → `cordon_lifted`；
+  外前缀 IP、探针未就绪、transport streak cordon 不解除。
+- **fix(egress): `POST /rotate` 传输失败不再立即判失败** — 命令可能已送达或 ONT
+  自行重拨；照常在 deadline 内轮询，观测到合法新 IP 即按成功收敛，明确 HTTP 拒绝
+  才是最终失败。
+- **fix(egress): 僵尸桶 `ready` 语义（两层防御）** — agent `/healthz` 的 `ready`
+  曾硬编码 true，出口全灭仍答 ready。agent 端改为
+  `egress_probe_ok is not False and 探针新鲜`（`PROBE_READY_GRACE_S=45s`）；网关
+  `_probe_one` 另把 `egress_probe_ok is False` 直接判 unhealthy。
+- **fix(egress): 选桶轮询均摊** — 原 `min(inflight, name)` 在全空闲时恒取字母序
+  最前的桶（顺序请求全落单桶）；改为 `itertools.count()` 轮转 + 稳定
+  least-inflight。
+- **fix(egress): 免费层 403 `FreeTierError` 按出口 IP 处理** — 释放为
+  `free_tier_rejected`（失败）+ 立即 cordon + 绕过阈值换 IP（每窗口每桶一次，
+  共用失败冷却）。此前按 ok 释放 → 桶一直"健康"地返回 403。
+- **fix(relay): 上游空错误体补标准信封** — 上游偶发 `400 {}`，裸 dict 中继后
+  掩码层又注入 `model`，客户端只看到 `400 {"model": ...}`（SDK 显示
+  "malformed"）。规则：带 `error` 键原样中继，其余包成 OpenAI 错误信封（裸
+  detail/message 截断 200 字符保留）。
+- **fix(relay): 静默上游截断合成 `finish=length`** — 显式告知输出上限停止，
+  而非协议违规。
 
 ### Added
-- **feat(egress): 硬 429 换 IP 30 分钟下限 + 出口前缀补齐（2026-10-25 PM）** — `ZEN_EGRESS_ROTATE_MIN_INTERVAL_S`（默认 `1800`，`0`=关闭）：同一桶两次「硬 429 换 IP」之间必须间隔，且只在**上一次换 IP 成功**后生效（失败重试仍走原 15 分钟 cooldown，语义不变）。动机：429 `FreeUsageLimitError` 四因同形，只有真实 per-IP 配额能靠新 IP 解决；2026-10-25 把非配额 429 当配额，单日换 IP `owin10-mobile/telecom/cc9 = 32/20/13` 次且每次重启都打散 agent 隧道（探针 ConnectTimeout，一次客户端请求挂起 >300s）。同时补齐 ECS `.env` 的 `ZEN_EGRESS_EXPECT_PREFIX`：telecom `121.234.0.0/16`、cc9 `122.195.0.0/16`（当日实测落段，原配置未覆盖 → 换 IP 后 `_lift_ip_scoped_cordon` 解不开配额 cordon），`deploy/ecs/env.example` 与 `docs/OPERATIONS.md` §2 桶表同步为现役三桶。测试 `test_hard_429_rotation_floor_can_be_disabled`、`test_egress_rotate_min_interval_env`（另更新 `test_hard_429_rotation_fires_once_per_window` 断言下限）。
-- **feat(failover): zen-direct 出口级故障自动切备用链路 `proxy_ms`（2026-10-25）** — 主链路撞上 429 配额 / 5xx / 503 出口闸门 / 传输失败时，请求改由同机 `proxy_ms`（ModelScope 聚合网关，宿主 `172.17.0.1:10003`）服务，保持窗口（`ZEN_FALLBACK_HOLD_S`，默认 120s）后自动半开探测主链路并切回；请求级 4xx 不切换。实现：`upstreams/failover.py` 的 `FailoverAdapter` 包在 `build_adapter` 外（一条覆盖三个协议路由 + /v1/models），`ZEN_FALLBACK_BASE_URL` 空则完全不包装（行为零变化）。醒目提醒三处：WARNING 日志 `FALLBACK ENGAGED/ROUTING/RECOVERED`、ERROR `FALLBACK FAILED`；JSONL 事件 `fallback_engaged/recovered/failed`；`/healthz` 新增 `fallback` 块（engaged / secondary / hold_remaining_s）。模型 ID 用 `ZEN_FALLBACK_MODEL_MAP` + `ZEN_FALLBACK_DEFAULT_MODEL` 改写（键为**路由层解析后**的上游 ID，如 `big-pickle`）。测试 `tests/test_failover.py` 12 例；ECS 实弹：非流式/流式均自动落到 proxy_ms 并返回正常内容。文档 `docs/ARCHITECTURE.md` §4「备用链路」、`docs/OPERATIONS.md` §2.3。
-- **feat(egress-agent): `onts[].interface` 接受字面 IPv4（Windows 源地址钉死）** — Python 的 `SIOCGIFADDR` ioctl 只存在于 Linux，配置里写接口名在 Windows/Android 上会被静默忽略：源地址不钉死时，两个 ONT 都在 `192.168.1.1` 的部署（owin10 有线移动 + WiFi 电信）会打到错误的光猫。新增 `egress.source_address()`（接口名走 ioctl，失败回退 `ipaddress.IPv4Address`），`rotate.ont_bind_source()` 改用之；`config.py` docstring 同步。测试 `test_source_address_literal_ipv4`、`test_source_address_linux_interface_name`（skipif 非 Linux）、`test_ont_bind_source_accepts_literal_ipv4`。
-- **feat(egress): owin10 双桶接回 ONT 换 IP（实弹两发）** — `C:\egress-agent\mobile.json` 补 `cmcc-v173`/`huawei`/`http://192.168.1.1`/`interface=192.168.1.222`，`telecom.json` 补 `hg8020c`/`huawei_ct`/`http://192.168.1.1`/`interface=192.168.2.235`；ECS `ZEN_EGRESS_ROTATION=owin10-mobile=500,owin10-telecom=500`。实弹：移动 223.68.24.82→223.68.24.122→223.68.27.206，电信 106.111.50.124→106.111.50.165，两侧 `last_rotation_ok=true`。
-- **fix(zen): 第五轮免费层门槛定案——body 形状门（system prompt 真实性）+ 免费模型 ID 门** — 2026-10-25 经 owin10 双桶活体消融定案：
-  - **body 门**：同出口 IP、同 bun 传输、同样新 mint session 的分钟级对照——真 1.19.4 抓包 body（38KB）**200**，网关合成 body（tiny messages）**429**；再消融：最小 4 合成工具 schema 无罪（200）、`max_tokens` 无关（50 亦 200）、**system prompt 必须是当前真身**——资产 `zen_prompt_default.txt` 已从 8528B（旧版，恰为真身前缀）更新为 12779B（1.19.4 抓包实拍，新增 skills 段）；`ZEN_MARKER_MODE` 默认 `bridge`→`full`（bridge 注记 ~70 token 已过不了门，伪装成层 2 配额 429）。
-  - **模型门（401 新形态）**：免费层只服务 `-free` 后缀裸 ID；付费裸 ID（如 `deepseek-v4.1-flash`）同 body 回 **401 `AuthError: Missing API key`**（非 403/429）。上游免费目录 85 个 ID（匿名 GET `/inference/v1/models` 可列，不烧额度），含 `deepseek-v4.1-flash-free`。
-  - **feat(config): `ZEN_MODEL_MAP`**（`from=to` csv）——请求模型 ID → 上游裸 ID 精确改写，精确命中优先于 provider 前缀剥离；测试 `test_zen_model_map_rewrites_public_alias_to_free_id`/`test_zen_model_map_parsing`。
-  - **fix(log): httpx 访问日志静默（红线修复）**——httpx INFO 行打印完整 URL，池探针 URL 的 userinfo 携带 agent Basic 凭据 → `ZEN_EGRESS_SECRET` 泄入容器日志；`setup_logging` 现将 `httpx`/`httpcore` 压到 WARNING（池自身的结构化探测日志不涉密、信息量等价）。测试 `test_setup_logging_silences_httpx_access_lines`。
-- **feat(egress): 第五/六桶 `owin10-mobile`/`owin10-telecom`（Windows 10 双上行）接入出口池** — opc2 永久下线后由 owin10 顶替：单设备双实例（10001=有线移动 `bind_source 192.168.1.222`→223.68.24.82，10002=电信 WiFi `bind_source 192.168.2.235`→106.111.50.124），egress-agent 以 Python 直跑（`C:\egress-agent`，SFTP 部署最新包+aiohttp），Task Scheduler `ONSTART` SYSTEM 计划任务 `EgressAgent-mobile/-telecom` 开机自启，防火墙放行 TCP 10001/10002；`bind_source` 源地址钉死出站网卡（Windows 强主机模型，`curl --interface` 同源验证）。ECS `.env` 移除 opc2 两桶。注意：win10 与 owin10-mobile 同移动 CGNAT 出口（223.68.24.82，上游额度共享）；owin10-telecom=旧 opc2-wifi 同公网 IP（106.111.50.124）。文档：`deploy/windows/README.md`（P6 落地记录待补）。
+
+- **feat(failover): zen-direct 出口级故障自动切备用链路 `proxy_ms`** — 主链路撞
+  429/5xx/503 出口闸门/传输失败时改由同机 proxy_ms（ModelScope 聚合网关）服务，
+  `ZEN_FALLBACK_HOLD_S`（默认 120s）后半开探测切回；请求级 4xx 不切换。实现
+  `upstreams/failover.py` 的 `FailoverAdapter`（覆盖三个协议路由 + `/v1/models`），
+  `ZEN_FALLBACK_BASE_URL` 空则不包装。三处提醒：WARNING/ERROR 日志、JSONL
+  `fallback_*`、`/healthz` 的 `fallback` 块。测试 `tests/test_failover.py` 12 例；
+  ECS 实弹非流式/流式均正常。
+- **feat(transport): zen 上游一跳改走 bun 子进程** — 上游按 TLS/HTTP 栈判定：
+  同一新出口 IP 分钟级对照，bun（boringssl/HTTP2）字节级克隆重放 200、httpx
+  （OpenSSL/HTTP1.1）同字节 429（伪装成配额）。实现
+  `zen_bun/forward.ts`（stdin body → stdout SSE 直通、stderr 单行
+  `META {status,headers}`、hop-by-hop 头剥离、`AbortController` 超时）+
+  `upstreams/zen_bun_transport.py`（spawn/环境净化/代理注入/超时/kill + httpx
+  响应面鸭子类型）；`zen_direct._exchange` 分发器（bun 优先、httpx 回退，语义与
+  日志一致）；镜像预装 bun 1.4.4。`ZEN_BUN_TRANSPORT/ZEN_BUN_BIN/ZEN_BUN_SCRIPT`；
+  dev 无 bun 自动回退。测试 `tests/test_zen_bun_transport.py` 13 例。
+- **feat(egress): 硬 429 换 IP 30 分钟下限** — `ZEN_EGRESS_ROTATE_MIN_INTERVAL_S`
+  （默认 1800，0=关闭），只在**上一次换 IP 成功**后生效（失败重试仍走 15 分钟
+  cooldown）。动机：429 四因同形，只有真实配额能靠新 IP 解决；2026-10-25 把非
+  配额 429 当配额，单日轮换 32/20/13 次并打散隧道。
+- **feat(egress): `onts[].interface` 接受字面 IPv4** — `SIOCGIFADDR` ioctl 只存在
+  于 Linux，Windows/Android 写接口名会被静默忽略（两台 ONT 同为
+  `192.168.1.1` 时会打错光猫）。新增 `egress.source_address()`（接口名走 ioctl，
+  失败回退字面 IPv4）；测试 `test_source_address_literal_ipv4` /
+  `test_ont_bind_source_accepts_literal_ipv4`。
+- **feat(egress): owin10 单设备双桶接入出口池** — `10001` 有线移动
+  （`bind_source 192.168.1.222`）、`10002` 电信 WiFi（`bind_source
+  192.168.2.235`），Python 直跑于 `C:\egress-agent`，Task Scheduler `ONSTART`
+  SYSTEM 自启；两桶均接 ONT（`huawei` / `huawei_ct`）并实弹轮换成功。
+- **feat(egress): Windows 桶部署路径** — `deploy/windows/README.md`（schtasks +
+  `bind_source`，含 `win10` 用 `.venv` + Startup 的旧路径对比）。
+- **feat(egress): 出口池自动换 IP（P5）** — 每桶日窗 `[08:00, 08:00+1d)`
+  Asia/Shanghai，达 `ZEN_EGRESS_ROTATION` 阈值触发；硬 429（`Retry-After >
+  3600s` 或无该头）与 403 门槛绕过阈值。编排：标记 rotating → `/rotate` → 轮询
+  IP 变化且在前缀内 → 清 cordon、计数归零；计数快照落 `/data` 跨重启存活。
+  `/admin/egresses` 增 `counters` 块与手动 `POST /admin/egresses/{name}/rotate`。
+- **feat(egress): 结构化事件日志** — `egress/eventlog.py`（JSONL，5MB×2 轮转，
+  写失败自动禁用），记录 cordon / 换 IP 前后 IP / 探测到的 IP 变化 /
+  `window_rollover` / `free_catalog_refreshed` / `fallback_*`。
+- **feat(stream): `STREAM_STALL_S` / `CLIENT_STALL_S` 配置项**（默认 60s，0=关闭；
+  事实源 `proxy_opencode/config.py`）。
 
 ### Changed
-- **chore(ops): owin10 Hermes 客户端 provider 收敛为 `oc_uni`（`openai-api` 根因定案）** — `openai-api` 是 Hermes **内置** provider（`hermes_cli/auth.py` / `models_catalog_static.py` 硬编码），picker 永远列它、删不掉；它"看起来被配上"的真因是 `auth.json` 的 `credential_pool` 会被 backing source 反复播种（`openai-api` ← `OPENAI_API_KEY`，`copilot` ← `gh auth token`），`load_pool()` 每次调用重新播种，只删 JSON 行数分钟内复活（实测 5min 写回）。三步清理：`auth.json` 置空 + 写 `suppressed_sources`（`openai-api: ["env:OPENAI_API_KEY"]`、`copilot: ["gh_cli","env:GH_TOKEN","env:GITHUB_TOKEN"]`）；`config.yaml` 只留 `oc_uni_id` 并加官方开关 `model_catalog.excluded_providers: [openai-api, copilot]`（必须 YAML 真 list，字符串形式会被 reader 静默忽略）；重启 gateway 与桌面版。`docs/OPERATIONS.md` 新增 §2.2 记录根因与三步流程。
-- **chore(egress): 出口池收敛为 owin10 双桶** — ECS `.env` 的 `ZEN_EGRESS_PROXIES`/`ZEN_EGRESS_EXPECT_PREFIX`/`ZEN_EGRESS_ROTATION` 三处移除 `win10`（与 `owin10-mobile` 同 CGNAT 出口、无独立换 IP 能力）与 `cc9`（设备下线），`/admin/egresses` 现役两桶；`EXPECT_PREFIX` 移动段补 `36.149.0.0/16`（当日实测落段）。文档：`docs/OPERATIONS.md` §2 桶表、`docs/ARCHITECTURE.md` §6；`deploy/ecs/env.example` 示例同步为两桶。
-- **feat(egress): 第四桶 `win10`（Windows 本机）接入出口池** — 本机只提供代理与数据转发（egress-agent 的 CONNECT 隧道 + `/healthz`），网关编排仍全部在 ECS。部署件：`deploy/windows/start-egress-agent.ps1`（幂等防重 + healthz 自检，Startup 目录 launcher 开机自启），配置在用户目录 `%USERPROFILE%\.egress-agent\win10.json`（凭据不入仓，见 `docs/ACCESS.md`）；listener 只绑 Tailscale IP；无 ONT、不入 `ZEN_EGRESS_ROTATION`。ECS 侧 `.env` 三处接入（PROXIES 追加桶、EXPECT_PREFIX 新桶前缀 `106.111.0.0/16` 族、ROTATION 不列）+ wifi 桶前缀补今晨重拨段。真测：池四桶探针全绿、CONNECT 数据面经本机隧道 opencode.ai 200。注意：win10 与 opc2-wifi 同家庭 WAN（同一公网 IP，上游额度共享、传输路径独立）。文档：`docs/OPERATIONS.md` §1/§2/§0.5、`docs/ARCHITECTURE.md` §1/§2、`deploy/ecs/env.example`。
-- **docs: `docs/EGRESS_OBSERVABILITY.md`** — 新增 `egress_request` JSONL 埋点方案（Schema、失败分类、ContextVar+try/finally 埋点建议、logrotate、jq/python 统计示例）。
-- **feat(stream): `STREAM_STALL_S` SSE 停顿看门狗配置（默认 60s，0=关闭）** — 所有反代流的静默上限（覆盖响应头后首字节与字节间隔）；`deploy/ecs/env.example` 有注释说明，事实源在 `proxy_opencode/config.py`。
-- **feat(stream): `CLIENT_STALL_S` 客户端写停滞看门狗配置（默认 60s，0=关闭）** — `relay_stream` 在 `yield` 停留超阈值即判客户端段死（ASGI 写被背压阻塞），取消响应任务并快速关闭连接；`deploy/ecs/env.example` 有注释说明，事实源在 `proxy_opencode/config.py`。
-- **feat(transport): zen 上游一跳改走 bun 传输子进程（2026-10-24 传输指纹门）** — 上游按 TLS/HTTP 栈判定客户端：同一新出口 IP 分钟级对照，bun（boringssl/HTTP2）字节级克隆重放 **200**、httpx（OpenSSL/HTTP1.1）同字节重放 **429**（伪装成配额 `FreeUsageLimitError`）；头级单变量（httpx 自动 `Accept-Encoding`/缺失 `Accept`）均 200 ⇒ 唯一差异=栈。实现：
-  - `proxy_opencode/zen_bun/forward.ts`：一次性子进程契约——stdin 请求体、stdout 原始 SSE/错误体直通、stderr 单行 `META {status,headers}`（fetch 收到响应头即写，正文尚未开始）；hop-by-hop 头剥离；`AbortController` 按 `ZEN_BUN_TIMEOUT_MS` 掐断；零日志零本地端口。
-  - `upstreams/zen_bun_transport.py`：`BunTransport`（spawn/环境净化/代理注入/超时/kill）+ `_BunResponse`（httpx.Response 形状的鸭子面：`status_code/headers/aiter_bytes/aiter_lines/aclose`）+ `BunTransportError`。
-  - `upstreams/zen_direct.py`：`_exchange` 分发器（bun 优先、httpx 回退）+ `_exchange_via_bun`（429/5xx/403-门槛/流式/聚合与 httpx 路径同语义同日志）；流收尾钩子提取为 `_stream_relay`（两传输共用）；`_stream_relay`/`_egress_proxy_url`——后者按当前租得桶 agent 即时拼 Basic 凭据（secret 不入 spec/admin/日志）。
-  - `openai_http`：`ResponseLike` Protocol 统一 httpx/bun 响应面（`StreamRelay`/`_aggregate_sse` 类型放宽）。
-  - `config.py`：`ZEN_BUN_TRANSPORT/ZEN_BUN_BIN/ZEN_BUN_SCRIPT`（镜像 ENV 默认 =1；dev 无 bun 自动回退 httpx，测试不受影响）。
-  - 镜像：`deploy/ecs/Dockerfile` 预装 bun 1.4.4（npmmirror 下载，运行期零外网依赖）+ `COPY zen_bun/forward.ts`；`deploy/ecs/env.example` 注释齐。
-  - 测试：`tests/test_zen_bun_transport.py` 13 例（from_settings 门禁、spawn 环境/代理注入、META 协议四态、429/流式适配器路径、凭据拼装、行切分）。
-  - 文档：`AGENTS.md` 硬约束 1（新增传输栈门条目+撤回探针烧穿归因）、`docs/OPERATIONS.md` §0.5 第三轮定案、`docs/ARCHITECTURE.md` §1。
-- **docs: 项目文档整体梳理与去重** — 按“同一事实只在一处维护”原则重构文档体系：
-  - `docs/ARCHITECTURE.md`：统一拓扑、端口注册表、ONT 驱动（三驱动 huawei/huawei_ct/fenghuo）、opc2 策略路由、Egress 健康判定（仅依赖探针）。
-  - `docs/OPERATIONS.md`：收束至部署、运行状态、排障、日常操作；删除大量历史实测复盘与重复细节，新增日志统计入口指向观测性文档。
-  - `docs/ACCESS.md`：收束至访问入口、API Key 与凭据去向（仅索引、不含凭据值），强化“凭据不入仓库”原则。
-  - `README.md`：大幅浓缩，突出文档地图与安全原则，去除冗余历史细节。
-  - `AGENTS.md`：精简引用链（将冗长架构/协议细节指向 `docs/ARCHITECTURE.md`），强化硬约束与日志红线。
-- **docs: 明确 Egress 健康判定** — 全文清理“IP 前缀硬门/expect_prefix 阻断健康”过时表述。健康判定现为 **`healthy = (ready and HTTP 200)`（仅依赖探针就绪）**；`matches_prefix` 仅作审计字段，不再影响 `healthy` 状态。
-- **docs: 文档间交叉引用统一** — 建立清晰引用关系，减少重复，提升可维护性。
+
+- **chore(egress): 出口池收敛为 owin10 双桶 + cc9** — `win10` 移出（与
+  owin10-mobile 同 CGNAT 出口、无独立换 IP 能力），`opc2` 两桶随设备永久下线
+  移除；`EXPECT_PREFIX` 补当日实测落段（telecom `121.234.0.0/16`、cc9
+  `122.195.0.0/16`、mobile `36.149.0.0/16`），否则换 IP 后 cordon 解不开。
+- **chore(zen): 公开模型目录回笼单别名** — 撤第二别名 `opencode/big-pickle`，
+  `PUBLIC_MODELS=deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle`
+  （备份 `.env.bak-singlemodel`）。
+- **chore(ops): owin10 Hermes 客户端 provider 收敛为 `oc_uni`** — `openai-api` 是
+  Hermes 内置 provider，且 `auth.json` 的 `credential_pool` 会被 backing source
+  反复播种（几分钟内复活）。三步清理见 `docs/OPERATIONS.md` §2.2。
+- **docs: 文档整体浓缩（本版）** — 同一事实只在一处维护：`ARCHITECTURE.md` 只留
+  拓扑/端口/池语义/ADR，`OPERATIONS.md` 只留现状/操作/排障/风险，事故编年压缩为
+  表格，`EGRESS_OBSERVABILITY.md` 区分「已落地的决策事件流」与「待落地的逐请求
+  账本」，`CHANGELOG` 合并重复小节。
 
 ### Docs
-- **docs: GitHub 访问方式入库（§6）+ Unreleased 段落去重** — `docs/ACCESS.md` 新增 §6：远端 `git@github.com:gitychzh/proxy_opencode.git`、统一 SSH over 443（`ssh.github.com:443`，国内 22 端口常被阻断）、`~/.ssh/config` 模板、本机与 owin10 的私钥归属与工作副本路径、`ssh -T` 验证口径与 git 身份初始化，并注明 `gh` CLI 未安装、不可依赖 `gh auth`。owin10 侧 2026-10-25 接入：原有 `github_ed25519` 未在账号授权（`Permission denied (publickey)`），改为部署已授权的 `id_ed25519`（原钥备份 `.bak-20261025`，`.ssh/config` 同步改 IdentityFile），实测 `ssh -T` 认证通过并可 `git clone`。同批把 `CHANGELOG.md` Unreleased 下重复的 3 个 `### Added`/`### Changed`/2 个 `### Docs` 段合并为 Added/Changed/Docs/Fixed/Removed 各一段（95 行，内容无损）。
-- **docs: 公开模型目录终态回笼单别名（2026-10-25 PM）** — owin10 双桶接入 day-2 决策：桌面客户端只需一条模型链路。ECS `.env` 撤第二别名 `opencode/big-pickle:Big Pickle:big-pickle`，`PUBLIC_MODELS=deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle`（对外只见 deepseek 别名，上游真实 ID 不出网关；备份 `.env.bak-singlemodel`）。`docs/OPERATIONS.md` §7 同步终态。owin10 桌面版 hermes 侧同步：`model.default=deepseek-ai/deepseek-v4.1-flash` @ `https://115.29.231.25:10002/v1`（域名入口走 CF 不代理 10002 必超时，仅 IP 直连）、context_length 200000 + 压缩 threshold 0.8（160K 自动压缩）、清空旧 `.bak`/模型列表缓存；端到端 one-shot 工具调用实测通过。
-- **docs: 全库整理去重（2026-10-25）** — 单栈口径落地、旧栈清退注记与悬空引用修复、big-pickle 旧口径清理：
-  - `docs/OPERATIONS.md`：现状快照 2026-10-25，删除过时"两栈并存"段；§3 常用操作从旧栈 `zen-lb`/`9443` 命令重写为 0.7.x（docker logs zen-gw / /admin/egresses / egress_request 统计指针）；§4 排障纪律去掉过时内联协议口径（≥2 工具），改指 AGENTS 硬约束 1；§6 风险与待办重写为现状五项（egress_request 账本缺口、cc9 下线、CGNAT 额度共享、域名化/ICP、/healthz 暴露）；§7 旧栈注记改为"已清退"。
-  - `docs/ARCHITECTURE.md`：端口注册表更新为现役桶（owin10 双桶/win10/cc9）、旧栈端口标注 2026-10-17 已清退；门判定摘要收敛为五门 + 指向 AGENTS（不重复维护）；组件地图加 Windows 部署指针；P6 状态更新。
-  - `docs/ACCESS.md`：设备侧端口口径更新（owin10-telecom 用 10002）、agent 共享 secret 行泛化到全部 Windows 桶。
-  - `docs/ARCHITECTURE.md`/`deploy/ecs/env.example`/`deploy/ecs/README.md`/`docs/EGRESS_OBSERVABILITY.md`：上游模型残留 `big-pickle` 口径改为 `-free` 裸 ID + `ZEN_MODEL_MAP` 现行事实。
-  - `README.md`：协议版本 1.18.32→1.19.4、公开别名映射改 `deepseek-v4.1-flash-free`、门禁块去重（指向 AGENTS.md）。
-  - **资产防误清警示**：`zen_prompt_default.txt` 入库版 14424B（抓包正文 + 捕获时挂载的 `<env>`/AGENTS 附录）为端到端 200 实测版本——`_default_prompt` 处钉死"严禁截断/清理"，OPERATIONS §0.5 同步更正 12779B 口径为 t6 实验捕获值、入库版为 14424B 整包。
-- **docs: 同步 0.7.x 三桶栈现状** — 同步 ONT 驱动（huawei_ct/fenghuo）、opc2 策略路由（uid1001→table410@wlx、uid996→table991@enp12s0）、凭据去向约定与可观测性设计。
-- **docs: 同步出口桶实况（2026-10-17 部署后）** — `docs/OPERATIONS.md` 拓扑块与桶表更新为当前出口 IP（opc2-wifi `114.239.48.176`、opc2-eth `223.68.24.71`、cc9 `122.195.202.2`）与逐桶 `expect_prefix`；补入轮换后落到的新 ISP 段 `opc2-wifi += 114.239.0.0/16`、`cc9 += 122.195.0.0/16`（否则轮换校验 `_wait_for_ip_change` 必判失败）。
 
-### Fixed
-- **fix(zen): 免费层形状门槛复测=两层门（工具名 ≥4 真名 + 每-IP/UTC日额度），2026-10-24 全池 429 定案** — 今日全池匿名 429 的根因是**两层叠加**并被当日探针自证混淆（字节级证据与消融阶梯见 `docs/OPERATIONS.md` §0.5）：
-  - **层 1 形状门（`403 FreeTierError`）**：要求 **≥4 个真名 opencode 工具**（1/2/3 真名全 403；4 真名 200 且 **schema/description 内容不校验**；混入 1 个改名工具即 403）。UA 版本（2.0.18 UA 亦过）/头名/`b3`+`traceparent`/`x-opencode-client` 值*全部不敏感*（消融证）。旧"≥2 内置名 + 合成 schema"口径是 2026-09-30 时代结论，上游已收紧。
-  - **层 2 配额门（`429 FreeUsageLimitError`）**：按**出口 IP / UTC 日**计量，`Retry-After` 指向下一个 UTC 0 点（实测 62799s）；传输失败/TLS reset/403 不烧额度。**当日全池 429 的根因：数百发手工/容器探针把桶 IP 与 win10 家宽的当日匿名额度提前烧尽**（网关 `egress_request` 账本 count=0 因不含探针）——"整窗 count=0 却全池 429"由此闭环。
-  - 层 1 判定先于层 2：形状缺陷请求在配额已烧穿的 IP 上仍返回 403（相邻请求分获 403/429 实证）。
-  - 修复（`zen_direct`+`config`）：`minimal` 注入数 **2→4**（pool 前四位改 1.19.4 客户端实发的 `bash,edit,glob,read`）、`captured2` 同步扩为该 4 工具子集、UA 默认改 `1.19.4/ai-sdk 4.0.23/bun 1.4.4`；头集对齐 1.19.4 抓包——新增 **`x-opencode-session-id`**（与 `x-opencode-session` 同值双头）、移除 `x-session-id`（legacy 稳定 UUID 头，1.19.4 已不发送）与重复的 `x-opencode-request-id`；`x-opencode-project` 由 `"global"` 改固定 40-hex 实例哈希（`OPENCODE_ZEN_PROJECT_ID` 可覆盖）。403 failover/cordon 语义保持不变（防御保留）。
-  - 测试：`tests/test_zen_direct.py`、`tests/test_config.py` 同步；pytest 258+33、ruff、mypy 全绿。
-  - 文档：`AGENTS.md` 硬约束 1、`docs/ARCHITECTURE.md` §5、`docs/OPERATIONS.md` §0.5。
-- **fix(egress): 僵尸桶 ready 语义——agent `ready` 反映探针活性与最近探测结果；网关核实 `egress_probe_ok`（2026-10-24 同日第二缺口）** — 部署首轮修复（上一条）时复测发现：opc2-wifi 的 `/healthz` `ready` 是**硬编码 true**，出口整体死（`bind_source` DHCP 漂移 `192.168.2.138`→`.235` + 电信腿对 `opencode.ai:443` 自身不可达、连败数小时放行），agent 照答 ready=true，池以 ready 单一判据选桶 → 僵尸桶持续领客户端工作（502 燃料）。修复分两层防御：
-  - agent `egress_agent/health.py`：`ready = egress_probe_ok is not False and 探针新鲜`——探针环每次尝试（成败皆）打单调点 `probe_at`，`PROBE_READY_GRACE_S=45s`（interval+15s）内视为新鲜；环停转（崩溃/卡死）或最近一次探测失败 → `ready: false`。旧字段 `egress_probe_ok` 保持不变。
-  - 网关 `egress/pool._probe_one`：第二道防线——payload `egress_probe_ok is False` 即判 unhealthy（即便 agent 仍答 ready=true）；旧 agent 不带该字段行为不变。
-  - 测试：`egress-agent/tests/test_health.py`（失败探测 / 探针环 stale / 首探前 ready=false）、`tests/test_egress_pool.py`（`egress_probe_ok=false` → unhealthy / 显式 true → healthy）。
-  - 文档：`docs/ARCHITECTURE.md` §5 ADR、`docs/OPERATIONS.md` §0.5。
-- **fix(egress): 配额/门槛 cordon 随 ISP 换 IP 解除 + agent 不可达的轮换继续轮询（hermes `billing` 429，2026-10-24）** — 定位：01:42–01:54Z 三桶连环故障——opc2-eth 硬 429 烧穿每日免费额度且 `POST /rotate` 撞上隧道抖动 30s 超时（`agent unreachable`，而 ONT 实际已在重拨）、opc2-wifi 出口传输连败 cordon、cc9 轮换所得新 IP（CGNAT 共享）同样瞬间 429；兜底耗尽后 429 `Free usage limit reached` 原样透传给 hermes（layer=billing, retryable=false）。修复（两处根因级缺口）：
-  - `egress.pool._probe_one → _lift_ip_scoped_cordon`：429 配额烧穿（`free_quota_exhausted`）与 403 门槛标记（`free_tier_rejected`）是**按出口 IP 的判决**——ISP 侧自行重拨得到合法前缀内的新 IP 且探针就绪时，cordon **立即解除**（事件 `cordon_lifted`，failure 计数清零）；外前缀 IP（eth 腿跳到 wifi 出口）与探针未就绪一律不解除；transport 配额类之外的 streak cordon 保持原 deadline，新 IP 若同样 429 会在首个请求上重新 cordon。
-  - `egress.rotate._rotate_flow`：`POST {agent}/rotate` 传输失败（可能命令已送达 agent 或 ONT 自行重拨）不再立即判 `failed`——照常在 deadline 内轮询 `/healthz` 观测 IP 变化，观测到合法新 IP 即按成功收敛；明确的 HTTP 拒绝（状态码/`ok=false`）仍是最终失败。
-  - 测试：`tests/test_egress_pool.py`（配额 cordon 随 IP 变解除 / 外前缀与未就绪不解除 / transport streak 不解除 / 403 门槛 cordon 解除）、`tests/test_egress_rotation.py`（unreachable 后轮询成功 / unreachable + IP 未见变化仍失败，detail 带两个原因）、`tests/test_egress_eventlog.py`、`tests/test_config.py` 联动放宽成功路径 poll deadline（冷启动探针数百 ms）。
-  - 文档：`docs/ARCHITECTURE.md` §5、`docs/OPERATIONS.md` §0.5。
-- **fix(ops): 全池 429 根因第三次（最终）修正——传输栈门，探针烧穿归因撤回** — 当日三段递进归因（①探针烧穿配额 → ②CGNAT 共享池"新 IP 到手即被租户烧穿" → ③最终=传输栈判定）以 ②→③ 的双栈对照实验定案：同机同出口 IP 分钟内，bun 字节级克隆 4/4 200、httpx 同克隆重放 429（`FreeUsageLimitError` 原文）；头级单变量排除后唯一差异=TLS/HTTP 栈。据此：层 2"数百发探针烧穿"与"全新 IP 即熄火=CGNAT 共享池"两个早前结论均撤回（429 不烧额度；探针从不触上游）；**探针红线保留**（200 计费的活体调用才消耗）。修复=feat(transport) 一条。已知待办：`egress_request` per-call 账本行在当前构建缺失（事件流仅 cordon/rotation 类），观测性缺口另行修复。详见 `docs/OPERATIONS.md` §0.5 第三轮定案。
-- **fix(zen): 每次上游试探重新 mint 会话（上游 session 单次使用，2026-10-24 PM 决定性）** — 上游对**复用会话**一律回层 2 同款 `429 FreeUsageLimitError`：同 IP 分钟级对照实测，新 mint=200、立即重放=429，且该 IP 随后仍连续服务新 mint ≥3 发。旧 `chat()` 每客户端请求 mint 一次、贯穿三条 failover 腿 = 从第二条腿起就是对已消费 session 的重放（这也解释了 bun 部署后首轮聊天仍整链 429：栈门已过但会话三腿衰竭）。修复：`chat()` in-loop 逐试探 `_headers()`；新增回归测试 `test_chat_mints_fresh_session_per_upstream_attempt`（failover 两腿两 session）。E 系消融证据链：E1 假代理被拒连（bun 尊重 `HTTPS_PROXY`，排除直连）；E2/E4/A 同 IP 新会话+克隆 body 200×3（网关自 mint 头亦证无罪）；E7/E8/E9/E10 复用会话 429×4（克隆/最小 body 均无罪）；E5/E6 的 401 为实验脚本用了未映射模型 ID（`_zen_model` 只剥 provider 前缀，别名→裸 ID 映射在 route/catalog 层）。文档：`AGENTS.md` 硬约束 1 第四轮条目、`docs/OPERATIONS.md` §0.5 第四轮定案。
-- **fix(egress): 免费层 403 `FreeTierError` 按出口 IP 处理（failover + cordon + 换 IP）** — 2026-10-17 定位：协议已合规（≥2 内置工具 + descending session + `stream`）的请求在**被标记的出口 IP** 上仍 403 `FreeTierError`；同一字节请求换新 IP（旋转所得）或 ECS 宿主 IP 即 200；而 `/healthz` 探针不检测门槛，被标记的桶仍判健康并持续分发。修复：
-  - 适配器 `zen_direct`：匿名模式 403 `FreeTierError` → 释放租赁为 `free_tier_rejected`（失败），并触发 `chat()` 桶间 failover（SSE 未开播、客户端零字节）；非匿名或其它错误类型的 403 仍按请求级 ok 释放。
-  - 池 `pool.release`：`free_tier_rejected` **立即 cordon**（不等 3 连败），并通知 observer。
-  - 轮换 `rotate` + `counters.should_rotate_on_free_tier`：**绕过阈值立即换 IP**，每窗口每桶至多一次，失败按 `ROTATION_RETRY_COOLDOWN_S` 冷却后可重试（与硬 429 共用去重/冷却）。
-  - 适配器 `_headers()`：恢复抓包中的匿名 `Authorization: Bearer public`（与模块文档一致；实测该头有无均可 200）。
-  - 测试：`test_zen_direct.py`（failover / cordon / 非门槛 403 / 带 key 不换桶）、`test_egress_pool.py`（立即 cordon + 跳过）、`test_egress_rotation.py`（门槛一次性轮换）。
-  - 文档：`AGENTS.md` 硬约束 1、`docs/ARCHITECTURE.md` §5、`docs/OPERATIONS.md` §0.1。
-- **fix(stream): SSE 停顿看门狗 + egress 租约按结局释放（hermes `stream_drop`，2026-10-19）** — 定位：故障在网关→上游段——opc2-wifi 死隧道令流零字节静默满 `OPENCODE_ZEN_TIMEOUT_S=300`，`httpx.ReadTimeout` 穿透 `StreamRelay` 后 uvicorn 掐断客户端 SSE，hermes 报 `stream_drop`（完整复盘见 `docs/OPERATIONS.md` §0.2）。修复：
-  - `openai_http.StreamRelay`：停顿看门狗（`STREAM_STALL_S`）超时或中途 httpx 传输异常 → 记 WARNING（`reason=stream_stalled`/`stream_interrupted`，只含错误类与耗时，无内容）→ 走既有合成终止块路径收尾（`finish_reason:"length"` + `[DONE]`），异常不再穿透掐断连接；关闭钩子改携带结局（completed/cut/stalled/interrupted/disconnected）。
-  - `zen_direct`：按结局释放租赁——`stalled`/`interrupted` 按**失败**（`kind=stream_stalled`/`stream_interrupted`，3 连败 cordon 死桶）并记 WARNING 带 `egress=桶名`；此前 `_released` 恒 `ok=True`，坏桶永不累计失败、永不 cordon。`cut`（上游干净截断，健康隧道仅转发）与客户端断连仍按 ok 释放（带 kind 供统计）。
-  - 测试：`tests/test_zen_direct.py`（停顿/首字节静默/中途中断/看门狗开启下的正常完成/关闭钩子结局/池按失败释放）、`tests/test_config.py`（默认/覆盖/关闭）；文档：`docs/ARCHITECTURE.md` §5 ADR、`docs/OPERATIONS.md` §0.2、`deploy/ecs/env.example`。
-- **fix(stream): 客户端段写停滞看门狗（hermes 600s `stream_drop`，2026-10-19）** — 定位：故障在 **hermes↔网关最后一跳**（公网段黑洞），与 §0.2 的上游段静默不同——网关侧上游仍在正常产块，`relay_stream` 已中继 242 块但卡在 uvicorn `send()`（背压 `flow.drain()`），既无上游静默也无 TCP 断连可观测，直到 hermes 600s 自杀（12:04:59Z `Stream stale for 600s → WinError 10053`）；caddy `aborting` 长期计数证明该客户端段劣化是慢性问题，非本次回归（完整复盘见 `docs/OPERATIONS.md` §0.4）。修复：
-  - `routes/_pipeline.py::relay_stream`：`client_stall_s` 参数 + 监视任务。生成器停在 `yield` 恰等于 ASGI 写该块被背压阻塞，"交出块后超阈值没来取下一块"即判客户端段死（仅上游读期间不清零，慢上游不误报）→ WARNING `client write stalled`（含 request_id/model/client/chunks/blocked_s，无内容）、结束理由 `client_stalled`、取消响应任务（uvicorn 随即 `transport.close()`，客户端秒级失败重试）。监视任务**自行**释放上游并写终态 `stream ended`——被取消的响应任务经其 `CancelledError` traceback 钉住生成器（`owner` 闭包成环），依赖生成器 close 会把释放与日志拖到环状 GC 之后。
-  - 三路由（`routes/chat.py`、`routes/responses_api.py`、`routes/anthropic_api.py`）传入 `settings.client_stall_s`。
-  - 测试：`tests/test_logging.py`（停滞触发 WARNING+`client_stalled`+取消任务+释放上游+不记完成、`0` 关闭仍可完成、慢上游不误报）、`tests/test_config.py`（默认/覆盖/关闭）；文档：`docs/ARCHITECTURE.md` §5 ADR、`docs/OPERATIONS.md` §0.4、`deploy/ecs/env.example`。
-- **fix(deploy): 容器启动补 `setup_logging()`（生产日志曾整层丢失）** — Dockerfile CMD 走 `uvicorn --factory proxy_opencode.app:create_app_from_env`，从未经过 `python -m proxy_opencode`，容器根 logger 无 handler：全部 INFO（`chat completion`/`stream ended`）被丢弃、WARNING 走 lastResort 无格式无 extras，**无法从日志归因到桶**（2026-10-19 排障被迫翻设备 journalctl）。现 `create_app_from_env()` 先调 `setup_logging()`（uvicorn 默认 LOGGING_CONFIG 无 `root` 键，顺序安全）；测试 `tests/test_logging.py::test_app_factory_configures_logging`。
-- **fix(zen): 兜底耗尽的匿名 403 `FreeTierError` 改回 503 `egress_unavailable`（不再透传成客户端 auth 错）** — 2026-10-19 06:39Z 实测：单请求烧穿全部 3 次尝试（cc9 被标记 403 → opc2-wifi 隧道传输失败 → opc2-eth 被标记 403），分类 / cordon / 轮换全部正常，但兜底把**出口级** 403 原样透传，hermes 判为 layer=auth、retryable=false；约 90s 后轮换已恢复全池（复测 200）。修复：`zen_direct` 新增 `_egress_gate_answer`——最终（兜底耗尽或无池直连）的匿名 403 `FreeTierError` → **503 + `error.code=egress_unavailable`**（WARNING `answering 503`），非门槛 403 与带 key 模式仍按请求级原样透传。测试：`tests/test_zen_direct.py`（兜底 503、无池 503、单桶 cordon+503）；文档：`docs/ARCHITECTURE.md` §5、`docs/OPERATIONS.md` §0.3。
+- **docs: GitHub 访问方式（`ACCESS.md` §6）** — 远端
+  `git@github.com:gitychzh/proxy_opencode.git`，统一 SSH over 443
+  （`ssh.github.com:443`，国内 22 端口常被阻断）、`~/.ssh/config` 模板、各机私钥
+  归属与工作副本路径、`ssh -T` 验证口径。`gh` CLI 未安装，不要依赖 `gh auth`。
+- **docs: Egress 健康判定口径统一** — `healthy = ready 且探针 200`；
+  `matches_prefix` 仅作审计字段，不再影响健康。
 
 ### Removed
-- **docs: 去除冗余段落** — 删除双桶性能对比、抓包复盘等多处重复的历史细节，避免旧拓扑/过期结论干扰当前事实。
+
+- 旧栈残留：ECS 上的 `zen-lb` / `zen-glm53` / `cloudflared-ingress`（2026-10-17
+  清退）、ECS 本机桶（机房 IP 额度即耗）、opc2 双桶（设备永久下线）。
+- 文档中的三桶/四桶历史拓扑、"两栈并存"、双桶性能对比与抓包复盘细节（压缩为
+  `ARCHITECTURE.md` §10 与 `OPERATIONS.md` §5 的要点）。

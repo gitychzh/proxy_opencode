@@ -29,7 +29,7 @@ BREAKING 变更在正文写 `BREAKING CHANGE:` 说明，并升级 major 版本�
 
 ## PR 检查清单
 
-- [ ] CI 通过（install + pytest）
+- [ ] CI 通过（gateway + balancer + egress-agent 三个 job）
 - [ ] 行为变更已补/改 `tests/` 中的测试
 - [ ] 无密钥、无上真实 key、无消息体日志
 - [ ] 涉及约束变更时同步更新 `docs/engineering-constraints.md` 并在 PR 说明原因
@@ -55,10 +55,12 @@ pytest tests/ -q
 pytest balancer/tests/ -q
 ruff check proxy_opencode tests balancer
 mypy proxy_opencode
+# egress-agent 侧（同一套三项）
+cd egress-agent && pytest tests/ -q && ruff check egress_agent tests && mypy egress_agent
 ```
 
 要求 Python 3.12（CI 用 3.12.13 验证，见 `docs/engineering-constraints.md`）。
-这四条与 CI 完全一致，且**都是强制的**：不要给门禁加“未安装就跳过”的守卫，
+这些与 CI 完全一致，且**都是强制的**：不要给门禁加“未安装就跳过”的守卫，
 那会让它静默失效。
 
 ## 版本与发版

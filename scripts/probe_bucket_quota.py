@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
 """Per-bucket free-tier quota probe (no key material printed or stored).
 
-For each bucket gateway this script:
+For each gateway endpoint this script:
   1. mints a short-lived dynamic key via POST /admin/keys (admin key comes
      from the QUOTA_PROBE_ADMIN_KEY environment variable — never hardcode it),
-  2. sends ONE minimal real chat request through the bucket (so the upstream
-     call egresses from the bucket's own IP — exactly what the free-tier
-     quota is metered on),
+  2. sends ONE minimal real chat request through the gateway (so the upstream
+     call egresses from the pool's own IP — exactly what the free-tier quota
+     is metered on),
   3. revokes the temporary key.
 
+0.7.x has a SINGLE gateway on ECS: the pool picks the egress bucket, so this
+probe reports the pool's current egress, not a specific bucket. Use
+`GET /admin/egresses` for per-bucket cordon state.
+
 Reading the result:
-    QUOTA OK   -> that bucket's egress has quota for the current UTC day
+    QUOTA OK   -> the egress used has quota for the current UTC day
     chat -> 429 FreeUsageLimitError -> that egress's daily quota is exhausted
              (resets at the UTC day boundary, per egress IP independently)
     other      -> see the status line (auth/network/deployment problem)
 
 Usage:
-    python scripts/probe_bucket_quota.py                 # all four buckets
-    python scripts/probe_bucket_quota.py win10-local     # a single bucket
+    python scripts/probe_bucket_quota.py
+    python scripts/probe_bucket_quota.py local        # one named endpoint
 
-The default bucket list mirrors docs/OPERATIONS.md §1; override with
-QUOTA_PROBE_BUCKETS="name=url,name=url" when the topology changes.
+Default endpoint mirrors docs/OPERATIONS.md §1; override with
+QUOTA_PROBE_BUCKETS="name=url,name=url" when the entry point changes.
 """
 
 from __future__ import annotations
@@ -32,10 +36,7 @@ import urllib.error
 import urllib.request
 
 DEFAULT_BUCKETS = [
-    ("win10-local", "http://127.0.0.1:8791"),
-    ("owin10", "http://100.109.109.108:8791"),
-    ("ubuntu26", "http://100.109.57.26:8791"),
-    ("phone115", "http://100.87.219.115:8792"),
+    ("ecs", "http://127.0.0.1:10010"),
 ]
 
 PROBE_PROMPT = "reply with exactly: pong"

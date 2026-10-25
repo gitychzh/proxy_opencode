@@ -1,7 +1,14 @@
 # egress-agent 部署模板
 
-模板文件，供 `install.sh` 使用。**真实配置只落在设备上**
-（`/etc/egress-agent/<实例名>.json`，权限 600），仓库内永远只有占位符。
+> **现状（2026-10-25）**：现役设备是 `owin10`（Windows，双桶 `owin10-mobile`
+> `:10001` / `owin10-telecom` `:10002`）与 `cc9`（Android chroot，`:10001`）。
+> 本文的 `wifi`/`eth`/`pad` 实例名与 opc2 策略路由章节是 **Linux 侧历史参考**
+> （opc2 已永久下线），照抄到 owin10 前先读
+> [`windows/README.md`](windows/README.md)。拓扑表见
+> [`../../docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) §8。
+>
+> 模板文件，供 `install.sh` 使用。**真实配置只落在设备上**
+> （`/etc/egress-agent/<实例名>.json`，权限 600），仓库内永远只有占位符。
 
 ## systemd 实例单元
 

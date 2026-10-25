@@ -156,7 +156,7 @@ def test_stream_stall_s_default_env_and_disable(monkeypatch):
 def test_client_stall_s_default_env_and_disable(monkeypatch):
     """The client-write watchdog defaults on: on 2026-10-19 a blackholed
     client leg held a stream open for the full 600s hermes timeout while
-    upstream kept producing (see docs/OPERATIONS.md §0.4)."""
+    upstream kept producing (see docs/OPERATIONS.md §4.3)."""
     monkeypatch.delenv("CLIENT_STALL_S", raising=False)
     assert config.load_settings().client_stall_s == 60
     monkeypatch.setenv("CLIENT_STALL_S", "15")

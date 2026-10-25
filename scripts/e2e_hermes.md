@@ -3,17 +3,17 @@
 ## 前置
 
 1. 已安装 Hermes；运行 `hermes --version` 确认 CLI 可用。
-2. 网关已启动且 Hermes provider 指向该网关（README 有本地开发示例）；模型 ID 为 `ds41f_cus`。
+2. 网关已启动且 Hermes provider 指向该网关（README 有本地开发示例）；模型 ID 为公开别名 `deepseek-ai/deepseek-v4.1-flash`。
 3. 真实 E2E 会消耗上游请求与额度。优先跑 mock 协议 E2E；仅在需要验证真实网络/客户端时运行本页步骤。
 
 ## 步骤
 
 ```bash
-# 启动本地开发网关。端口由项目默认配置决定，开发默认 8787；部署桶端口以 ACCESS.md 为准。
+# 启动本地开发网关。端口由项目默认配置决定，开发默认 8787；部署入口以 `docs/ACCESS.md` 为准。
 GATEWAY_API_KEYS=dev-local-key python -m proxy_opencode
 
 # Hermes provider 已配置为 proxyo 时，执行一次真实请求
-hermes chat --provider proxyo -m ds41f_cus --oneshot --cli -q "Reply with exactly: pong"
+hermes chat --provider proxyo -m deepseek-ai/deepseek-v4.1-flash --oneshot --cli -q "Reply with exactly: pong"
 
 # 批量问答、推理、工具调用；工具测试会在工作目录写文件
 python scripts/e2e_hermes.py
@@ -25,7 +25,7 @@ python scripts/e2e_hermes.py
 | --- | --- | --- |
 | `E2E_HERMES_BIN` | PATH 中的 `hermes` | Hermes 可执行文件路径 |
 | `E2E_PROVIDER` | `proxyo` | 已配置的 Hermes provider 名 |
-| `E2E_MODEL` | `ds41f_cus` | 网关公开模型 ID |
+| `E2E_MODEL` | `deepseek-ai/deepseek-v4.1-flash` | 网关公开模型 ID |
 | `E2E_WORKDIR` | 当前目录 | 工具用例工作目录 |
 | `E2E_REPORT` | `./e2e_report.json` | JSON 报告路径 |
 | `E2E_N` | `36` | 请求条数；真实请求会消耗上游资源 |
