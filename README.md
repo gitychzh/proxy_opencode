@@ -1,6 +1,6 @@
 # proxy_opencode
 
-OpenAI 兼容本机网关。默认以 **`zen-direct`** 模式直连 [OpenCode Zen](https://opencode.ai/)，支持免费模型（如 `big-pickle`）、原生 tool call 与 token 级流式。
+OpenAI 兼容本机网关。默认以 **`zen-direct`** 模式直连 [OpenCode Zen](https://opencode.ai/)，支持免费模型（`-free` 后缀裸 ID，经 `ZEN_MODEL_MAP` 别名映射）、原生 tool call 与 token 级流式。
 
 ```text
 hermes / codex CLI / claude code / 任意 OpenAI SDK
@@ -9,7 +9,7 @@ hermes / codex CLI / claude code / 任意 OpenAI SDK
 
 ## 模式
 
-- **`zen-direct`（默认）**：按 opencode 1.18.32 客户端协议直连 `https://opencode.ai/zen/v1/chat/completions`。SSE 逐字节透传，非流式由网关聚合。
+- **`zen-direct`（默认）**：按 opencode 1.19.4 客户端协议直连 `https://opencode.ai/zen/v1/chat/completions`（免费层多层门：见 `AGENTS.md` 硬约束 1）。SSE 逐字节透传，非流式由网关聚合。
 - **`opencode-serve`（回退）**：驱动本机官方 opencode serve API（当前机器上不可用）。
 - **`openai`（透传）**：通用 OpenAI 兼容上游透传。
 
@@ -38,27 +38,19 @@ curl -H "Authorization: Bearer dev-local-key" -H "Content-Type: application/json
 | `POST /v1/responses` | **codex CLI**（OpenAI Responses API） | `Authorization: Bearer <key>` |
 | `POST /v1/messages` | **claude code**（Anthropic Messages API） | `x-api-key: <key>` 或 `Authorization: Bearer <key>` |
 
-默认公开别名：`deepseek-ai/deepseek-v4.1-flash`（映射到上游裸 ID `big-pickle`）。**仅公开别名可被请求**，上游裸 ID 一律 404。被反代裸 ID 仅通过隐藏端点 `GET /v1/models_cus?key=<key>` 展示（排障专用）。
+默认公开别名：`deepseek-ai/deepseek-v4.1-flash`（经 `ZEN_MODEL_MAP` 映射到上游免费裸 ID `deepseek-v4.1-flash-free`；别名规则见 `deploy/ecs/env.example`）。**仅公开别名可被请求**，上游裸 ID 一律 404。被反代裸 ID 仅通过隐藏端点 `GET /v1/models_cus?key=<key>` 展示（排障专用）。
 
 ## 本地开发
 
 ```bash
 uv venv --python 3.12.13 .venv
 uv pip install -e '.[test,dev]' --python .venv/Scripts/python.exe
+pip install -e 'egress-agent[test,dev]'
 
-# 核心门禁
-pytest tests/ -q
-pytest balancer/tests/ -q
-ruff check proxy_opencode tests balancer
-mypy proxy_opencode
-
-# egress-agent 侧门禁
-cd egress-agent
-pip install -e '.[test,dev]'
-pytest tests/ -q
-ruff check egress_agent tests
-mypy egress_agent
-cd ..
+# 核心门禁（完整清单与要求见 AGENTS.md §工程化门禁）
+pytest tests/ -q && pytest balancer/tests/ -q
+ruff check proxy_opencode tests balancer && mypy proxy_opencode
+cd egress-agent && pytest tests/ -q && ruff check egress_agent tests && mypy egress_agent && cd ..
 ```
 
 ## 文档地图

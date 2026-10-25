@@ -67,8 +67,8 @@ tail -f deploy/ecs/data/egress_events.jsonl
 大小轮转 5MB×2（同目录 `.1`/`.2`）。事件只含桶名/IP/计数/时间，无凭据与
 消息内容（红线）。
 
-**被反代模型浏览（P3，/v1/models_cus）**：网关反代的上游裸 ID（默认仅
-`big-pickle`）的唯一展示端点，浏览器直接打开（IP 入口需先信任自签 CA / 或用
+**被反代模型浏览（P3，/v1/models_cus）**：网关反代的上游裸 ID（当前部署
+`deepseek-v4.1-flash-free`）的唯一展示端点，浏览器直接打开（IP 入口需先信任自签 CA / 或用
 域名入口）：
 
 ```

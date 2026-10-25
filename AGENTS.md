@@ -12,7 +12,7 @@
 
 ## 项目概述
 
-`proxy_opencode`：OpenAI 兼容（`/v1/chat/completions`、`/v1/models` 等）的本机网关。默认以 **`zen-direct` 模式直连 OpenCode Zen**（重构 opencode 1.18.32 客户端协议，使用免费模型裸 ID `big-pickle` 等）；另保留 `opencode-serve`（驱动本机官方 serve）与 `openai`（通用透传）两种模式。
+`proxy_opencode`：OpenAI 兼容（`/v1/chat/completions`、`/v1/models` 等）的本机网关。默认以 **`zen-direct` 模式直连 OpenCode Zen**（重构 opencode 1.19.4 客户端协议，使用免费 `-free` 后缀裸 ID，如 `deepseek-v4.1-flash-free`）；另保留 `opencode-serve`（驱动本机官方 serve）与 `openai`（通用透传）两种模式。
 
 详细架构、拓扑、端口、驱动等见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 

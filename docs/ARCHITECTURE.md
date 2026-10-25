@@ -1,12 +1,11 @@
 # 架构总册（ARCHITECTURE）
 
 > 本文件是 **0.7.x 新栈**的唯一权威描述：网关整体搬进 ECS 的一个 Docker
-> 容器，四/五个配额桶设备只跑 `egress-agent`（设备侧出口代理）。
+> 容器，配额桶设备只跑 `egress-agent`（设备侧出口代理）。
 >
-> **双轨并存（硬性）**：旧栈（ECS `zen-lb` + 各设备完整网关部署，入口
-> `9443`）在新栈稳定运行前**原样保留、不做任何改动**；只有项目所有者下
-> 命令后才进入退役流程（见 §7）。hermes 的旧 alias（`cusoc` → `9443`）
-> 在退役前保持不动。
+> **单栈（2026-10-25 现状）**：旧栈（ECS `zen-lb` + 各设备完整网关部署，
+> 入口 `9443`）已于 2026-10-17 从 ECS 彻底清退（详见 §7 末尾注记）；
+> hermes 现走新栈入口 `https://115.29.231.25:10002/v1`。
 
 ---
 
@@ -62,13 +61,11 @@ forward.ts` 一次性子进程（boringssl/HTTP2，镜像内置 bun 1.4.4；
 
 | 端口 | 归属 | 说明 |
 |---|---|---|
-| **10001** | 设备侧 egress-agent | 代理端口（CONNECT + /healthz + /rotate 同端口）。opc2-wifi / cc9 / win10 各一个实例 |
-| **10002** | 设备侧 egress-agent（opc2-eth） | 同一台设备第二上行专用；**同时是 ECS 对客户端入口**（caddy:10002 → 容器 127.0.0.1:10002） |
-| **10003** | 预留 | 未来第 5/6 出口或第二服务 |
-| 9443 | 旧栈入口（caddy → zen-lb:7892） | 退役前不动；hermes 旧 alias 仍在用 |
-| 7892 / 8791 / 8793 / 46667 等 | 旧栈内部端口 | 退役前不动 |
+| **10001** | 设备侧 egress-agent | 代理端口（CONNECT + /healthz + /rotate 同端口）。owin10（mobile/telecom 双实例）/ win10 / cc9 |
+| **10002（设备）** | 设备侧 egress-agent 第二实例 | 同一台设备第二上行专用（owin10-telecom）；**同时是 ECS 对客户端入口**（caddy:10002 → 容器 127.0.0.1:10002） |
+| **10003** | 预留 | 未来出口或第二服务 |
+| 9443 / 7892 / 8793 / 46667 等 | 旧栈端口 | **已于 2026-10-17 从 ECS 清退**；设备侧 8791 旧本机网关不可达闲置 |
 | 40016 / 40066 | GLM-5.3 / GLM-5.3F 网关（ECS 现有服务） | 与新栈无关，不动 |
-| 8791（本机 win10） | 旧本机网关（开发/调试） | 退役前不动 |
 
 安全组：ECS 入站新增 10002（与 9443 同法）；设备侧 10001/10002 只听
 Tailscale 100.x（systemd 绑定 0.0.0.0 但靠 tailscale 网络隔离，另加
@@ -80,7 +77,7 @@ agent 代理 basic auth 双保险）。
 |---|---|---|
 | `proxy_opencode/egress/` | pool / counters / catalog / updater / rotate | P2-P5 逐个落地，P0 为契约桩 |
 | `egress-agent/` | Python 包：config / cli / logging（P0 真实）+ proxy / egress / health / rotate（P1） | P1 |
-| `egress-agent/deploy/` | systemd 模板单元、安装脚本、配置模板、opc2 双上行 uid 路由说明 | P0 |
+| `egress-agent/deploy/` | systemd 模板单元、安装脚本、配置模板；Windows 桶（owin10/win10）部署见 `deploy/windows/README.md`（schtasks + `bind_source` 实测路径） | P0 |
 | `egress-agent-android/` | Kotlin 原生版占位（wire 契约已冻结） | P6 |
 | `deploy/ecs/` | Dockerfile/compose（P2）、caddy 10002 片段（含 LE DNS-01 说明） | P0/P2 |
 
@@ -94,7 +91,7 @@ agent 代理 basic auth 双保险）。
 | P3 | 0.7.0 | catalog 反代白名单（默认仅 big-pickle）+ 隐藏 /v1/models_cus；hermes 加新 alias（旧 alias 保留） | **已完成**（2026-10-17 收敛为严格别名：裸 ID 不可请求） |
 | P4 | 0.7.1 | updater：每日 02:00 查 GitHub release（含 prerelease），分级采用 | 未开始 |
 | P5 | 0.7.2 | 换 IP：计数器窗口 + 500 触发 + ONT 重启 + IP 变更验证 + 429 兜底 | **已完成**（2026-10-17 三桶 ONT 驱动全部实弹验证，见 §6） |
-| P6 | 0.8.0 | Windows agent 转正、Android Kotlin 版、文档浓缩定稿、旧栈退役（等命令） | 未开始 |
+| P6 | 0.8.0 | Android Kotlin 版、文档浓缩定稿 | 未开始（Windows agent 已先行落地：win10 2026-10-24、owin10 双桶 2026-10-25，见 `egress-agent/deploy/windows/README.md`；旧栈 ECS 侧已于 2026-10-17 清退） |
 
 ### P5 现状（2026-10-16，ECS 侧代码完成，设备侧待真机）
 
@@ -186,17 +183,18 @@ agent 代理 basic auth 双保险）。
 
 ### 公开模型目录（2026-10-16 起；2026-10-17 收敛为单模型严格别名）
 
-- **别名**：默认 `deepseek-ai/deepseek-v4.1-flash` → 上游裸 ID `big-pickle`
-  （big-pickle 即 DeepSeek V4.1 Flash；此前过渡名 `ds41f_cus`/`cus1/deepseek-V4.1-Flash`
-  由 ECS `.env` 的 `PUBLIC_MODELS` 继续保留即可兼容 hermes 旧配置）。
-  `/v1/models` 返回严格 OpenAI 形状（`id/object/created/owned_by`，2026-10-17 起
+- **别名**：默认 `deepseek-ai/deepseek-v4.1-flash` → 上游免费裸 ID
+  `deepseek-v4.1-flash-free`（2026-10-25 起经 `ZEN_MODEL_MAP` 改写，精确命中
+  优先于 provider 前缀剥离；此前上游为 `big-pickle`，现退场）。`/v1/models`
+  返回严格 OpenAI 形状（`id/object/created/owned_by`，2026-10-17 起
   不再带 `display_name`），hermes 等 agent 直接自动发现；**只有 `PUBLIC_MODELS`
   里的对外 id 可以被请求**，上游裸 ID 一律 404（`registry.resolve` 不再接受
   上游拼写）。
-- **被反代模型白名单**：`OPENCODE_ZEN_MODELS`（默认仅 `big-pickle`）是网关
-  唯一反代的上游模型集合。`egress/catalog.py` 每 10 分钟拉
+- **被反代模型白名单**：`OPENCODE_ZEN_MODELS` 是网关唯一反代的上游模型集合
+  （当前部署为 `deepseek-v4.1-flash-free`）。
+  `egress/catalog.py` 每 10 分钟拉
   `GET https://opencode.ai/zen/v1/models`，按上游自带标记
-  （`allowAnonymous`/`cost`/`pricing`；缺标记时按 `-free` 后缀 + `big-pickle`）
+  （`allowAnonymous`/`cost`/`pricing`；缺标记时按 `-free` 后缀）
   判定免费，再与白名单求交集——2026-10-17 起不再枚举"全部免费模型"，也不再有
   裸 ID 透传（聊天接口对上游裸 ID 返回 404）。
 - **`/v1/models_cus`（隐藏端点）**：唯一展示被反代上游裸 ID 的地方；鉴权接受

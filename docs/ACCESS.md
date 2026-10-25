@@ -10,7 +10,7 @@
 
 - **客户端入口（IP 直连）**：`https://115.29.231.25:10002/v1`（IP 直连 + 自签 CA）
 - **客户端入口（域名）**：`https://llm.223722.xyz:10002/v1`（LE 真证书，客户端零安装）
-- **设备侧 egress-agent**：`10001`（opc2-eth 专用 `10002`）
+- **设备侧 egress-agent**：各桶 `10001`（owin10 第二上行 telecom 桶用 `10002`，端口注册表见 ARCHITECTURE §2）
 - **被反代模型清单（排障专用）**：`https://115.29.231.25:10002/v1/models_cus?key=<KEY>`（仅展示上游裸 ID，聊天接口不接受裸 ID）
 
 > 标准 `/v1/models` 只列公开别名 `deepseek-ai/deepseek-v4.1-flash`（严格 OpenAI 形状）。IP 入口需先信任自签 CA。
@@ -28,7 +28,7 @@
 | **LB 管理 Key** | ECS 环境（仓库外） | `ZEN_LB_API_KEY` 只进环境变量，LB fail-closed 未设置时拒绝请求。 |
 | **ECS 管理员 Key** | ECS 环境（仓库外） | 用于 `/admin/*` 接口，仅限内网/Tailscale 调用。 |
 | **ONT 凭据（光猫）** | 设备侧：`/etc/egress-agent/*.json`（600 权限） | 仅存放于各桶设备，**不提交至仓库**。详见 [`scripts_local/ont-credentials.md`](../scripts_local/ont-credentials.md)（仓库外、gitignored）。 |
-| **agent 共享 secret（win10 桶）** | 本机：`C:\Users\<user>\.egress-agent\win10.json`（`listener.username/password` 均为共享值，与 ECS `ZEN_EGRESS_SECRET` 一致；**不提交至仓库**） | 值从 ECS 容器 env 取（经 SSH 管道直写文件、不打印）；启动脚本 `deploy/windows/start-egress-agent.ps1` 只读路径不含值。 |
+| **agent 共享 secret（Windows 桶：win10 / owin10）** | 本机：`C:\Users\<user>\.egress-agent\<桶名>.json`（`listener.username/password` 均为共享值，与 ECS `ZEN_EGRESS_SECRET` 一致；**不提交至仓库**） | 值从 ECS 容器 env 取（经 SSH 管道直写文件、不打印）；启动脚本 `egress-agent/deploy/windows/README.md` 部署路径只读路径不含值。 |
 | **SSH 密钥** | 各设备授权文件（仓库外） | 公钥授权，不在仓库记录私钥。 |
 | **临时探测 Key** | 运行时临时生成 | 用后吊销，不落盘至仓库文件。 |
 

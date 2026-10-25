@@ -1,14 +1,15 @@
 # 运维手册（当前事实）
 
-> 现状快照：2026-10-19。本文只记录当前部署状态、操作方法和仍未解决的风险。
+> 现状快照：2026-10-25。本文只记录当前部署状态、操作方法和仍未解决的风险
+> （§0–§0.5 为按时间序的事故/定案记录，§5 为历史网络事件，现状只看 §1/§2/§3/§6）。
 > 版本历史与已关闭问题看 `CHANGELOG.md`；设备地址和登录方式看 `ACCESS.md`；
-> 协议事实与安全红线看 `AGENTS.md`。历史实验文档已合并或删除，避免将旧拓扑当作现状。
+> 协议事实与安全红线看 `AGENTS.md`；拓扑与端口看 `docs/ARCHITECTURE.md`。
+> 历史实验文档已合并或删除，避免将旧拓扑当作现状。
 >
-> **两栈并存**：0.7.x 新栈（网关进 ECS Docker 容器、桶设备只跑 `egress-agent`
-> 出口代理，客户端入口 `https://115.29.231.25:10002/v1`）**已部署**，权威文档是
-> `docs/ARCHITECTURE.md`（含端口注册表、分期状态、ONT 换 IP 拓扑）。本文 §1–§6
-> 描述的旧栈（`llm.223722.xyz` + `9443` + zen-lb + 四桶完整网关）与之并存，在所有者
-> 下令退役前保持原样、继续有效。
+> **单栈**：旧栈（`llm.223722.xyz` + `9443` + zen-lb + 四桶完整网关）已于
+> 2026-10-17 从 ECS 彻底清退（见 §1 末尾注记）；现役只有 0.7.x 新栈——网关在
+> ECS Docker 容器、桶设备只跑 `egress-agent` 出口代理，客户端入口
+> `https://115.29.231.25:10002/v1`，权威文档是 `docs/ARCHITECTURE.md`。
 
 ## 0. 2026-10-13 事故：免费层 session ID gate（已解决）
 
@@ -389,8 +390,10 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
     200（t7）。旧资产恰为真身的前缀（新版新增 skills 段）。
 - 结论：**body 门 = system prompt 必须是当前真身 opencode prompt**；其 429
   与层 2 配额 429 同形（`FreeUsageLimitError`），无法从响应区分。修复：
-  - 资产 `proxy_opencode/upstreams/zen_prompt_default.txt` 8528B → 12779B
-    （1.19.4 抓包实拍）；
+  - 资产 `proxy_opencode/upstreams/zen_prompt_default.txt` 8528B → 真身
+    抓包（1.19.4 实拍；**入库版 14424B** = 抓包正文 + 捕获时挂载的
+    `<env>`/AGENTS 附录，整份随容器部署并经端到端 200 实测
+    prompt_tokens≈6529；**严禁截断/清理**——`_default_prompt` 处已钉警示）；
   - `ZEN_MARKER_MODE` 默认 `bridge` → **`full`**（bridge 注记 ~70 token
     过不了门；ECS `.env` 已显式置 `full`）。
 - **模型门（401 新形态）**：免费层只服务 `-free` 后缀裸 ID；付费裸 ID
@@ -484,38 +487,35 @@ least-in-flight 选择、429/5xx/传输失败**桶间 failover**、cordon 冷却
 ## 3. 验证与常用操作
 
 ```bash
-# 公网入口（无凭据健康检查）
-curl -sS https://llm.223722.xyz/healthz
+# ECS 上（SSH 见 ACCESS.md；容器宿主 10010 -> 容器 10002，caddy 对外 10002）
+docker logs zen-gw --since 30m 2>&1 | grep -E "chat completion|stream stalled|failover|cordon"
+docker compose -f /opt/zen-gw/src/deploy/ecs/compose.yml up -d --build   # 改代码后重建
 
-# ECS 上检查服务；设备登录方式见 ACCESS.md
-systemctl status zen-lb
-journalctl -u zen-lb -n 50 --no-pager
+# 桶状态 / 手动换 IP（管理员 key，仅 Tailscale）
+curl -s http://127.0.0.1:10010/admin/egresses -H "Authorization: Bearer $ADMIN_KEY"
+curl -X POST http://127.0.0.1:10010/admin/egresses/<桶名>/rotate -H "Authorization: Bearer $ADMIN_KEY"
 
-# 四桶配额复核：每桶临时签发 key、发一个真实请求、随后吊销
-QUOTA_PROBE_ADMIN_KEY="$ADMIN_KEY" python scripts/probe_bucket_quota.py
+# 桶请求量统计：从 egress_request JSONL 读取，必须带 bucket_name + egress_ip
+# （字段口径与 jq/python 示例见 docs/EGRESS_OBSERVABILITY.md）
 ```
 
-四桶配额曾于 2026-10-02 实测全部返回 200 / QUOTA OK。重新检查配额时，应分别报告每个桶；单桶的 429、TLS EOF、DNS 失败或超时都不能推断为全局额度用尽。
+免费层协议事实与 429/403/401 判读的**唯一权威表述在 `AGENTS.md`** 硬约束 1；
+配额探测不做常规化（活体 200 烧额度，见 AGENTS 排障红线）。
 
-项目质量门禁：
-
-```bash
-pytest tests/ -q
-pytest balancer/tests/ -q
-ruff check proxy_opencode tests balancer
-mypy proxy_opencode
-python scripts/e2e_protocols.py
-```
-
-提交前四项门禁必须全绿；`scripts/e2e_protocols.py` 使用 mock upstream 做协议端到端验证。真实 Hermes 推理是额外的环境测试，通常会消耗上游额度。
+项目质量门禁（与 AGENTS §3 一致，另加 `python scripts/e2e_protocols.py` 用
+mock upstream 做协议端到端验证）。真实 Hermes 推理是额外的环境测试，通常
+会消耗上游额度。
 
 ## 4. 排障纪律
 
-免费层协议事实（`stream: true` + ≥2 个内置工具名、descending session ID、429 判读、
-裸模型 ID）的**唯一权威表述在 `AGENTS.md`**，本节不重复，只列旧栈链路上的排障要点：
+免费层协议事实（多层门：形状/传输栈/session 单次使用/body/模型，403/429/401
+判读、裸模型 ID）的**唯一权威表述在 `AGENTS.md`** 硬约束 1，本节不重复。
+链路排障要点：
 
-- SSE 公网链路出现断流时，先区分 Cloudflare/网络超时、LB 到桶问题和桶到 Zen 问题。LB 日志的 `ttfb` 覆盖 LB→桶→Zen 首字节；`total` 是整流回传时间。
-- 不要用真实用户密钥做批量探测；不要把请求正文、prompt 或 key 写入日志。配额探测工具使用临时 key 并在结束后吊销。
+- 断流/429/401 先按 AGENTS 五门归因（形状→传输栈→session 复用→body→模型→
+  真配额），再看桶：`/admin/egresses` 看各桶状态与出口 IP，`docker logs
+  zen-gw` 看 `bun upstream attempt: proxy=` hop 记录与 cordon/failover。
+- 不要用真实用户密钥做批量探测；不要把请求正文、prompt 或 key 写入日志。
 
 ## 5. 网络事件记录：opc2 到 Cloudflare，以及直连入口
 
@@ -558,8 +558,9 @@ python scripts/e2e_protocols.py
 「移动 ↔ 特定 CF Anycast IP」是叠加的另一层问题，两者互不替代。）
 
 **解决**：客户端连 **IP 字面量**（不发送 SNI）→ 不触发拦截；ECS caddy 用 catch-all 站点 +
-自签证书（SAN 含 `IP:115.29.231.25`）在 `:9443` 服务。**部署配置、证书信任与客户端接法见
-`ACCESS.md` §7**，此处不重复。
+自签证书（SAN 含 `IP:115.29.231.25`）在 `:9443` 服务（该入口已随旧栈清退，
+现役入口见 `ACCESS.md` §1）。**客户端接法与证书信任见
+`ACCESS.md`**，此处不重复。
 
 **实测**（各 20 次）：`https://115.29.231.25:9443` **20/20**（约 70–80 ms）；
 `https://llm.223722.xyz` **18/20**。
@@ -569,35 +570,30 @@ python scripts/e2e_protocols.py
 
 ## 6. 当前风险与待办
 
-1. **旧节点重新入池前先升级**：当前四个 LB 上游都已实测运行 0.6.3；旧 `win10-local` / `owin10` 已退出池但其设备可能仍运行旧版。若未来重新加入，须先升级至 0.6.3、显式配置 key 并核对 `/healthz` 版本。曾暴露的凭据仍按 `ACCESS.md` §10 轮换；不要在此手册粘贴具体凭据。
-2. **公网路径**：opc2 已切 IP 直连 `https://115.29.231.25:9443/v1`（20/20）；CF 入口保留为备用（18/20）。若要长期用**域名**入口，需决策 **ICP 备案** 还是 **迁非大陆节点**（见 §5.2）。`owin10` 仍是 CF 入口，如需同样稳定性可照 `ACCESS.md` §7 切直连。
-3. **自签证书的信任分发**是新增运维点：新增客户端需装 `ca.crt`（Linux 系统库；Python 还需 `SSL_CERT_FILE`）。证书 10 年有效，但 ECS 重装或 `/etc/caddy/certs/` 丢失需重建并重新分发。
-4. **公开 `/healthz` 暴露 LB 上游拓扑、请求计数和错误摘要**。当前可公网读取，后续应评估将细节收至管理员接口或提供脱敏公开健康响应。
-5. Hermes Gateway（opc2）此前因飞书 WebSocket 正常关闭被 `lark_oapi` 抛出而退出，2026-10-03 已重启恢复；飞书会话尚未单独验证 Gateway 发出的模型请求，避免擅自向外发送测试消息。
-6. **ECS 部署的 `balancer/lb.py` 与仓库 `main` 已经分叉**（2026-10-11 发现），两边互缺，合流前不要相互覆盖：
-
-   | 能力 | 仓库 `main` | ECS 部署版 |
-   | --- | --- | --- |
-   | 模型目录 `ZEN_LB_MODELS="id:group"` + 上游第 4 字段分组（当前生产配置依赖） | ❌ 缺（只认 3 字段，**部署上去会因解析失败起不来**） | ✅ 有 |
-   | `TRUST_ENV`：出站 httpx 不跟随 ambient `HTTP_PROXY` | ✅ 有 | ❌ 缺 |
-   | `ClientGone`：客户端断连不计入桶故障 | ✅ 有 | ❌ 缺 |
-   | `ZEN_LB_ADMIN_KEYS` 默认值为空（fail-closed） | ✅ 有 | ❌ **默认回落到硬编码 key**（0.6.3 已修的问题回归） |
-
-   影响评估：ECS 当前未设置任何 proxy 环境变量，第 2 行只是潜在风险；第 3 行最坏效果是
-   连续 3 次客户端断连（如连按 Ctrl+C 中断流式回答）把健康桶标为 unhealthy，但健康检查
-   每 20s 会将其恢复（`mark_health` 成功时清零 `consecutive_failures`），**属瞬时抖动**。
-   第 4 行是真实凭据回归，需留意轮换（§ `ACCESS.md` §10）。
-   **合流方向**：以仓库 `main` 为基底（保留全部加固），把「模型目录 + 分组」移植上去，
-   跑通 `balancer/tests/` 后再部署；变更后立即用 `/healthz` 与一次真实 chat 验证，并保留
-   `edge_lb.env` 与 `lb.py` 备份以便回滚。
+1. **`egress_request` per-call 账本缺口**：当前构建从不写 per-call 行（仅
+   cordon/rotation 事件入流），按桶统计请求量暂无数据源（见
+   `docs/EGRESS_OBSERVABILITY.md` 设计稿）。观测性缺口，另行修复。
+2. **cc9 设备下线待恢复**（2026-10-25）：恢复前出口池只有 owin10 双桶 +
+   win10，且 owin10-mobile 与 win10 同移动 CGNAT 出口（`223.68.24.82`，
+   上游按 IP/UTC 日计量额度共享）——同出口桶越多，单 IP 额度越快烧穿；
+   owin10-telecom（106.111.50.124）是当日唯一独立新鲜 IP。
+3. **容器时区**：容器为 UTC（计数窗口、日志 ts 均为 UTC）；如需按
+   Asia/Shanghai 对账，加 `TZ` 环境变量并重建（P5 计数窗口本身按
+   Asia/Shanghai 计算，不受影响）。
+4. **公网入口的域名化**：IP 直连入口需装自签 CA（新增客户端的信任分发是
+   常驻运维点，证书重建需重新分发）；域名入口需 **ICP 备案**或**迁非大陆
+   节点**（历史结论见 §5.2）。
+5. **公开 `/healthz` 暴露桶拓扑与错误摘要**：后续应评估收至管理员接口或
+   脱敏公开响应。
 
 ## 7. 单网关 + 多出口槽位：已落地为 0.7.x 新栈
 
 曾评估用杭州 ECS 上的单网关 + 多出口槽位替代四台异构机器各跑完整网关。该方案
 **已落地**为 0.7.x 新栈：网关进 ECS Docker 容器，桶设备只跑 `egress-agent`，客户端
 入口 `https://115.29.231.25:10002/v1`。权威描述（端口注册表、分期状态、ADR、ONT
-换 IP 拓扑）见 `docs/ARCHITECTURE.md`，客户端接法与证书见 `ACCESS.md` §0.1 / §7。
+换 IP 拓扑）见 `docs/ARCHITECTURE.md`，客户端接法与证书见 `ACCESS.md` §1。
 
-旧栈（`llm.223722.xyz` + `9443` + zen-lb + 四桶完整网关）与新栈并存，在所有者下令
-退役前继续作为回滚路径保留。历史文档里记的 `llm2.223722.xyz` 计划命令与端口**不是**
-新栈的操作步骤，勿混用。
+旧栈（`llm.223722.xyz` + `9443` + zen-lb + 四桶完整网关）的 ECS 侧已于
+2026-10-17 彻底清退（设备侧 `:879x` 旧网关因入口链路断开而不可达闲置）。
+历史文档里记的 `llm2.223722.xyz` 计划命令与端口**不是**新栈的操作步骤，
+勿混用。

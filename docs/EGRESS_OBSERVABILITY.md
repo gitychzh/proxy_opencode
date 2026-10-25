@@ -24,7 +24,7 @@
   "request_id": "req_7f43a7e2b3a4",
   "method": "POST",
   "path": "/v1/chat/completions",
-  "model": "big-pickle",
+  "model": "deepseek-v4.1-flash-free",
   "bucket_name": "opc2-eth",
   "egress_ip": "223.68.27.11",
   "upstream_status": 200,

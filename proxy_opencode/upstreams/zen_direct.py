@@ -230,6 +230,12 @@ def _minimal_schema(name: str) -> dict[str, Any]:
 
 
 def _default_prompt() -> str:
+    # 红线：本资产是 body 门唯一凭据，**原样整文件发送、严禁截断/清理/重排**。
+    # 文件 = 1.19.4 抓包真身（"You are opencode…" 至 <env> 块结束）+
+    # 捕获时挂载的 AGENTS 附录——整份 14424B 已在 owin10 桶活体验证 200
+    # （2026-10-25，prompt_tokens≈6529）。任何"清理"都会把请求打回旧资产
+    # 8528B 的 429 区（OPERATIONS §0.5 t5 定案）。资产需跟 opencode 1.19.4
+    # 版本走，客户端升级后须重新抓包更新（见 AGENTS.md 硬约束 1）。
     return _ASSET_PROMPT.read_text(encoding="utf-8")
 
 

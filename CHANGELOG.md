@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+### Docs
+- **docs: 全库整理去重（2026-10-25）** — 单栈口径落地、旧栈清退注记与悬空引用修复、big-pickle 旧口径清理：
+  - `docs/OPERATIONS.md`：现状快照 2026-10-25，删除过时"两栈并存"段；§3 常用操作从旧栈 `zen-lb`/`9443` 命令重写为 0.7.x（docker logs zen-gw / /admin/egresses / egress_request 统计指针）；§4 排障纪律去掉过时内联协议口径（≥2 工具），改指 AGENTS 硬约束 1；§6 风险与待办重写为现状五项（egress_request 账本缺口、cc9 下线、CGNAT 额度共享、域名化/ICP、/healthz 暴露）；§7 旧栈注记改为"已清退"。
+  - `docs/ARCHITECTURE.md`：端口注册表更新为现役桶（owin10 双桶/win10/cc9）、旧栈端口标注 2026-10-17 已清退；门判定摘要收敛为五门 + 指向 AGENTS（不重复维护）；组件地图加 Windows 部署指针；P6 状态更新。
+  - `docs/ACCESS.md`：设备侧端口口径更新（owin10-telecom 用 10002）、agent 共享 secret 行泛化到全部 Windows 桶。
+  - `docs/ARCHITECTURE.md`/`deploy/ecs/env.example`/`deploy/ecs/README.md`/`docs/EGRESS_OBSERVABILITY.md`：上游模型残留 `big-pickle` 口径改为 `-free` 裸 ID + `ZEN_MODEL_MAP` 现行事实。
+  - `README.md`：协议版本 1.18.32→1.19.4、公开别名映射改 `deepseek-v4.1-flash-free`、门禁块去重（指向 AGENTS.md）。
+  - **资产防误清警示**：`zen_prompt_default.txt` 入库版 14424B（抓包正文 + 捕获时挂载的 `<env>`/AGENTS 附录）为端到端 200 实测版本——`_default_prompt` 处钉死"严禁截断/清理"，OPERATIONS §0.5 同步更正 12779B 口径为 t6 实验捕获值、入库版为 14424B 整包。
+
 ### Added
 - **fix(zen): 第五轮免费层门槛定案——body 形状门（system prompt 真实性）+ 免费模型 ID 门** — 2026-10-25 经 owin10 双桶活体消融定案：
   - **body 门**：同出口 IP、同 bun 传输、同样新 mint session 的分钟级对照——真 1.19.4 抓包 body（38KB）**200**，网关合成 body（tiny messages）**429**；再消融：最小 4 合成工具 schema 无罪（200）、`max_tokens` 无关（50 亦 200）、**system prompt 必须是当前真身**——资产 `zen_prompt_default.txt` 已从 8528B（旧版，恰为真身前缀）更新为 12779B（1.19.4 抓包实拍，新增 skills 段）；`ZEN_MARKER_MODE` 默认 `bridge`→`full`（bridge 注记 ~70 token 已过不了门，伪装成层 2 配额 429）。
