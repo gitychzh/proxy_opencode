@@ -229,6 +229,13 @@ class Settings:
     zen_egress_secret: str = ""
     zen_egress_probe_interval_s: int = 30
     zen_egress_cordon_s: int = 300
+    # Floor between two hard-429 rotations of the SAME bucket. A 429 is
+    # ambiguous (transport gate / stale-prompt body gate / session reuse /
+    # real per-IP quota all ship the same FreeUsageLimitError), and only the
+    # last one is fixed by a new IP. 2026-10-25: treating every 429 as quota
+    # produced 32/20/13 ONT reboots in one day, which tore down the agent
+    # tunnels without ever fixing the 429. Zero disables the floor.
+    zen_egress_rotate_min_interval_s: float = 1800.0
     # P5 IP rotation: per-bucket daily request threshold. Only listed
     # buckets rotate (those whose agent has an ONT configured); empty =
     # the whole rotation feature is off.
@@ -501,6 +508,9 @@ def load_settings() -> Settings:
             os.environ.get("ZEN_EGRESS_PROBE_INTERVAL_S", "30")
         ),
         zen_egress_cordon_s=int(os.environ.get("ZEN_EGRESS_CORDON_S", "300")),
+        zen_egress_rotate_min_interval_s=float(
+            os.environ.get("ZEN_EGRESS_ROTATE_MIN_INTERVAL_S", "1800")
+        ),
         zen_egress_rotation=_parse_kv_int(os.environ.get("ZEN_EGRESS_ROTATION", "")),
         zen_egress_counts_path=os.environ.get(
             "ZEN_EGRESS_COUNTS_PATH", ""

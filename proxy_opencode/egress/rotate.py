@@ -106,6 +106,9 @@ class EgressRotator:
             return None
         counters = EgressCounters(
             dict(thresholds),
+            hard_rotate_min_interval_s=float(
+                getattr(settings, "zen_egress_rotate_min_interval_s", 1800.0)
+            ),
             snapshot_path=getattr(settings, "zen_egress_counts_path", None) or None,
         )
         return cls(

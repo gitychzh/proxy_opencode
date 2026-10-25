@@ -175,6 +175,31 @@ async def test_default_model_catches_unmapped_ids() -> None:
     assert secondary.calls[0]["model"] == "deepseek-ai/DeepSeek-V4.1-Flash-1017"
 
 
+async def test_backup_error_relay_releases_hold_for_next_primary_probe() -> None:
+    """A backup that answers with an error must not hold traffic for 120s.
+
+    Measured 2026-10-25: the primary chain returned a (false) quota 429, the
+    breaker parked traffic on proxy_ms, and proxy_ms answered its own billing
+    429 "insufficient balance" — which the client reports as a non-retryable
+    billing failure. When the backup cannot serve, the next request must
+    probe the primary again (it may already be healthy) instead of being
+    parked on a dead backup for the whole hold window.
+    """
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary, zen_fallback_hold_s=3600.0)
+    primary.outcomes = [relay(429), {"id": "ok-after-recovery"}]
+    secondary.outcomes = [relay(429), {"id": "ok-via-ms"}]
+
+    first = await adapter.chat({"model": "m"})
+    assert first["__status__"] == 429  # backup error relayed honestly
+    assert adapter.fallback_status()["engaged"] is False  # hold released
+    # Next request goes back to the primary instead of the dead backup.
+    second = await adapter.chat({"model": "m"})
+    assert second["id"] == "ok-after-recovery"
+    assert len(primary.calls) == 2 and len(secondary.calls) == 1
+
+
 async def test_backup_unreachable_raises_loudly() -> None:
     primary = FakeAdapter()
     adapter, secondary = make_adapter(primary)

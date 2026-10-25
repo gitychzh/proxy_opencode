@@ -185,6 +185,67 @@ async def test_body_default_marker_mode_is_full_genuine_prompt() -> None:
     await adapter.aclose()
 
 
+def test_prompt_asset_is_a_live_client_capture() -> None:
+    """The asset must stay a real capture (no hand-written shims): the gate
+    rejects anything that does not look like the official client's prompt."""
+    prompt = zen_direct._default_prompt()
+    assert prompt.startswith("You are opencode, an interactive CLI tool")
+    assert "Here is some useful information about the environment" in prompt
+    assert "<env>" in prompt and "</env>" in prompt
+    # a previous capture leaked the capturing workspace's AGENTS.md appendix
+    # into the asset; that is workspace-specific noise, not client text
+    assert "Instructions from:" not in prompt
+    assert len(prompt) > 5000
+
+
+def test_render_prompt_binds_model_date_and_workspace() -> None:
+    """2026-10-25 live ablation: the body gate compares the prompt's model
+    name, date and workspace path against the live request. A frozen capture
+    (`Today's date: Sat Oct 24 2026`, model `glm-5.3-flash-free`) gets a
+    quota-shaped 429 from an IP that serves the genuine client 200 seconds
+    apart; rewriting the date alone flips it to 200."""
+    rendered = zen_direct._render_prompt("big-pickle")
+    assert "model named big-pickle." in rendered
+    assert "opencode/big-pickle" in rendered
+    assert "glm-5.3-flash-free" not in rendered
+    assert f"Today's date: {zen_direct._prompt_date()}" in rendered
+    assert "Working directory: /workspace/opencode" in rendered
+    assert "Workspace root folder: /workspace/opencode" in rendered
+    # the rest of the capture is untouched
+    assert rendered.count("You are powered by the model named") == 1
+    assert "Here is some useful information about the environment" in rendered
+
+
+def test_prompt_date_matches_client_date_string() -> None:
+    """Mirror `Date.prototype.toDateString()`: `Sun Oct 25 2026` (UTC)."""
+    assert re.fullmatch(
+        r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun) "
+        r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+        r"\d{2} \d{4}",
+        zen_direct._prompt_date(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_body_marker_renders_requested_model_not_capture_model() -> None:
+    """The injected prompt must name the model actually sent upstream; the
+    gateway maps public aliases to `-free` ids, so the marker follows it."""
+    adapter = ZenDirectAdapter(
+        make_settings(zen_marker_mode="full", zen_tools_mode="captured2")
+    )
+    body = adapter._build_body(
+        {"model": "deepseek-v4.1-flash-free",
+         "messages": [{"role": "user", "content": "hi"}]},
+        "deepseek-v4.1-flash-free",
+    )
+    marker = body["messages"][0]["content"]
+    assert "model named deepseek-v4.1-flash-free." in marker
+    assert "opencode/deepseek-v4.1-flash-free" in marker
+    assert "big-pickle" not in marker
+    await adapter.aclose()
+
+
+
 @pytest.mark.asyncio
 async def test_zen_model_map_rewrites_public_alias_to_free_id() -> None:
     """Round 5: the free tier only serves `-free` suffixed bare ids; a paid

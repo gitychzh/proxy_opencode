@@ -23,6 +23,16 @@ def test_defaults_zen_direct_mode(monkeypatch):
     # round 5 defaults: genuine-prompt marker + free-id rewrite map empty
     assert s.zen_marker_mode == "full"
     assert s.zen_model_map == {}
+    # 2026-10-25: hard-429 rotations cannot storm the ONT (30 min floor)
+    assert s.zen_egress_rotate_min_interval_s == 1800.0
+
+
+def test_egress_rotate_min_interval_env(monkeypatch):
+    monkeypatch.setenv("UPSTREAM_MODE", "zen-direct")
+    monkeypatch.setenv("ZEN_EGRESS_ROTATE_MIN_INTERVAL_S", "0")
+    assert config.load_settings().zen_egress_rotate_min_interval_s == 0.0
+    monkeypatch.setenv("ZEN_EGRESS_ROTATE_MIN_INTERVAL_S", "600")
+    assert config.load_settings().zen_egress_rotate_min_interval_s == 600.0
 
 
 def test_zen_model_map_parsing(monkeypatch):

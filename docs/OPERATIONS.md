@@ -396,6 +396,10 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
     prompt_tokens≈6529；**严禁截断/清理**——`_default_prompt` 处已钉警示）；
   - `ZEN_MARKER_MODE` 默认 `bridge` → **`full`**（bridge 注记 ~70 token
     过不了门；ECS `.env` 已显式置 `full`）。
+  > **⚠ 2026-10-25 PM 被第六轮修正**：「整份原样发送、严禁修改」是错的
+  > ——冻结快照（旧日期/旧模型名/捕获工作区路径）本身就会被判重放并回
+  > 同形 429。正确做法是**按请求动态渲染**三个易变字段（模型名/日期/
+  > 工作区），见下一节「第六轮定案」。
 - **模型门（401 新形态）**：免费层只服务 `-free` 后缀裸 ID；付费裸 ID
   （`deepseek-v4.1-flash`）同 headers/body 回 **401 `AuthError: Missing
   API key`**（非 403/429，不触发 failover 链）。匿名 GET
@@ -410,6 +414,57 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
   `test_setup_logging_silences_httpx_access_lines`）。
 - 排障注记：本轮 401（付费模型）先于 body 门出现，failover 链不会因 401
   触发；t5 的首跑输出丢失属实验脚手架问题，重测即闭环。
+
+**第六轮定案（2026-10-25 PM，同一出口 IP 逐字节 2×2 消融——body 门是「快照新鲜度」而非「真身文本」）**：
+- 触发：hermes 端到端报 `429 insufficient balance`（备份链路 proxy_ms 的
+  计费错误被原样透传），而主链路三桶同时 `429 FreeUsageLimitError`。
+- **决定性对照**（同 IP `121.234.130.245`、同分钟、同 bun 传输、每次新
+  mint session）：官方 1.19.3 客户端匿名直跑 **200** "pong"，网关请求
+  **429**（`retry-after: 35511` → UTC 0 点）⇒ **该 IP 没有烧穿**，是 body
+  门伪装成配额门。
+- 消融矩阵（全部同一桶、同一分钟；工具/schema/header 逐项只动一个维度）：
+
+  | 变体 | UA | system prompt | tools | 结果 |
+  |---|---|---|---|---|
+  | A | 官方 1.19.3 实拍 | 官方真身（9559B） | 11 | 200 |
+  | C | 网关 1.19.4 | 网关资产（旧快照） | 4 | **429**（连测 4 次稳定） |
+  | C2 | 官方 1.19.3 | 网关资产（旧快照） | 4 | 200 |
+  | B | 网关 1.19.4 | 官方真身 | 11 | 200 |
+  | E2 | 网关 1.19.4 | 网关资产 | 11 官方工具 | **429** |
+  | F2 | 网关 1.19.4 | 官方真身 | 4 网关工具 | 200 |
+  | W5 | 网关 1.19.4 | 资产删掉 AGENTS 附录 | 4 | **429** |
+  | W7 | 网关 1.19.4 | 资产**仅把日期改成今天** | 4 | **200** |
+
+  结论：工具集、AGENTS 附录、UA 单独都不是判别项；**prompt 里的
+  `Today's date:` 一旦是抓包当天（`Sat Oct 24 2026`）就 429，刷成当天即
+  200**。资产同时把模型写成 `glm-5.3-flash-free`（与实际请求的
+  `big-pickle`/`-free` ID 不一致），属同一类「重放旧抓包」信号。
+- **根因**：`zen_prompt_default.txt` 是**冻结快照**，而官方客户端的
+  prompt 每请求都由 `模型名 + 日期 + 工作区路径` 现场渲染。上游把"过期
+  快照"判为重放，回**与层 2 完全同形**的 429（同 error body、同
+  Retry-After→UTC0），于是网关把它误判成"该 IP 配额烧穿"→ 触发 ONT
+  换 IP → 换 IP 当然无效（body 还是旧快照）→ 再 429 → 再换 IP：**这就是
+  当日 32/20/13 次轮换风暴与隧道抖动的真正成因**。
+- 修复（`proxy_opencode/upstreams/zen_direct.py`）：
+  - 资产换成 2026-10-25 官方客户端实拍真身（9559B，无捕获工作区的
+    AGENTS 附录/中文噪声）；
+  - 新增 `_render_prompt(model)`：每请求重写 `model named X` /
+    `The exact model ID is opencode/X` / `Today's date: <UTC 当天>` /
+    `Working directory|Workspace root folder` → `/workspace/opencode`
+    （不再出现 `D:\proxy_opencode` 这种 "proxy" 工作区标识）；
+  - `_inject_marker(messages, model)` 传入**实际发送的上游模型 ID**
+    （别名映射之后），保证 prompt 与 wire model 一致。
+  - 回归测试：`test_prompt_asset_is_a_live_client_capture`、
+    `test_render_prompt_binds_model_date_and_workspace`、
+    `test_prompt_date_matches_client_date_string`、
+    `test_body_marker_renders_requested_model_not_capture_model`。
+- 实测：同一桶连续三发（1.19.4 头 + 渲染后 prompt + 4 注入工具）**3/3
+  200**；同一请求体在修复前 **4/4 429**。
+- **操作含义（重要）**：`429 FreeUsageLimitError` **不能单独作为烧穿
+  证据**。层 2 真实配额、传输栈门、body 快照门三者同形；换 IP 只对
+  「真实 per-IP 配额」有效，对后两者无效。排障顺序应为：先查传输
+  （必须 bun）→ 再查 prompt 是否当天渲染 → 最后才怀疑 IP 配额。
+
 
 ## 1. 当前架构（0.7.x 新栈：ECS 容器网关 + 多桶出口池）
 
@@ -442,19 +497,21 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
 `opencode/big-pickle` 已撤，`PUBLIC_MODELS=deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle`，
 端到端 200 实测（非流式/流式均落 owin10 双桶）。2026-10-25 起现役池只保留
 `owin10-mobile`（移动有线）与 `owin10-telecom`（电信 WiFi）两桶，`win10` 因与
-`owin10-mobile` 同 CGNAT 出口且无换 IP 能力已移出池（`cc9` 设备下线同批移出）；
-容器内 least-in-flight 选择、429/5xx/传输失败**桶间 failover**、cordon 冷却、P5 每窗口
-≥500 或硬 429 自动换 IP（2026-10-17 起 ONT 驱动全部实弹验证，见下表；2026-10-25 后现役仅 `owin10-mobile`/`owin10-telecom` 两桶带 ONT）。ECS/Tailscale 地址与凭据位置见 `ACCESS.md`，
+`owin10-mobile` 同 CGNAT 出口且无换 IP 能力已移出池；`cc9` 2026-10-25 复查
+仍在池内（`122.195.202.40` healthy）；容器内 least-in-flight 选择、429/5xx/传输失败**桶间 failover**、cordon 冷却、P5 每窗口
+≥500 或硬 429 自动换 IP（2026-10-17 起 ONT 驱动全部实弹验证，见下表；2026-10-25
+现役三桶 `owin10-mobile`/`owin10-telecom`/`cc9` 均带 ONT，硬 429 换 IP 加
+30 分钟下限防风暴）。ECS/Tailscale 地址与凭据位置见 `ACCESS.md`，
 不要把真实密钥写入仓库。
 
 ## 2. 部署与最近状态（0.7.x 新栈，最近部署 2026-10-25）
 
 | 桶 | agent | 出口 IP | expect_prefix | 最近确认状态 |
 |---|---|---|---|---|
-| `cc9` | `100.87.219.115:10001` | `112.83.208.101` 联通 | `112.83.0.0/16;116.147.0.0/16;122.195.0.0/16` | healthy；HG6142A-C `fenghuo` 驱动实弹受理通过（112.83.208.127→116.147.31.99→116.147.30.191→122.195.202.2）；chroot agent 由 Magisk 看门狗拉起；`122.195.0.0/16` 为后续轮换落到的联通新段（2026-10-17 补入）；2026-10-19 06:39Z 门槛标记后轮换所得新 IP；**2026-10-25 设备下线待恢复** |
+| `cc9` | `100.87.219.115:10001` | `122.195.202.40` 联通 | `112.83.0.0/16;116.147.0.0/16;58.219.0.0/16;122.195.0.0/16` | healthy；HG6142A-C `fenghuo` 驱动实弹受理通过（112.83.208.127→116.147.31.99→116.147.30.191→122.195.202.2）；chroot agent 由 Magisk 看门狗拉起；`122.195.0.0/16` 为后续轮换落到的联通新段；**2026-10-25 复查在线**（`122.195.202.40` healthy，仍在 `ZEN_EGRESS_PROXIES`/`EXPECT_PREFIX`/`ROTATION`），前缀补 `58.219.0.0/16`（当日实配） |
 | `win10` | `100.121.137.118:10001`（Windows 本机 egress-agent，`.venv` python + `deploy/windows/start-egress-agent.ps1`，Startup 自启） 移动 CGNAT 公网 IP 族（与 owin10-mobile 同出口） | `106.111.0.0/16;121.226.0.0/16;106.110.0.0/16;180.117.204.0/24;114.239.0.0/16` | **2026-10-25 移出池**：与 `owin10-mobile` 同 CGNAT 出口（额度共享、无独立换 IP 能力），`ZEN_EGRESS_PROXIES`/`EXPECT_PREFIX`/`ROTATION` 三处均已删除；代理端仍在跑但网关不再调度 |
-| `owin10-mobile` | `100.109.109.108:10001`（Windows 10 owin10 有线口，`bind_source 192.168.1.222` 钉源出网，schtasks `EgressAgent-mobile` ONSTART SYSTEM 自启） | `223.68.27.206` 移动 | `223.68.0.0/16;36.149.0.0/16` | healthy；**ONT 已接（2026-10-25）**：`cmcc-v173` / `kind=huawei` / `http://192.168.1.1` / `interface=192.168.1.222`，入 `ZEN_EGRESS_ROTATION=500`，实弹轮换成功（223.68.24.82→223.68.24.122→27.206）；见 §6 |
-| `owin10-telecom` | `100.109.109.108:10002`（owin10 WiFi 口，`bind_source 192.168.2.235`，schtasks `EgressAgent-telecom`） | `106.111.50.165` 电信 | `106.111.0.0/16;121.226.0.0/16;106.110.0.0/16` | healthy；**ONT 已接（2026-10-25）**：`hg8020c` / `kind=huawei_ct` / `http://192.168.1.1` / `interface=192.168.2.235`，入 `ZEN_EGRESS_ROTATION=500`，实弹轮换成功（106.111.50.124→.165）；2026-10-25 body 门/模型门消融主力桶（见 §0.5 第五轮） |
+| `owin10-mobile` | `100.109.109.108:10001`（Windows 10 owin10 有线口，`bind_source 192.168.1.222` 钉源出网，schtasks `EgressAgent-mobile` ONSTART SYSTEM 自启） | `36.149.55.140` 移动 | `223.68.0.0/16;112.0.0.0/8;117.0.0.0/8;39.0.0.0/8;36.149.0.0/16` | healthy；**ONT 已接（2026-10-25）**：`cmcc-v173` / `kind=huawei` / `http://192.168.1.1` / `interface=192.168.1.222`，入 `ZEN_EGRESS_ROTATION=500`，实弹轮换成功（223.68.24.82→223.68.24.122→27.206）；2026-10-25 当日落段 `36.149.55.140`（前缀已覆盖）；见 §6 |
+| `owin10-telecom` | `100.109.109.108:10002`（owin10 WiFi 口，`bind_source 192.168.2.235`，schtasks `EgressAgent-telecom`） | `121.234.130.245` 电信 | `106.111.0.0/16;106.110.0.0/16;121.226.0.0/16;121.234.0.0/16;180.117.204.0/24;114.239.0.0/16` | healthy；**ONT 已接（2026-10-25）**：`hg8020c` / `kind=huawei_ct` / `http://192.168.1.1` / `interface=192.168.2.235`，入 `ZEN_EGRESS_ROTATION=500`，实弹轮换成功（106.111.50.124→.165）；**2026-10-25 PM 当日落段 `121.234.0.0/16`（原前缀未覆盖 → 换 IP 后 cordon 解不开，已补）**；第六轮 body 门消融主力桶（见 §0.5 第六轮） |
 | `ecs` 本机桶 | （已剔除） | 115.29.231.25 | — | **2026-10-17 移出池**（机房 IP 免费额度被共享流量即耗，实测"几条就429"主因）；`egress-agent@ecs` 已停用 |
 | `hangzhou-ecs` | docker `zen-gw`（caddy→127.0.0.1:10010→容器:10002） | 115.29.231.25 入口 | — | healthy；failover 真机首测通过（wifi 429 → 换桶 → 客户端 200,2026-10-17 17:02 UTC） |
 
@@ -546,6 +603,14 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
   ```
   映射键是**路由层解析后的上游 ID**（公网别名已是 `big-pickle`）；兜底模型
   兜住未命中项。改后 `docker compose up -d`（代码改动需 `--build`）。
+- **备用也会挂（2026-10-25 实测）**：proxy_ms 自身欠费时回
+  `429 insufficient balance`，网关会**原样**把它交给客户端（诚实暴露），
+  客户端可能判成 `billing / retryable:false`。**不要据此去查 zen 侧**——那是
+  备用链路的账。网关在同一次失败里会记 ERROR
+  `FALLBACK FAILED: ... answered HTTP 429` + JSONL `fallback_failed{status}`，
+  并**立即释放保持窗口**（`/healthz fallback.engaged=false`），让下一个请求
+  重新探测主链路：主链路的 429 可能只是 body/传输/session 门误伤，修复后
+  已能服务。备用**不可达**（连接失败）时仍保留熔断窗口。
 - **看状态**：
   ```bash
   curl -s http://127.0.0.1:10010/healthz   # fallback.engaged / hold_remaining_s

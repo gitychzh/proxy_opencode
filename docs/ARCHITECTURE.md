@@ -103,7 +103,10 @@ agent 代理 basic auth 双保险）。
   cordon 全是 `retry_after_s: null`，两形都判 per-IP 日耗尽），或
   **匿名 403 `FreeTierError`（出口 IP 被门槛标记，2026-10-17 实测）**，
   **绕过阈值立即换 IP**，且这些 bypass 都与阈值共用同一"每窗口一次"
-  去重 flag（`note_rotation_started` 置位，防光猫被连环重启）；
+  去重 flag（`note_rotation_started` 置位，防光猫被连环重启）；**硬 429
+  成功换 IP 后还有 30 分钟最小间隔**（`ZEN_EGRESS_ROTATE_MIN_INTERVAL_S`，
+  默认 1800，0=关闭）——429 四因同形，只有真实 per-IP 配额能靠新 IP 解决，
+  2026-10-25 的单日 32/20/13 次换 IP 风暴即把非配额 429 误当配额所致；
   编排流程=标记 rotating（选桶跳过、在途请求自然
   收尾）→ `POST {agent}/rotate` → 轮询 `/healthz` 等 IP **变化且落在
   `expect_prefix` 内**（同 IP 重发/腿回落都判失败，大声记录）→ 成功后清
@@ -242,6 +245,14 @@ agent 代理 basic auth 双保险）。
      `{"engaged": true, "secondary": "...", "hold_remaining_s": 119.1}`。
 - **双侧全挂**：备用不可达时记 `FALLBACK FAILED` 并抛 `ConnectionError`
   （客户端可重试语义），熔断状态保留，不会因备用失败而误判主链路已恢复。
+- **备用返回错误时释放保持窗口（2026-10-25 修正）**：备用不是"必定可用"。
+  实测 proxy_ms 自身欠费回 `429 insufficient balance`，客户端会把它判成
+  `billing / retryable:false` 并放弃——而主链路可能只是被四种同形 429
+  之一误伤（传输栈/prompt 快照/session 复用），换 IP 或修复后已恢复。
+  因此备用返回错误中继（非连接失败）时：**原样回给客户端**
+  （诚实暴露备用故障）、记 ERROR `FALLBACK FAILED: ... answered HTTP <n>`
+  + JSONL `fallback_failed{status}`，并**把熔断窗口清零**，让下一个请求
+  重新探测主链路。备用不可达（`ConnectionError`）仍保持熔断（上一条）。
 
 ## 5. 关键决策记录（ADR 摘要）
 

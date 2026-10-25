@@ -55,6 +55,16 @@ service; endpoint shape mirrored from HEAD captures of a genuine client):
           429. The bun subprocess transport (zen_bun) restores wire
           parity; httpx remains the dev/tests fallback.
 
+      Layer 3 — body freshness gate (2026-10-25 live ablation): a 429
+        `FreeUsageLimitError` is ALSO returned for a request whose injected
+        opencode prompt is a stale capture, even from an IP that serves the
+        genuine client 200 seconds apart. The prompt names the model, the
+        capture date and the workspace path, and the upstream rejects a
+        frozen snapshot as a replay. `_render_prompt()` therefore rewrites
+        those three fields per request. The verdict is byte-identical to
+        layer 2 (same error body, same Retry-After to UTC midnight), so the
+        gateway must never treat a lone 429 as proof of a burned IP.
+
     Consequence for the pool: a batch of troubleshooting probes from a
     bucket's egress IP can drain that IP's own daily allowance (the
     2026-10-24 whole-pool 429 outage was exactly this); the 403 shape gate
@@ -70,6 +80,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import secrets
 import time
 from datetime import datetime, timezone
@@ -230,13 +241,66 @@ def _minimal_schema(name: str) -> dict[str, Any]:
 
 
 def _default_prompt() -> str:
-    # 红线：本资产是 body 门唯一凭据，**原样整文件发送、严禁截断/清理/重排**。
-    # 文件 = 1.19.4 抓包真身（"You are opencode…" 至 <env> 块结束）+
-    # 捕获时挂载的 AGENTS 附录——整份 14424B 已在 owin10 桶活体验证 200
-    # （2026-10-25，prompt_tokens≈6529）。任何"清理"都会把请求打回旧资产
-    # 8528B 的 429 区（OPERATIONS §0.5 t5 定案）。资产需跟 opencode 1.19.4
-    # 版本走，客户端升级后须重新抓包更新（见 AGENTS.md 硬约束 1）。
+    # 资产 = 官方客户端实发 system prompt 的**结构模板**（2026-10-25 抓包，
+    # 9559B，claude-* 无关的 big-pickle 真身）。红线：
+    #   * 模板本身必须来自一次真实抓包，不得手写/简化；
+    #   * 发送前必须经 `_render_prompt()` 把「模型名 / 日期 / 工作区路径」
+    #     三个**随请求变化**的字段渲染成当前值——上游 body 门会拿它们做
+    #     一致性判定（见下）。
+    # 2026-10-25 第五轮消融（同出口 IP、同 bun 传输、逐字节对照）证明：
+    # 冻结的旧快照（`Today's date: Sat Oct 24 2026`）会被回 429
+    # `FreeUsageLimitError`（伪装成配额），只把日期刷成当天即 200；把
+    # `glm-5.3-flash-free` 改成实际请求的模型同样能过门。所以「原样发送
+    # 整个文件」是错的，动态渲染才是。
     return _ASSET_PROMPT.read_text(encoding="utf-8")
+
+
+# The captured prompt names the served model, the day it was captured and the
+# workspace it ran in. All three are per-request values on the genuine client,
+# and the upstream's body gate treats a frozen value as a replayed capture
+# (429 `FreeUsageLimitError`, indistinguishable from the daily quota gate).
+_MODEL_LINE_RE = re.compile(
+    r"You are powered by the model named [^.\n]+\. "
+    r"The exact model ID is [^\n<]+"
+)
+_DATE_LINE_RE = re.compile(r"Today's date: [^\n<]+")
+_ENV_PATH_RE = re.compile(
+    r"(?m)^(\s*(?:Working directory|Workspace root folder):) .*$"
+)
+# The workspace path is never meaningful for a gateway (it serves many
+# clients), but it must look like a plausible real session directory: the
+# captured one is a machine-local path ("D:\proxy_opencode") whose "proxy"
+# token is another anti-replay signal.
+_NEUTRAL_WORKSPACE = "/workspace/opencode"
+
+
+def _prompt_date() -> str:
+    """Today's date in the client's `Date.prototype.toDateString()` shape.
+
+    The genuine client renders local time; the upstream compares against the
+    inference service's own day, so UTC is the safe choice for a gateway that
+    has no user timezone.
+    """
+    return datetime.now(timezone.utc).strftime("%a %b %d %Y")
+
+
+def _render_prompt(model: str) -> str:
+    """Render the captured prompt for THIS request (see ``_default_prompt``).
+
+    ``model`` is the bare upstream id the request is actually sent with
+    (e.g. ``big-pickle``); the prompt's model line keeps the client's
+    ``opencode/<id>`` spelling.
+    """
+    text = _default_prompt()
+    if model:
+        text = _MODEL_LINE_RE.sub(
+            "You are powered by the model named "
+            f"{model}. The exact model ID is opencode/{model}",
+            text,
+            count=1,
+        )
+    text = _DATE_LINE_RE.sub(f"Today's date: {_prompt_date()}", text, count=1)
+    return _ENV_PATH_RE.sub(rf"\1 {_NEUTRAL_WORKSPACE}", text)
 
 
 def _builtin_tools() -> list[dict[str, Any]]:
@@ -896,7 +960,7 @@ class ZenDirectAdapter:
         if self._auth_free:
             mode = self._settings.zen_marker_mode
             if mode == "full":
-                messages = self._inject_marker(messages)
+                messages = self._inject_marker(messages, model)
             elif mode == "bridge":
                 messages = self._inject_bridge(messages)
             # "none": leave the client's messages untouched
@@ -915,11 +979,13 @@ class ZenDirectAdapter:
         return body
 
     @staticmethod
-    def _inject_marker(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Prepend the captured opencode prompt (legacy compatibility option)."""
+    def _inject_marker(
+        messages: list[dict[str, Any]], model: str
+    ) -> list[dict[str, Any]]:
+        """Prepend the captured opencode prompt rendered for this request."""
         marker: dict[str, Any] = {
             "role": "system",
-            "content": _default_prompt() + _BRIDGE_NOTE,
+            "content": _render_prompt(model) + _BRIDGE_NOTE,
         }
         return [marker, *messages]
 

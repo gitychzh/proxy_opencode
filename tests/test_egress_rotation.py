@@ -151,6 +151,24 @@ def test_hard_429_rotation_fires_once_per_window() -> None:
     assert counters.should_rotate_on_429("a", 7000.0, now=now) is False
     # Successful rotation → new IP is a fresh quota bucket → flag clears.
     counters.reset("a", now=now)
+    counters.note_rotation_result("a", ok=True, detail="ip 1 -> 2", now=now)
+    # ...but a 429 that keeps firing right after a reboot must not reboot
+    # again: only a real per-IP quota is cured by a new address, and the
+    # other three 429 causes are indistinguishable (2026-10-25 storm).
+    assert counters.should_rotate_on_429("a", None, now=now) is False
+    assert counters.should_rotate_on_429("a", None, now=now + 1799.0) is False
+    assert counters.should_rotate_on_429("a", None, now=now + 1800.0) is True
+
+
+def test_hard_429_rotation_floor_can_be_disabled() -> None:
+    """``hard_rotate_min_interval_s=0`` restores rotate-on-every-hard-429."""
+
+    counters = EgressCounters({"a": 500}, hard_rotate_min_interval_s=0.0)
+    now = ts_cst(16, 15, 40)
+    assert counters.should_rotate_on_429("a", None, now=now) is True
+    counters.note_rotation_started("a", now=now)
+    counters.note_rotation_result("a", ok=True, detail="ip 1 -> 2", now=now)
+    counters.reset("a", now=now)
     assert counters.should_rotate_on_429("a", None, now=now) is True
 
 

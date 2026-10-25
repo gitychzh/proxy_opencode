@@ -153,7 +153,7 @@ class FailoverAdapter:
             self._secondary_name,
         )
         try:
-            return await self._secondary.chat(body)
+            result = await self._secondary.chat(body)
         except ConnectionError as exc:
             # Backup also unreachable: surface it loudly, nothing else to try.
             logger.error(
@@ -172,6 +172,33 @@ class FailoverAdapter:
             raise ConnectionError(
                 f"primary ({self.name}) and backup gateway both unreachable"
             ) from exc
+        if _is_error_relay(result):
+            # The backup answered with an error (measured 2026-10-25:
+            # proxy_ms 429 "insufficient balance", i.e. its own billing is
+            # dead). Relay it honestly, but do NOT keep parking traffic on a
+            # backup that cannot serve: release the breaker so the next
+            # request probes the primary again. That matters because the
+            # primary 429 may not have been a real quota burn at all (the
+            # FreeUsageLimitError shape is reused by the transport, prompt
+            # and session gates), and a fresh rotation may have fixed it.
+            status = int(result.get("__status__") or 0)
+            logger.error(
+                "FALLBACK FAILED: backup gateway %s answered HTTP %s; "
+                "releasing the hold so the next request retries the primary "
+                "(primary fault was: %s)",
+                self._secondary_name,
+                status,
+                reason,
+            )
+            EVENTS.emit(
+                "fallback_failed",
+                primary=self.name,
+                secondary=self._secondary_name,
+                status=status,
+                reason=reason[:120],
+            )
+            self._fallback_until = 0.0
+        return result
 
     def _announce_recovery(self) -> None:
         logger.warning(

@@ -53,6 +53,16 @@ HARD_QUOTA_RETRY_AFTER_S = 3600.0
 # a failing ONT from being rebooted back-to-back during a 429 burst.
 ROTATION_RETRY_COOLDOWN_S = 900.0
 
+# Floor between two hard-429 rotations of the same bucket, regardless of
+# whether the previous attempt succeeded. Rationale (2026-10-25 incident):
+# a 429 `FreeUsageLimitError` is produced by four different gates and only
+# ONE of them (real per-IP daily quota) is cured by a new IP. Treating every
+# 429 as quota rotated owin10-mobile/telecom/cc9 32/20/13 times in a single
+# day while every request kept 429ing: each reboot tore down the agent's
+# tunnel (probe ConnectTimeouts, one client request hung > 300 s). A real
+# daily quota only needs one reset, so half an hour is generous.
+HARD_ROTATE_MIN_INTERVAL_S = 1800.0
+
 _SNAPSHOT_VERSION = 1
 
 
@@ -84,11 +94,13 @@ class EgressCounters:
         *,
         hard_retry_after_s: float = HARD_QUOTA_RETRY_AFTER_S,
         retry_cooldown_s: float = ROTATION_RETRY_COOLDOWN_S,
+        hard_rotate_min_interval_s: float = HARD_ROTATE_MIN_INTERVAL_S,
         snapshot_path: str | None = None,
     ) -> None:
         self._thresholds = {name: int(v) for name, v in (thresholds or {}).items()}
         self._hard = float(hard_retry_after_s)
         self._retry_cooldown = float(retry_cooldown_s)
+        self._hard_min_interval = max(0.0, float(hard_rotate_min_interval_s))
         self._path = snapshot_path or None
         self._records: dict[str, BucketCounts] = {}
         self.load()
@@ -142,13 +154,29 @@ class EgressCounters:
         — otherwise one broken ONT config blocks the bucket's IP reset
         for the whole day. A running attempt is still excluded (the flag
         stays latched until the result lands).
+
+        A **successful** rotation re-arms the trigger; that is correct for
+        a genuinely burned IP (new IP = fresh quota) but it also let a
+        non-quota 429 storm reboot the ONT continuously (2026-10-25:
+        32/20/13 reboots in one day). ``hard_rotate_min_interval_s`` is a
+        floor between two hard-429 rotations of the same bucket; it only
+        applies after a *successful* attempt so the failed-attempt retry
+        cooldown keeps its original semantics. Zero disables the floor.
         """
 
         ts = now if now is not None else time.time()
         rec = self._record_for(name, ts)
         if not self.hard_quota(retry_after_s):
             return False
-        return self._rotation_available(rec, ts)
+        if not self._rotation_available(rec, ts):
+            return False
+        if (
+            rec.last_rotation_ok is True
+            and rec.last_rotation_epoch > 0.0
+            and (ts - rec.last_rotation_epoch) < self._hard_min_interval
+        ):
+            return False
+        return True
 
     def should_rotate_on_free_tier(
         self, name: str, *, now: float | None = None
