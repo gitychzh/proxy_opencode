@@ -6,6 +6,7 @@
 ## [Unreleased]
 
 ### Docs
+- **docs: 公开模型目录终态回笼单别名（2026-10-25 PM）** — owin10 双桶接入 day-2 决策：桌面客户端只需一条模型链路。ECS `.env` 撤第二别名 `opencode/big-pickle:Big Pickle:big-pickle`，`PUBLIC_MODELS=deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle`（对外只见 deepseek 别名，上游真实 ID 不出网关；备份 `.env.bak-singlemodel`）。`docs/OPERATIONS.md` §7 同步终态。owin10 桌面版 hermes 侧同步：`model.default=deepseek-ai/deepseek-v4.1-flash` @ `https://115.29.231.25:10002/v1`（域名入口走 CF 不代理 10002 必超时，仅 IP 直连）、context_length 200000 + 压缩 threshold 0.8（160K 自动压缩）、清空旧 `.bak`/模型列表缓存；端到端 one-shot 工具调用实测通过。
 - **docs: 全库整理去重（2026-10-25）** — 单栈口径落地、旧栈清退注记与悬空引用修复、big-pickle 旧口径清理：
   - `docs/OPERATIONS.md`：现状快照 2026-10-25，删除过时"两栈并存"段；§3 常用操作从旧栈 `zen-lb`/`9443` 命令重写为 0.7.x（docker logs zen-gw / /admin/egresses / egress_request 统计指针）；§4 排障纪律去掉过时内联协议口径（≥2 工具），改指 AGENTS 硬约束 1；§6 风险与待办重写为现状五项（egress_request 账本缺口、cc9 下线、CGNAT 额度共享、域名化/ICP、/healthz 暴露）；§7 旧栈注记改为"已清退"。
   - `docs/ARCHITECTURE.md`：端口注册表更新为现役桶（owin10 双桶/win10/cc9）、旧栈端口标注 2026-10-17 已清退；门判定摘要收敛为五门 + 指向 AGENTS（不重复维护）；组件地图加 Windows 部署指针；P6 状态更新。

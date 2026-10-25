@@ -435,10 +435,12 @@ docker exec zen-gw sh -c "grep cordon_lifted /data/egress_events.jsonl | tail -5
 > 尚未拆除，因入口链路已从 ECS 断开，处于不可达闲置状态。
 
 0.7.x 权威描述见 `docs/ARCHITECTURE.md`。新栈对外只暴露一个掩码别名
-`deepseek-ai/deepseek-v4.1-flash`（→ 上游免费裸 ID `deepseek-v4.1-flash-free`，
-2026-10-25 前为 `big-pickle`；
-2026-10-17 起严格别名：上游裸 ID 不可请求、不可见，除隐藏端点
-`/v1/models_cus` 纯裸 ID 输出）。四桶中 win10 与 opc2-wifi 出口同一家庭 WAN
+`deepseek-ai/deepseek-v4.1-flash`（→ 上游免费裸 ID，2026-10-25 终态为
+`big-pickle`、同日曾有 `-free` 后缀口径；2026-10-17 起严格别名：上游裸 ID
+不可请求、不可见，除隐藏端点 `/v1/models_cus` 纯裸 ID 输出）。
+2026-10-25 终态回笼单别名（`.env.bak-singlemodel` 备份）：第二别名
+`opencode/big-pickle` 已撤，`PUBLIC_MODELS=deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle`，
+端到端 200 实测（非流式/流式均落 owin10 双桶）。四桶中 win10 与 opc2-wifi 出口同一家庭 WAN
 （同一公网 IP 的上游额度共享，但独立一条 ECS↔本机的传输路径；2026-10-25 起
 win10 与 owin10-mobile 同移动 CGNAT 出口，同享额度）；容器内
 least-in-flight 选择、429/5xx/传输失败**桶间 failover**、cordon 冷却、P5 每窗口
