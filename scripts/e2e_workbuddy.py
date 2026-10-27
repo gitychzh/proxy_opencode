@@ -105,7 +105,11 @@ def check_chat_stream(client: httpx.Client) -> tuple[str, bool, str]:
         "model": MODEL,
         "messages": [{"role": "user", "content": "Say exactly: OK"}],
         "stream": True,
-        "max_tokens": 64,
+        # A reasoning model spends output tokens on its thinking first; 64
+        # tokens can be consumed entirely by reasoning, yielding chunks with no
+        # content at all (measured: looks like an empty answer, is really a
+        # budget that was too small).
+        "max_tokens": 512,
         "tools": TOOLS,
         "reasoning_effort": "low",
     }
@@ -116,6 +120,7 @@ def check_chat_stream(client: httpx.Client) -> tuple[str, bool, str]:
         ttfb = None
         chunks = 0
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
         masked = True
         saw_done = False
         for chunk in iter_sse(resp):
@@ -129,6 +134,8 @@ def check_chat_stream(client: httpx.Client) -> tuple[str, bool, str]:
                 delta = choice.get("delta") or {}
                 if delta.get("content"):
                     text_parts.append(str(delta["content"]))
+                if delta.get("reasoning_content"):
+                    reasoning_parts.append(str(delta["reasoning_content"]))
         saw_done = True  # iter_sse returns on [DONE]
     total = (time.perf_counter() - started) * 1000
     if chunks == 0:
@@ -137,7 +144,12 @@ def check_chat_stream(client: httpx.Client) -> tuple[str, bool, str]:
         return _fail("chat_stream", "upstream model id leaked in a chunk")
     text = "".join(text_parts).strip()
     if not text:
-        return _fail("chat_stream", f"{chunks} chunks but empty content")
+        return _fail(
+            "chat_stream",
+            f"{chunks} chunks but empty content "
+            f"(reasoning_chars={len(''.join(reasoning_parts))}; "
+            "raise max_tokens if the model only thought)",
+        )
     return _ok(
         "chat_stream",
         f"{chunks} chunks, ttfb={ttfb:.0f}ms total={total:.0f}ms, "
@@ -149,7 +161,7 @@ def check_chat_nonstream(client: httpx.Client) -> tuple[str, bool, str]:
     body = {
         "model": MODEL,
         "messages": [{"role": "user", "content": "Say exactly: OK"}],
-        "max_tokens": 64,
+        "max_tokens": 512,
     }
     resp = client.post("/v1/chat/completions", json=body, timeout=180)
     if resp.status_code != 200:
@@ -176,7 +188,7 @@ def check_tool_call(client: httpx.Client) -> tuple[str, bool, str]:
             {"role": "user", "content": "What time is it in Shanghai? Use the tool."}
         ],
         "stream": True,
-        "max_tokens": 200,
+        "max_tokens": 512,
         "tools": TOOLS,
         "tool_choice": "auto",
     }
@@ -232,7 +244,7 @@ def check_responses(client: httpx.Client) -> tuple[str, bool, str]:
 def check_messages(client: httpx.Client) -> tuple[str, bool, str]:
     body = {
         "model": MODEL,
-        "max_tokens": 64,
+        "max_tokens": 512,
         "stream": True,
         "messages": [{"role": "user", "content": "Say exactly: OK"}],
     }
