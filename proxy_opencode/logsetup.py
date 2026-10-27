@@ -75,6 +75,12 @@ FIELDS = (
     "blocked_s",
     "bytes",
     "timeout_s",
+    # Model-parameter policy (upstreams/zen/policy.py): which thinking controls
+    # were dropped and how much prompt the guard measured. Names/numbers only —
+    # the values a client sent are never logged.
+    "dropped",
+    "estimated_input",
+    "max_tokens",
 )
 
 _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"

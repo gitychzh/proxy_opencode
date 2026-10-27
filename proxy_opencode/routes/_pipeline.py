@@ -26,7 +26,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from ..config import Settings
-from ..errors import GatewayHttpError, InvalidRequest, openai_error
+from ..errors import ContextOverflow, GatewayHttpError, InvalidRequest, openai_error
 from ..registry import ModelRegistry, UnknownModelError
 from ..upstreams.fields import filter_payload
 from ..upstreams.opencode_serve import ServeError, WaitTimeoutError
@@ -231,8 +231,15 @@ async def dispatch(
         call.log(logger, 502)
         return on_error(502, str(exc), "api_connection_error", "upstream_unreachable")
     except InvalidRequest as exc:
-        # Only an explicit request-shape fault is the client's fault.
-        call.log(logger, 400)
+        # Only an explicit request-shape fault is the client's fault. A context
+        # overflow is a request fault too, but it carries its own code so
+        # clients (opencode: reason "overflow") can start a compaction instead
+        # of retrying the same oversized prompt.
+        call.log(logger, 400, None)
+        if isinstance(exc, ContextOverflow):
+            return on_error(
+                400, str(exc), "invalid_request_error", "context_length_exceeded"
+            )
         return on_error(400, str(exc), "invalid_request_error", None)
     except ValueError as exc:
         # A bare ValueError from deep inside an adapter is an accident in the

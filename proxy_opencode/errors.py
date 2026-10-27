@@ -49,3 +49,43 @@ class InvalidRequest(ValueError):
     Anything else a ``ValueError``-derived exception could mean must surface
     as a 5xx.
     """
+
+
+class ContextOverflow(InvalidRequest):
+    """The prompt is larger than the model's advertised input limit.
+
+    Deliberately the same verdict a real provider returns, because opencode
+    treats a "context too long" rejection as a compaction trigger
+    (``session/compaction.ts``: ``{reason: "overflow"}``). Answering with a
+    gateway-only shape would make the CLI retry the identical oversized
+    prompt. Carries the numbers so the reply can be acted on instead of
+    guessed at.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        estimated_tokens: int,
+        input_limit: int,
+        context_limit: int,
+        compaction_ceiling: int,
+    ) -> None:
+        self.model = model
+        self.estimated_tokens = estimated_tokens
+        self.input_limit = input_limit
+        self.context_limit = context_limit
+        self.compaction_ceiling = compaction_ceiling
+        super().__init__(self.describe())
+
+    def describe(self) -> str:
+        """Client-facing sentence naming the limit and the compaction point."""
+
+        ceiling = self.compaction_ceiling or self.input_limit
+        return (
+            f"This model's maximum context length is {self.context_limit} tokens "
+            f"and at most {self.input_limit} prompt tokens are accepted. This "
+            f"request is about {self.estimated_tokens} prompt tokens. Reduce the "
+            f"prompt or compact the conversation (the client compacts below "
+            f"{ceiling} tokens) and retry."
+        )

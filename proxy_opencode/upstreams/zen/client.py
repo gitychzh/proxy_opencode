@@ -32,11 +32,13 @@ import httpx
 
 from ...config import Settings
 from ...egress.pool import EgressPool, Lease
+from ...model_profile import profile as model_profile
 from ..openai_http import ResponseLike, StreamRelay, _raw_relay_body
 from ..zen_bun_transport import BunTransport, BunTransportError
 from .aggregate import aggregate_sse
 from .body import build_body
 from .errors import egress_unavailable_result, is_free_tier_rejection
+from .policy import Applied, apply_request_policy
 from .protocol import build_headers, retry_after_seconds
 from .tools import builtin_tools
 
@@ -153,6 +155,7 @@ class ZenDirectAdapter:
         model = self._zen_model(payload.get("model"))
         body = self._build_body(payload, model)
         body["stream"] = True
+        self._apply_policy(body, model)
         stream = bool(payload.get("stream"))
 
         if self._pool is None:
@@ -464,6 +467,41 @@ class ZenDirectAdapter:
             tools_mode=self._settings.zen_tools_mode,
             builtins=self._builtin_tools,
         )
+
+    def _apply_policy(self, body: dict[str, Any], model: str) -> Applied:
+        """Apply the model's published parameters to the composed body.
+
+        Runs after composition so the estimate includes the injected marker
+        prompt and builtin tools — those are real prompt tokens and the
+        context guard must see them. Raises :class:`ContextOverflow` (a
+        client-fault 400 with ``context_length_exceeded``) without touching
+        the network: refusing locally costs no free-tier quota.
+        """
+
+        applied = apply_request_policy(
+            body,
+            profile=model_profile(model),
+            reasoning_policy=self._settings.zen_reasoning_policy,
+            context_guard=self._settings.zen_context_guard,
+            input_limit_override=self._settings.zen_context_input,
+            output_budget_mode=self._settings.zen_output_budget,
+        )
+        if applied.dropped:
+            # Field NAMES only — never their values (日志红线).
+            logger.info(
+                "thinking controls dropped: model publishes no effort levels",
+                extra={"model": model, "dropped": ",".join(applied.dropped)},
+            )
+        if applied.clamped:
+            logger.info(
+                "max_tokens clamped to the room left in the context window",
+                extra={
+                    "model": model,
+                    "max_tokens": applied.max_tokens,
+                    "estimated_input": applied.estimated_input,
+                },
+            )
+        return applied
 
 
 def _log_failover(*, kind: str, remaining: int, detail: str = "") -> None:

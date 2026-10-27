@@ -3,6 +3,45 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.7.3] - 2026-10-28
+
+> 主题：模型参数与 opencode 本体对齐 + ECS 侧旧部署彻底清理重建。端口、链路、
+> 密钥、对外模型 ID 一律未变（`115.29.231.25:10002` → caddy → `127.0.0.1:10010`，
+> 别名 `deepseek-ai/deepseek-v4.1-flash` → `big-pickle`）。
+
+### Added
+
+- **`proxy_opencode/model_profile.py`** — 模型参数的唯一出处，逐项抄自
+  `sst/opencode` @ dev（2026-10-27）：仓内 models.dev 快照的限额与能力位、
+  `util/token.ts` 的 `len/4` 估算、`session/compaction.ts` 的压缩阈值、
+  `session/model-request.ts` 的输出预算。big-pickle：窗口 200000 / 输入 160000 /
+  输出 32000，压缩点 **136000**。
+- **`proxy_opencode/upstreams/zen/policy.py`** — 三条下发规则：
+  ①模型目录没有 `effort` 列表时丢弃客户端的 thinking 控制（big-pickle 即如此，
+  客户端本体也没有该调节项，模型按自身上限推理）；
+  ②输出预算按 `outputLimit` 补齐/收窄；③提示词超过输入上限时本地拒绝。
+- **`ContextOverflow`** — 400 `context_length_exceeded`，与上游同形，因为
+  opencode 正是靠这个形状触发压缩（`reason: "overflow"`）；本地拒绝不烧免费额度。
+- **新配置**：`ZEN_CONTEXT_GUARD`、`ZEN_CONTEXT_INPUT`、`ZEN_REASONING_POLICY`
+  （max|client|off）、`ZEN_OUTPUT_BUDGET`（mirror|clamp|off）。
+- **`docs/MODEL_PROFILE.md`** — 参数出处表、压缩点推导、守卫行为、目录暴露口径。
+- `/v1/models_cus?format=json` 条目附带 `limit` / `capabilities` /
+  `reasoning_efforts` / `compaction_ceiling` / `source`；未知 id 仍为裸字段
+  （不给不认识的模型编限额）。`/v1/models` 契约不变。
+
+### Changed
+
+- **ECS 部署形态收敛为「git 工作树即全部」**：删除 `/opt/zen-gw/src` 下的旧快照
+  残留（`proxy_opencode.bak-2026*`、`*.egg-info`、`.pytest_cache`/`.mypy_cache`/
+  `.ruff_cache`、`runtime-logs`、`.e2e_tmp`、`.e2e_real_gw.log`、`.workbuddy*`）
+  与 `/opt/zen-gw/src-backup-*.tgz`；`.env` 与 `data/` 单独备份后原样回填，
+  重建镜像 `zen-gw:0.7`（附加版本标签），端口与链路不动。
+
+### Notes
+
+- `logsetup.FIELDS` 增加 `dropped` / `estimated_input` / `max_tokens`：策略动作
+  需要留痕，但只记字段名与数字，不记值。
+
 ## [0.7.2] - 2026-10-28
 
 > 主题：按关注点重构 + 清理下线物 + 桌面端接入。协议事实未变（AGENTS.md 硬约束 1

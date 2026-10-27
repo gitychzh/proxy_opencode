@@ -136,6 +136,38 @@ class Settings:
     #   "all"                 — the full captured 11-tool schema list
     #                           (~6k tokens; legacy, per-bucket fallback)
     zen_tools_mode: str = "minimal"
+    # --- Model parameters, mirrored from the opencode client -----------------
+    # Everything below is copied from the CLI's own source (see
+    # model_profile.py). Changing these numbers silently makes the gateway
+    # disagree with the client it stands in for, so they are env-overridable
+    # only for experiments.
+    #
+    # Context guard: refuse a prompt larger than the model's advertised input
+    # limit BEFORE the upstream call, with the OpenAI `context_length_exceeded`
+    # shape — the verdict opencode turns into a compaction (session/compaction
+    # .ts, reason "overflow"). Refusing locally costs no free-tier quota and
+    # saves a 300s round trip that can only fail.
+    zen_context_guard: bool = True
+    # Override the profile's input limit (0 = use the profile: big-pickle
+    # 160000 of a 200000 window, compacting at 136000).
+    zen_context_input: int = 0
+    # Thinking-strength handling. big-pickle publishes NO effort levels
+    # (models.dev snapshot: capabilities.reasoning = {supported: true}), so the
+    # CLI shows no selector and sends no control — the model reasons at its
+    # built-in maximum.
+    #   "max"    (default) — drop client thinking controls for models that
+    #                        publish no efforts; keep a valid `reasoning_effort`
+    #                        for models that do; never send a lower strength.
+    #   "client"           — legacy passthrough (whatever the client asked).
+    #   "off"              — always strip thinking controls.
+    zen_reasoning_policy: str = "max"
+    # max_tokens handling, mirroring session/model-request.ts `outputLimit`.
+    #   "mirror" (default) — write the computed budget when the client sent
+    #                        none, clamp when it asked for more room than the
+    #                        window leaves.
+    #   "clamp"            — only ever lower a client-supplied value.
+    #   "off"              — leave the client's field untouched.
+    zen_output_budget: str = "mirror"
     # Debug: dump every raw client request body to this directory (one JSON
     # file per request, oldest pruned beyond 200 files). Empty -> disabled.
     # Bodies are dumped BEFORE whitelist filtering, so client-side prompt
@@ -483,6 +515,22 @@ def load_settings() -> Settings:
             "ZEN_TOOLS_MODE must be one of minimal|captured2|all, "
             f"got {zen_tools_mode!r}"
         )
+    zen_reasoning_policy = (
+        os.environ.get("ZEN_REASONING_POLICY", "max").strip().lower()
+    )
+    if zen_reasoning_policy not in ("max", "client", "off"):
+        raise ValueError(
+            "ZEN_REASONING_POLICY must be one of max|client|off, "
+            f"got {zen_reasoning_policy!r}"
+        )
+    zen_output_budget = (
+        os.environ.get("ZEN_OUTPUT_BUDGET", "mirror").strip().lower()
+    )
+    if zen_output_budget not in ("mirror", "clamp", "off"):
+        raise ValueError(
+            "ZEN_OUTPUT_BUDGET must be one of mirror|clamp|off, "
+            f"got {zen_output_budget!r}"
+        )
     return Settings(
         upstream_mode=mode,
         upstream_base_url=os.environ.get(
@@ -518,6 +566,10 @@ def load_settings() -> Settings:
         ).rstrip("/"),
         zen_marker_mode=zen_marker_mode,
         zen_tools_mode=zen_tools_mode,
+        zen_context_guard=_env_bool("ZEN_CONTEXT_GUARD", True),
+        zen_context_input=int(os.environ.get("ZEN_CONTEXT_INPUT", "0") or 0),
+        zen_reasoning_policy=zen_reasoning_policy,
+        zen_output_budget=zen_output_budget,
         payload_dump_dir=os.environ.get("PAYLOAD_DUMP_DIR", "").strip(),
         zen_api_key=os.environ.get("OPENCODE_ZEN_API_KEY", ""),
         zen_models=_csv(

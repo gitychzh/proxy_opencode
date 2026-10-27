@@ -29,6 +29,7 @@ from typing import Any
 
 import httpx
 
+from ..model_profile import profile as model_profile
 from .eventlog import EVENTS
 
 logger = logging.getLogger("proxy_opencode.egress.catalog")
@@ -187,20 +188,37 @@ class ZenFreeCatalog:
         return "\n".join(self.ids())
 
     def body(self) -> dict[str, Any]:
-        """OpenAI-shaped list body for the hidden /v1/models_cus endpoint."""
+        """OpenAI-shaped list body for the hidden /v1/models_cus endpoint.
+
+        Entries carry the model's published parameters (limits, capability
+        flags, the compaction ceiling) when the id is in our profile table:
+        callers sizing their prompts need the same numbers the client uses,
+        not a guess. Unknown ids stay bare — never invent limits.
+        """
 
         ids = self.ids()
         return {
             "object": "list",
-            "data": [
-                {"id": i, "object": "model", "created": 0, "owned_by": "opencode"}
-                for i in ids
-            ],
+            "data": [self._entry(i) for i in ids],
             "metadata": {
                 "source": "opencode-zen relayed models",
                 "refreshed_at": self.refreshed_at,
                 "stale": self._degraded is True,
             },
+        }
+
+    @staticmethod
+    def _entry(model_id: str) -> dict[str, Any]:
+        """One catalogue entry: bare OpenAI shape, plus profile when known."""
+
+        prof = model_profile(model_id)
+        if prof is not None:
+            return prof.as_metadata()
+        return {
+            "id": model_id,
+            "object": "model",
+            "created": 0,
+            "owned_by": "opencode",
         }
 
     # ------------------------------------------------------------ lifecycle

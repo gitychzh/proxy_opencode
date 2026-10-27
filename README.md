@@ -72,6 +72,7 @@ cd egress-agent && pytest tests/ -q && ruff check egress_agent tests && mypy egr
 | [`docs/EGRESS_OBSERVABILITY.md`](docs/EGRESS_OBSERVABILITY.md) | 事件流现状 + 逐请求账本规格与统计示例 |
 | [`docs/SELF_OPTIMIZATION.md`](docs/SELF_OPTIMIZATION.md) | 自我优化闭环：观测契约、诊断规则、执行分级、proxy_ms 兜底保证 |
 | [`docs/CLIENT_WORKBUDDY.md`](docs/CLIENT_WORKBUDDY.md) | 桌面端接入：models.json 格式、本机实例、端到端验收 |
+| [`docs/MODEL_PROFILE.md`](docs/MODEL_PROFILE.md) | 模型参数与 opencode 本体逐项对齐（限额、压缩点、思考强度、输出预算） |
 | [`docs/engineering-constraints.md`](docs/engineering-constraints.md) | 工程化基线 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本历史 |
 
