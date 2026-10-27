@@ -16,12 +16,15 @@ zen-gw 桶池 ──CONNECT──> gateway-adapter :10005 ──反向隧道─�
 | `gateway-adapter/` | `esp32_bucket_adapter.py`：跑在网关侧，把标准桶接口翻译成 ESP32 反向隧道协议 |
 | `tools/` | `reboot_mifi.py`：经隧道用 Digest 认证重启 192.168.1.1 MiFi 换公网 IP |
 | `deploy/` | systemd 单元（适配器常驻） |
-| `PROTOCOL.md` | **线协议契约（冻结 v3）**——改协议先改这里 |
+| `PROTOCOL.md` | **线协议契约（v4）**——改协议先改这里 |
 
 ## 设计要点
 
 - **反向连接**：ESP32 主动外连适配器（应对路由器 AP 隔离），适配器不下发任何主动连接。
 - **控制/数据分离**：控制通道长连承载指令帧；每条隧道另开一条数据通道，以 `TREADY <id>` 配对。
+- **HELLO 鉴权（v4）**：:9999 必须公网可达（有扫描流量），HELLO 末段携带共享密钥
+  （固件 `CTRL_SECRET` 常量 / 适配器 `ESP32_CTRL_SECRET` 环境变量），不匹配即断开；
+  适配器侧密钥为空退回 v3 免鉴权。**密钥值不入仓库**。
 - **并发安全**：固件侧 `MAX_TUNNELS=4` 信号量 + 每任务独立栈上缓冲（见 PROTOCOL.md 并发模型）。
 - **自愈**：WiFi 双网 fallback（YCHZH → YCHZHT）→ 控制通道断线自动重连 → MiFi 重启后全链路自动恢复（实测）。
 
@@ -31,6 +34,7 @@ zen-gw 桶池 ──CONNECT──> gateway-adapter :10005 ──反向隧道─�
 # ECS 上
 cp gateway-adapter/esp32_bucket_adapter.py /opt/zen-gw/src/
 cp deploy/egress-adapter-esp32.service /etc/systemd/system/
+echo 'ESP32_CTRL_SECRET=<与固件一致>' > /opt/zen-gw/src/esp32-adapter.env && chmod 600 /opt/zen-gw/src/esp32-adapter.env
 systemctl daemon-reload && systemctl enable --now egress-adapter-esp32
 ```
 

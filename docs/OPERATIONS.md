@@ -1,8 +1,9 @@
 # 运维手册（OPERATIONS）
 
-> 现状快照：2026-10-25。本文只记**当前部署状态、常用操作、排障路径**与未解决
-> 风险；事故编年与已关闭问题看 §5 与 [`CHANGELOG.md`](../CHANGELOG.md)。
-> 拓扑/端口/池语义看 [`ARCHITECTURE.md`](ARCHITECTURE.md)；协议事实与红线看
+> 现状快照：2026-10-27（0.7.0，四桶现役）。本文只记**当前部署状态、常用操作、
+> 排障路径**与未解决风险；事故编年与已关闭问题看 §5 与
+> [`CHANGELOG.md`](../CHANGELOG.md)。拓扑/端口/池语义看
+> [`ARCHITECTURE.md`](ARCHITECTURE.md)；协议事实与红线看
 > [`AGENTS.md`](../AGENTS.md) 硬约束 1；凭据去向看 [`ACCESS.md`](ACCESS.md)。
 
 ## 1. 现状（0.7.x 单栈）
@@ -30,9 +31,10 @@
 
 | 桶 | agent | 最近出口 IP | 备注 |
 |---|---|---|---|
-| `owin10-mobile` | `100.109.109.108:10001`（有线 `bind_source 192.168.1.222`） | `36.149.55.140` 移动 | ONT V173-50 `kind=huawei`，入 `ZEN_EGRESS_ROTATION=500`，实弹成功 |
-| `owin10-telecom` | `100.109.109.108:10002`（WiFi `bind_source 192.168.2.235`） | `121.234.130.245` 电信 | ONT HG8020C `kind=huawei_ct`，实弹成功；前缀已补 `121.234.0.0/16` |
-| `cc9` | `100.87.219.115:10001` | `122.195.202.40` 联通 | chroot agent + Magisk 看门狗；ONT HG6142A-C `kind=fenghuo` |
+| `owin10-mobile` | `100.109.109.108:10001`（有线 `bind_source 192.168.1.222`） | `36.149.55.x` 移动 | ONT V173-50 `kind=huawei`，入 `ZEN_EGRESS_ROTATION=500`，实弹成功 |
+| `owin10-telecom` | `100.109.109.108:10002`（WiFi `bind_source 192.168.2.235`） | `180.117.x` / `121.234.x` 电信 | ONT HG8020C `kind=huawei_ct`，实弹成功；前缀含 `180.117.0.0/16` |
+| `cc9` | `100.87.219.115:10001` | `116.147.x` / `122.195.x` 联通 | chroot agent + Magisk 看门狗；ONT HG6142A-C `kind=fenghuo` |
+| `esp32-bucket` | ECS 本机适配器 `172.18.0.1:10005`（systemd `esp32-bucket-adapter.service`，HELLO 鉴权协议 v4） | MiFi 移动（适配器固定上报 `1.1.1.1` 占位） | ESP32 反向隧道；上行弱（偶发超时），3 连败自动 cordon；换 IP 用 `tools/reboot_mifi.py` |
 | ~~`win10`~~ | — | — | 2026-10-25 移出池：与 owin10-mobile 同 CGNAT 出口、无独立换 IP 能力 |
 | ~~`ecs` 本机桶~~ | — | — | 2026-10-17 移出：机房 IP 共享流量即耗 |
 
@@ -212,6 +214,11 @@ docker logs zen-gw 2>&1 | grep -E "bun upstream attempt|answering 503|FALLBACK"
    `llm.223722.xyz` 实测 404（cloudflared 无 hostname ingress），修复方案见
    ARCHITECTURE §10；大陆节点走域名还需 ICP 备案。
 5. **`/healthz` 暴露桶拓扑与错误摘要**：应评估收至管理员接口或脱敏。
+6. **上游偶发 400**：`stream=false, tools=false` 形态（2026-10-25 起 24h 内
+   1 次），错误体原样透传；三种常见请求体复现均 200，未定位触发字段。下次
+   出现时带 `x-request-id` 对比上游日志。
+7. **`ZEN_TOOLS_MODE=captured2` 与 AGENTS 默认 `minimal` 不一致**：线上显式
+   设置且功能正常，属文档与线上配置漂移，收敛前以 AGENTS 为准。
 
 ## 7. 历史：网络事件与旧栈（仅防误读）
 

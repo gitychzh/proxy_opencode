@@ -21,7 +21,7 @@
 | `cordon` | `egress`, `cordon_reason`, `retry_after_s`, `egress_ip` | 桶被停用；reason= `free_quota_exhausted`（429，绑到窗口末）或 `free_tier_rejected`（403 门槛） |
 | `cordon_lifted` | `egress`, `cordon_reason`, `ip_to` | 换 IP 后判决失效 |
 | `egress_ip_observed` | `egress`, `previous`, `current`, `matches_prefix` | 探针观测到的 IP 变化（换 IP / ISP 重拨 / 腿回落） |
-| `egress_recovered` | `egress` | 探针恢复 |
+| `egress_recovered` | `egress` | 探针 unhealthy→healthy 跃迁（agent 恢复；不再随每次成功探针重复发） |
 | `request_on_cordoned_bucket` | `egress`, `cordon_reason` | 全池 cordon 时仍派发（降级） |
 | `rotation_requested` / `_started` / `_succeeded` / `_failed` / `_cancelled` | `egress`, `trigger`, `ip_from`, `ip_to`, `elapsed_s`, `detail` | 换 IP 全时间线 |
 | `rotation_applied` | `egress`, `ip_from`, `ip_to` | 换 IP 后池内状态更新 |

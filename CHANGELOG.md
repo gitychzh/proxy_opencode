@@ -3,7 +3,10 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
-## [Unreleased]
+## [0.7.0] - 2026-10-27
+
+> 本节覆盖 v0.5.0 以来 0.6.x→0.7.x 的全部累计变更（107 commits，2026-10-13 →
+> 2026-10-27），含 0.7.0a1–a5 五个 alpha。0.7.0 起为生产稳定版。
 
 ### Added
 

@@ -21,13 +21,13 @@ ECS ┌────────────────────────�
     │  ├ routes/     chat / models / responses / anthropic /admin │
     │  ├ upstreams/  zen_direct、bun 传输、failover（备用链路）    │
     │  └ egress/     pool、counters、rotate、catalog、eventlog    │
-    └───────┬───────────────┬───────────────┬────────────────────┘
-       Tailscale 100.x（+ basic auth）
-      ┌─────┴─────┐   ┌─────┴──────┐   ┌────┴─────┐
-      ▼           ▼   ▼            ▼   ▼          ▼
- owin10:10001  owin10:10002    cc9:10001   （win10 已移出池）
- 移动有线       电信 WiFi       联通
-      └─────────────┴───────────────┴──▶ opencode.ai/zen/v1
+    └───────┬───────────────┬───────────────┬────────────┬──────┘
+       Tailscale 100.x（+ basic auth）          loopback │
+      ┌─────┴─────┐   ┌─────┴──────┐   ┌────┴─────┐  ┌─┴──────────────┐
+      ▼           ▼   ▼            ▼   ▼          ▼  ▼ esp32 适配器     │
+ owin10:10001  owin10:10002    cc9:10001        :10005（:9999 反向隧道）
+ 移动有线       电信 WiFi       联通               ESP32/MiFi 移动
+      └─────────────┴───────────────┴──────────────┴──▶ opencode.ai/zen/v1
 ```
 
 四跳：客户端 → caddy(TLS) → 容器 → 设备 agent 的 CONNECT 隧道 → Zen。
@@ -58,7 +58,7 @@ cordon、换 IP、failover 语义与传输无关。
 | `proxy_opencode/` | 网关：`routes/`（薄路由）、`formats/`（协议转换）、`upstreams/`（zen_direct / bun 传输 / failover）、`egress/`（pool / counters / rotate / catalog / eventlog / updater） |
 | `egress-agent/` | 设备侧 Python 包：CONNECT 代理 + healthz + ONT 换 IP；`deploy/` 含 systemd 与 Windows schtasks 两条已验证路径 |
 | `egress-agent-android/` | 原生 Kotlin 版占位（wire 契约已冻结，P6） |
-| `egress-agent-esp32/` | ESP32 桶（移动 MiFi 上行）：PlatformIO 固件 + 网关侧反向隧道适配器 + MiFi 换 IP 工具；线协议契约冻结 v3 |
+| `egress-agent-esp32/` | ESP32 桶（移动 MiFi 上行）：PlatformIO 固件 + 网关侧反向隧道适配器 + MiFi 换 IP 工具；线协议契约 v4（HELLO 共享密钥鉴权） |
 | `deploy/ecs/` | Dockerfile / compose / env.example / Caddyfile 片段 |
 | `balancer/` | 旧栈边缘 LB（保留实现与测试，现役栈不部署） |
 

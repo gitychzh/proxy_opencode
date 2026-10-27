@@ -7,8 +7,14 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/zen-gw/src
 ExecStart=/usr/bin/python3 /opt/zen-gw/src/esp32_bucket_adapter.py
+# 控制通道 HELLO 鉴权（协议契约 v4）：必须与固件 `CTRL_SECRET` 常量一致。
+# 值不入仓库——写到 /opt/zen-gw/src/esp32-adapter.env（600）一行
+# `ESP32_CTRL_SECRET=...`；文件缺失或值为空则退回 v3 免鉴权。
+EnvironmentFile=-/opt/zen-gw/src/esp32-adapter.env
 Restart=always
 RestartSec=5
+StandardOutput=append:/var/log/esp32-bucket-adapter.log
+StandardError=append:/var/log/esp32-bucket-adapter.log
 
 [Install]
 WantedBy=multi-user.target
