@@ -1,0 +1,9 @@
+# build artifacts
+.pio/
+firmware/.pio/
+firmware/include/
+firmware/lib/
+firmware/test/
+
+__pycache__/
+*.pyc

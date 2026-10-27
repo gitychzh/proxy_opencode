@@ -7,6 +7,14 @@
 
 ### Added
 
+- **feat(egress): 新增 `egress-agent-esp32/` 模块（ESP32 桶，移动 MiFi 上行）** —
+  原 `esp32_p1` 独立仓库合并为子模块：PlatformIO 固件（反向隧道、双网 fallback、
+  并发信号量）+ 网关侧适配器（`esp32_bucket_adapter.py`，标准桶接口
+  `CONNECT`+`/healthz` :10005）+ MiFi 换 IP 工具（`tools/reboot_mifi.py`）。
+  线协议契约冻结 v3 见模块内 `PROTOCOL.md`（改协议先改契约）。
+  接入桶池：`ZEN_EGRESS_PROXIES` 追加 `esp32=http://127.0.0.1:10005`。
+  实测：CONNECT/HTTP 全链路、8 并发（4 立即+3 排队+1 超时）、断链自愈、
+  MiFi 重启后全链路恢复。
 - **feat(egress): 按请求数的周期性出口轮换（每桶 500 条成功请求换 IP）** — 此前
   轮换只由硬 429 / 403 触发（即「烧穿之后才换」），运维侧要求在配额耗尽**之前**
   主动换 IP，避免单桶当日成功请求数逼近免费层上限触发 429。新增
