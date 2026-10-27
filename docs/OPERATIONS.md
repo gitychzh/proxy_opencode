@@ -1,10 +1,11 @@
 # 运维手册（OPERATIONS）
 
-> 现状快照：2026-10-27（0.7.0，四桶现役）。本文只记**当前部署状态、常用操作、
+> 现状快照：2026-10-28（0.7.4，四桶现役）。本文只记**当前部署状态、常用操作、
 > 排障路径**与未解决风险；事故编年与已关闭问题看 §5 与
 > [`CHANGELOG.md`](../CHANGELOG.md)。拓扑/端口/池语义看
 > [`ARCHITECTURE.md`](ARCHITECTURE.md)；协议事实与红线看
-> [`AGENTS.md`](../AGENTS.md) 硬约束 1；凭据去向看 [`ACCESS.md`](ACCESS.md)。
+> [`AGENTS.md`](../AGENTS.md) 硬约束 1；模型参数看
+> [`MODEL_PROFILE.md`](MODEL_PROFILE.md)；凭据去向看 [`ACCESS.md`](ACCESS.md)。
 
 ## 1. 现状（0.7.x 单栈）
 
@@ -24,10 +25,41 @@
 
 ## 2. 部署与桶状态
 
-`/opt/zen-gw/src`（deploy 快照，非 git 树）；改代码后
-`docker compose -f deploy/ecs/compose.yml up -d --build`。宿主
+`/opt/zen-gw/src` = **仓库 HEAD 的 `git archive` 快照**，不再是手工维护的
+「deploy 快照」。2026-10-28 已彻底重建：旧快照里的 `proxy_opencode.bak-2026*`、
+`*.egg-info`、`.pytest_cache`/`.mypy_cache`/`.ruff_cache`、`runtime-logs`、
+`.e2e_tmp`、`src-backup-*.tgz` 全部清除（2.8M，只有源码）。宿主
 `127.0.0.1:10010 → 容器 10002`，caddy `:10002` 反代 10010。`/data` 属主必须
 可写（uid 10002），否则 eventlog 静默禁用。
+
+**重建流程**（改代码后照抄，端口/密钥/别名全程不动）：
+
+```bash
+# 本地：只发仓库里的东西，不带任何本地缓存
+git archive --format=tar.gz -o /tmp/zen-src.tar.gz HEAD
+scp -P 222 /tmp/zen-src.tar.gz root@115.29.231.25:/root/
+
+# ECS：先备份两个不可再生的东西，再清空
+ssh -p 222 root@115.29.231.25 'set -e
+  cd /opt/zen-gw/src && cp deploy/ecs/.env /tmp/keep.env && cp -a deploy/ecs/data /tmp/keep.data
+  docker rm -f zen-gw; rm -rf /opt/zen-gw/src; mkdir -p /opt/zen-gw/src
+  tar xzf /root/zen-src.tar.gz -C /opt/zen-gw/src
+  cp /tmp/keep.env /opt/zen-gw/src/deploy/ecs/.env          # 密钥/桶/别名原样
+  cp -a /tmp/keep.data /opt/zen-gw/src/deploy/ecs/data
+  chmod 600 /opt/zen-gw/src/deploy/ecs/.env
+  chown -R 10002:10002 /opt/zen-gw/src/deploy/ecs/data
+  cd /opt/zen-gw/src && docker build -f deploy/ecs/Dockerfile -t zen-gw:0.7 -t zen-gw:<ver> .
+  cd deploy/ecs && docker compose -f compose.yml up -d --no-build
+  rm -f /root/zen-src.tar.gz'
+
+# 验收（三件缺一不可）
+curl -s https://115.29.231.25:10002/healthz -k          # version 与 tag 一致
+python scripts/e2e_workbuddy.py --base https://115.29.231.25:10002 --key <GW_KEY> --insecure
+```
+
+硬规矩：①`.env` 与 `data/` 是唯二不可再生项，先备份再动手；②镜像只保留
+`zen-gw:0.7`（compose 引用）与当前版本 tag，回滚靠 git + 重建（约 40s），不囤
+rollback 镜像；③上传包用完即删，部署树里不许出现 `__pycache__`/缓存/备份。
 
 | 桶 | agent | 最近出口 IP | 备注 |
 |---|---|---|---|

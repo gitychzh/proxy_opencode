@@ -35,7 +35,8 @@ Select-String -Path "$HOME\.workbuddy\logs\main.log" -Pattern "CustomModelsProdu
 | Base URL | `http://127.0.0.1:8787/v1` |
 | API Key | `wb-local-8787`（仅本机回环，`HOST=127.0.0.1`） |
 | 模型 ID | `deepseek-ai/deepseek-v4.1-flash`（对外唯一别名，上游 `big-pickle`） |
-| 上下文 | 输入 131072 / 输出 32768（桌面版字段上限，网关侧仍受上游约束） |
+| 上下文 | 输入 **160000** / 输出 **32000**（照 `models.dev` 的 `big-pickle` 条目，见 [`MODEL_PROFILE.md`](MODEL_PROFILE.md)；曾填 131072/32768 是旧估算，会让客户端早 29K 就开始压缩） |
+| 压缩点 | **136000** 提示词 token（客户端 `calculateCeiling`：160000 − 24000）；服务端在 160000 处以 400 `context_length_exceeded` 兜底 |
 | 协议 | OpenAI 兼容（`useCustomProtocol: false`），另支持 `/v1/responses`、`/v1/messages` |
 
 启动方式：Windows 计划任务 `proxy_opencode-wb-gateway`（SYSTEM，登录即启动，
@@ -48,6 +49,11 @@ Select-String -Path "$HOME\.workbuddy\logs\main.log" -Pattern "CustomModelsProdu
 （boringssl/HTTP2）拿 200。所以本机实例固定 `ZEN_BUN_TRANSPORT=1` +
 `ZEN_BUN_BIN`（bun 1.4.4，与生产镜像同版本）。缺 bun 时网关静默回退 httpx，
 表现为「每条请求都 429」——那不是配额问题。
+
+**思考强度没有开关**：`big-pickle` 的目录条目只声明 `reasoning: {supported:
+true}`，没有 `effort` 列表，opencode 本体因此不提供调节项。桌面版若把
+`reasoning_effort` 塞进请求，网关会丢弃该字段（`ZEN_REASONING_POLICY=max`）并
+记一条 `thinking controls dropped`，模型按自身上限推理——这是对齐，不是降级。
 
 ## 3. 验收（端到端）
 
