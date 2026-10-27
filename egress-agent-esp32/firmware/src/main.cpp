@@ -16,6 +16,9 @@ static uint32_t lastWifiScan = 0;
 
 IPAddress CTRL_HOST(115, 29, 231, 25);
 constexpr uint16_t CTRL_PORT = 9999;
+// 控制通道共享密钥：HELLO 首行携带，适配器不匹配即断开（v4，防公网扫描者冒充注册）。
+// 适配器侧同名环境变量 ESP32_CTRL_SECRET；为空时适配器退回免鉴权（v3 兼容）。
+static const char* CTRL_SECRET = "esp32-p1-7f3a9c";
 
 #define LED_PIN 8
 #define MAX_TUNNELS 4
@@ -227,7 +230,7 @@ String statusLine() {
 // ---------- 控制会话 ----------
 void runControlSession() {
   gCtrl.setNoDelay(true);
-  gCtrl.printf("HELLO esp32_p1 %s\n", WiFi.localIP().toString().c_str());
+  gCtrl.printf("HELLO esp32_p1 %s %s\n", WiFi.localIP().toString().c_str(), CTRL_SECRET);
   gCtrl.flush();
   logf("[ctrl] 已连上 %s, 等指令", CTRL_HOST.toString().c_str());
 

@@ -1,4 +1,4 @@
-# egress-agent-esp32 — Wire 协议契约（冻结 v3）
+# egress-agent-esp32 — Wire 协议契约（冻结 v4）
 
 本文件是 ESP32 固件与网关侧适配器之间的**线协议权威定义**。任何一方修改
 必须两端同步 bump 并更新此文件；只读方向（网关 → 固件）的字段新增需向后兼容。
@@ -26,7 +26,7 @@ ESP32 处于路由器 AP 隔离之后，无法被外连，因此**全部连接�
 
 | 方向 | 帧 | 语义 |
 |---|---|---|
-| ESP32 → 适配器 | `HELLO <name> <lan_ip>\n` | 上线注册 |
+| ESP32 → 适配器 | `HELLO <name> <lan_ip> <secret>\n` | 上线注册（v4：末段共享密钥） |
 | ESP32 → 适配器 | `HB\n`（每 20s） | 心跳 |
 | 适配器 → ESP32 | `PONG\n` | 心跳应答 |
 | 适配器 → ESP32 | `T <id> <host>:<port>\n` | 下发隧道任务 |
@@ -34,6 +34,16 @@ ESP32 处于路由器 AP 隔离之后，无法被外连，因此**全部连接�
 | 适配器 → ESP32 | `PING\n` / `STAT\n` / `BYE\n` | 探活 / 状态 / 优雅断开 |
 
 `<id>` 为适配器生成的单调数字字符串。`<reason>` ∈ `target-connect` / `data-connect` / `busy` / `task-create` / `bad-port` / `bad-target`。
+
+### v4 鉴权（2026-10-27）
+
+适配器 :9999 必须公网可达（ESP32 从 MiFi NAT 后外连），v3 实测有公网扫描者
+连入（azenv/SSH 探测）；无鉴权的 HELLO 意味着任何主机都能冒充 ESP32 抢占
+桶槽并收走 CONNECT 流量。v4 在 HELLO 首行追加第 4 段共享密钥：
+
+- 固件：`CTRL_SECRET` 常量；适配器：环境变量 `ESP32_CTRL_SECRET`；
+- 适配器侧密钥为**空**时退回 v3 免鉴权（向后兼容，仅限受信内网）；
+- 密钥不匹配：适配器回 `BYE\n` 并立即断开，不注册。
 
 ## 数据通道（ESP32 → 适配器 :9999，每隧道一条）
 

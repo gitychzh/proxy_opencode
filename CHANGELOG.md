@@ -7,6 +7,15 @@
 
 ### Added
 
+- **feat(esp32): 控制通道 HELLO 鉴权（协议契约 bump v4）** — 适配器 :9999 必须公网
+  可达（ESP32 从 MiFi NAT 后外连），v3 实测有公网扫描者连入（azenv/SSH 探测），
+  且 HELLO 无鉴权＝任何主机可冒充 ESP32 抢占桶槽并收走 CONNECT 流量。v4 在
+  `HELLO <name> <lan_ip>` 追加第 4 段共享密钥（固件 `CTRL_SECRET` 常量 / 适配器
+  `ESP32_CTRL_SECRET` 环境变量），不匹配回 `BYE` 立即断开；适配器侧密钥为空时
+  退回 v3 兼容免鉴权。同批把适配器收编为 ECS systemd 单元
+  `esp32-bucket-adapter.service`（此前 nohup 裸进程，无自愈，本次排查中即因
+  ssh 会话退出而双实例/全灭过）。实测：假 HELLO 被拒并留痕、真 ESP32 正常注册、
+  CONNECT 数据面 2/2 成功。
 - **feat(egress): 新增 `egress-agent-esp32/` 模块（ESP32 桶，移动 MiFi 上行）** —
   原 `esp32_p1` 独立仓库合并为子模块：PlatformIO 固件（反向隧道、双网 fallback、
   并发信号量）+ 网关侧适配器（`esp32_bucket_adapter.py`，标准桶接口

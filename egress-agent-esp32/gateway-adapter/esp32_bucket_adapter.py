@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""egress-agent-esp32 网关侧适配器（v3）。
+"""egress-agent-esp32 网关侧适配器（v4）。
 把标准 egress 桶接口(CONNECT + /healthz :10005)翻译成 ESP32 反向隧道协议。
 线协议契约见 ../PROTOCOL.md。每个入站连接(控制/数据)独立线程处理。
+v4: 控制通道 HELLO 鉴权（ESP32_CTRL_SECRET，空=兼容 v3 免鉴权），防公网扫描者
+冒充 ESP32 注册抢占桶槽（2026-10-27 ECS 9999 端口实测有 azenv/SSH 扫描流量）。
 """
-import socket, threading, time, itertools, json, signal, select
+import os, socket, threading, time, itertools, json, signal, select
 
 CTRL_PORT = 9999
 LISTEN_PORT = 10005
 NAME = "esp32-bucket"
+CTRL_SECRET = os.environ.get("ESP32_CTRL_SECRET", "").strip()
 START = time.time()
 
 lock = threading.Lock()
@@ -22,6 +25,17 @@ def log(*a):
 def handle_conn(conn, addr, first):
     global esp
     if first.startswith(b"HELLO"):
+        if CTRL_SECRET:
+            # HELLO <name> <lan_ip> <secret>（v4）；不带 secret 的 HELLO 一律拒绝
+            parts = first.split(b"\n", 1)[0].decode(errors="replace").split()
+            if len(parts) < 4 or parts[3] != CTRL_SECRET:
+                log(f"拒绝未鉴权 HELLO {addr} {first[:60]!r}")
+                try:
+                    conn.sendall(b"BYE\n")
+                except Exception:
+                    pass
+                conn.close()
+                return
         conn.settimeout(None)
         log(f"ESP32 上线 {first.decode(errors='replace').strip()} {addr}")
         with lock:
@@ -191,5 +205,5 @@ def http_acceptor():
 if __name__ == "__main__":
     threading.Thread(target=acceptor, daemon=True).start()
     threading.Thread(target=http_acceptor, daemon=True).start()
-    log("esp32桶适配器v2启动")
+    log(f"esp32桶适配器v4启动 auth={'on' if CTRL_SECRET else 'off(兼容v3)'}")
     signal.pause()
