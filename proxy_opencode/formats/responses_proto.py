@@ -330,7 +330,9 @@ async def stream_responses_events(
         )
 
     yield event("response.created", {"response": envelope("in_progress")})
-    yield event("in_progress", {"response": envelope("in_progress")})
+    # The Responses wire event is `response.in_progress`: a bare `in_progress`
+    # is not a type any SDK dispatches on, so clients dropped it silently.
+    yield event("response.in_progress", {"response": envelope("in_progress")})
 
     async for chunk in parse_sse_chunks(chunks):
         if isinstance(chunk.get("usage"), dict) and chunk["usage"]:

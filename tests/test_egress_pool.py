@@ -691,3 +691,67 @@ async def test_probe_failure_logs_once_per_transition(
         assert caplog.text.count("bucket marked unhealthy") == 1
     finally:
         cleanup()
+
+# ------------------------------------------------------- lease bookkeeping
+
+
+@pytest.mark.asyncio
+async def test_release_is_idempotent_for_the_same_lease() -> None:
+    """A transport that releases and then re-raises must not double-release.
+
+    ``inflight`` drives least-in-flight selection: a second decrement for the
+    same lease silently hides another request's slot from selection.
+    """
+
+    pool = make_pool("a")
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    lease = await pool.acquire()
+    assert state.inflight == 1
+    await pool.release(lease, ok=True)
+    await pool.release(lease, ok=False, kind="transport")
+    assert state.inflight == 0
+    assert state.total == 1  # the duplicate verdict counted nothing
+    assert state.failures == 0
+
+
+@pytest.mark.asyncio
+async def test_abandon_returns_the_slot_without_a_verdict(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Cancellation is not the bucket's fault: free the slot, count nothing.
+
+    A leaked in-flight slot biases least-in-flight selection for the rest of
+    the day, so cancellation must hand it back — but with no observer call and
+    no cordon verdict, because the bucket did nothing wrong.
+    """
+
+    pool = make_pool("a", failure_threshold=1, cordon_s=120)
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    lease = await pool.acquire()
+    assert state.inflight == 1
+    pool.abandon(lease)
+    assert state.inflight == 0
+    assert state.total == 0
+    assert state.failures == 0
+    assert not state.cordoned(time.monotonic())
+    # idempotent, like release()
+    pool.abandon(lease)
+    assert state.inflight == 0
+    # ...and the slot is immediately reusable
+    again = await pool.acquire()
+    assert again.name == "a"
+    assert state.inflight == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_probe_tolerates_non_object_health_payload() -> None:
+    """A JSON list from a broken agent is a failed probe, not a crash."""
+
+    pool = make_pool("a")
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    respx.get("http://a:10001/healthz").respond(json=["unexpected"])
+    await pool._probe_one(state)  # noqa: SLF001 - must not raise
+    assert state.last_probe_ok is False
+    assert state.healthy is False

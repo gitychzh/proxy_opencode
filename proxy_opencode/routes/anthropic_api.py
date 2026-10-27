@@ -25,14 +25,17 @@ from ..formats.anthropic_proto import (
     to_chat_payload,
 )
 from ..registry import ModelRegistry
+from ..upstreams.failover import fallback_headers, fallback_note
 from ..upstreams.openai_http import StreamRelay
 from ..upstreams.opencode_serve import ServeCompletion, completion_to_chat_response
 from ._pipeline import (
     dispatch,
+    fallback_log_fields,
     is_error_relay,
     new_call,
     parse_json_object,
     relay_stream,
+    with_fallback_note,
 )
 
 logger = logging.getLogger("proxy_opencode.anthropic")
@@ -127,10 +130,19 @@ def make_router(
         if isinstance(result, JSONResponse):
             return result
 
+        # Fallback provenance: headers on every answer, plus a leading SSE
+        # comment when the backup chain served a stream (see routes/chat.py).
+        extra_headers = fallback_headers()
+        note = fallback_note()
+        call.extra_log_fields.update(fallback_log_fields())
+
         if isinstance(result, StreamRelay):
+            chunks = stream_anthropic_events(result.chunks(), call.public_model)
+            if note:
+                chunks = with_fallback_note(chunks, note)
             return StreamingResponse(
                 relay_stream(
-                    stream_anthropic_events(result.chunks(), call.public_model),
+                    chunks,
                     result.usage_holder,
                     lambda status, usage=None: call.log(logger, status, usage),
                     request_id=call.request_id,
@@ -140,7 +152,7 @@ def make_router(
                 ),
                 status_code=200,
                 media_type="text/event-stream",
-                headers=_SSE_HEADERS,
+                headers={**_SSE_HEADERS, **extra_headers},
             )
         if is_error_relay(result):
             status = int(result["__status__"])
@@ -153,16 +165,33 @@ def make_router(
         if isinstance(result, dict):
             # Exactly one completion record per request, carrying usage.
             if call.stream:
-                call.log(logger, 200, result.get("usage"))
+                # Same contract as the responses route: the aggregated body is
+                # re-streamed, so it must still pass through relay_stream for
+                # the "stream ended" record and the client-stall watchdog.
+                chunks = stream_anthropic_events(
+                    _chat_body_sse(result), call.public_model
+                )
+                if note:
+                    chunks = with_fallback_note(chunks, note)
                 return StreamingResponse(
-                    stream_anthropic_events(_chat_body_sse(result), call.public_model),
+                    relay_stream(
+                        chunks,
+                        {"usage": result.get("usage")},
+                        lambda status, usage=None: call.log(logger, status, usage),
+                        request_id=call.request_id,
+                        model=call.upstream_model,
+                        client=call.client,
+                        client_stall_s=settings.client_stall_s,
+                    ),
                     status_code=200,
                     media_type="text/event-stream",
-                    headers=_SSE_HEADERS,
+                    headers={**_SSE_HEADERS, **extra_headers},
                 )
             body_out = chat_to_anthropic_body(result, call.public_model)
             call.log(logger, 200, result.get("usage"))
-            return JSONResponse(status_code=200, content=body_out)
+            return JSONResponse(
+                status_code=200, content=body_out, headers=extra_headers
+            )
 
         call.log(logger, 502)
         return anthropic_error(502, "api_error", "Unexpected upstream result type.")

@@ -146,6 +146,12 @@ cordon、换 IP、failover 语义与传输无关。
   来回切换（2026-10-25：单日 57 engaged / 11 recovered，且每次都把客户端正在用的
   模型换成备用的 ID）。同一轮故障内的再次跳闸只记 INFO `FALLBACK RE-ENGAGED`
   （事件带 `re_trip=true`），真正的恢复才记 WARNING `FALLBACK RECOVERED`。
+- **事故级留痕（2026-10-27）**：首次跳闸记 ERROR `PRODUCTION INCIDENT -
+  FALLBACK ENGAGED`（INFO 过滤的采集也必留存）；恢复记 WARNING
+  `PRODUCTION INCIDENT CLOSED - FALLBACK RECOVERED`；备用也不可达/回错时
+  ERROR `PRODUCTION INCIDENT - FALLBACK FAILED`。JSONL 事件带 `severity`
+  字段：`incident`（首次/备用失败）/ `continuation`（re-trip）/
+  `recovered`（闭合）。
 - **模型改写**：包装层拿到的是路由层已解析的 ID（别名到此处已是 `big-pickle`），
   所以 `ZEN_FALLBACK_MODEL_MAP` 的键必须是解析后的上游 ID，
   `ZEN_FALLBACK_DEFAULT_MODEL` 兜住未命中项。

@@ -621,6 +621,14 @@ class ZenDirectAdapter:
                 )
                 lease = await self._pool.acquire()
                 continue
+            except BaseException:
+                # Cancellation (client hung up before any byte) or an
+                # unexpected adapter fault: hand the in-flight slot back
+                # without judging the bucket. Leaking it here permanently
+                # skewed least-in-flight selection. ``abandon`` is a no-op
+                # when _exchange already released the lease.
+                self._pool.abandon(lease)
+                raise
             if isinstance(result, StreamRelay):
                 return result
             status = result.get("__status__")

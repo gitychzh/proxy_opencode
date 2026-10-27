@@ -15,6 +15,7 @@ from ..config import Settings
 from ..errors import openai_error
 from ..registry import ModelRegistry
 from ..sse_mask import mask_json_model, mask_model_field
+from ..upstreams.failover import fallback_headers, fallback_note
 from ..upstreams.openai_http import StreamRelay
 from ..upstreams.opencode_serve import (
     ServeCompletion,
@@ -24,11 +25,13 @@ from ..upstreams.opencode_serve import (
 )
 from ._pipeline import (
     dispatch,
+    fallback_log_fields,
     is_error_relay,
     new_call,
     openai_error_factory,
     parse_json_object,
     relay_stream,
+    with_fallback_note,
 )
 
 logger = logging.getLogger("proxy_opencode.chat")
@@ -65,9 +68,17 @@ def make_router(
             return result
 
         model = call.public_model or call.upstream_model
+        # Fallback provenance: headers on every answer, plus a leading SSE
+        # comment when the backup chain served a stream. Captured here
+        # because the contextvar marker only lives for this request.
+        extra_headers = fallback_headers()
+        note = fallback_note()
+        call.extra_log_fields.update(fallback_log_fields())
 
         if isinstance(result, StreamRelay):
             chunks_iter = result.chunks()
+            if note:
+                chunks_iter = with_fallback_note(chunks_iter, note)
             if registry.enabled:
                 chunks_iter = mask_model_field(chunks_iter, call.public_model)
             return StreamingResponse(
@@ -82,7 +93,11 @@ def make_router(
                 ),
                 status_code=200,
                 media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    **extra_headers,
+                },
             )
         if is_error_relay(result):  # relayed upstream error, original status
             status = int(result["__status__"])
@@ -92,18 +107,26 @@ def make_router(
             content = result["content"]
             if registry.enabled and isinstance(content, dict):
                 content = mask_json_model(content, call.public_model)
-            return JSONResponse(status_code=status, content=content)
+            return JSONResponse(
+                status_code=status, content=content, headers=extra_headers
+            )
         if isinstance(result, dict):  # openai passthrough non-stream JSON
             if registry.enabled:
                 mask_json_model(result, call.public_model)
             call.log(logger, 200, result.get("usage"))
-            return JSONResponse(status_code=200, content=result)
+            return JSONResponse(
+                status_code=200, content=result, headers=extra_headers
+            )
         if isinstance(result, ServeCompletion):
             response = _serve_response(model, result)
             call.log(logger, 200, response.get("usage"))
             if call.stream:
-                return _synthetic_stream(model, response)
-            return JSONResponse(status_code=200, content=response)
+                return _synthetic_stream(
+                    model, response, extra_headers=extra_headers, note=note
+                )
+            return JSONResponse(
+                status_code=200, content=response, headers=extra_headers
+            )
 
         call.log(logger, 502)
         return openai_error(502, "Unexpected upstream result type.")
@@ -111,7 +134,13 @@ def make_router(
     return app_router
 
 
-def _synthetic_stream(model: str, response: dict[str, Any]) -> StreamingResponse:
+def _synthetic_stream(
+    model: str,
+    response: dict[str, Any],
+    *,
+    extra_headers: dict[str, str] | None = None,
+    note: str = "",
+) -> StreamingResponse:
     choice = response["choices"][0]
     message = choice["message"]
     delta: dict[str, Any] = {"role": "assistant"}
@@ -133,6 +162,8 @@ def _synthetic_stream(model: str, response: dict[str, Any]) -> StreamingResponse
     }
 
     async def synth() -> AsyncIterator[bytes]:
+        if note:
+            yield note.encode()
         yield f"data: {json.dumps(chunk)}\n\n".encode()
         yield b"data: [DONE]\n\n"
 
@@ -144,5 +175,6 @@ def _synthetic_stream(model: str, response: dict[str, Any]) -> StreamingResponse
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
             "X-Opencode-Serve-Synthetic-Stream": "true",
+            **(extra_headers or {}),
         },
     )

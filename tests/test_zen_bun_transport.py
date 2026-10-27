@@ -403,9 +403,15 @@ async def test_post_env_carries_header_deadline(tmp_path: Path, monkeypatch) -> 
     assert spawn["kwargs"]["env"]["ZEN_BUN_TIMEOUT_MS"] == "12000"
 
 
-async def test_post_without_header_deadline_omits_env(
+async def test_post_without_header_deadline_exports_explicit_zero(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """``ZEN_TTFB_S=0`` must DISABLE the script's timer, not inherit its default.
+
+    forward.ts falls back to 60000ms when the variable is absent, so omitting
+    it here turned "0 disables the extra timer" into the 60s default.
+    """
+
     bin_path, script = _write_assets(tmp_path)
     transport = BunTransport(
         bin_path=str(bin_path), script_path=str(script), ttfb_s=0.0
@@ -413,7 +419,7 @@ async def test_post_without_header_deadline_omits_env(
     proc = _ok_proc([])
     spawn = _install_spawn(monkeypatch, proc)
     await transport.post(**_post_kwargs())
-    assert "ZEN_BUN_TTFB_MS" not in spawn["kwargs"]["env"]
+    assert spawn["kwargs"]["env"]["ZEN_BUN_TTFB_MS"] == "0"
 
 
 async def test_post_fails_fast_when_no_headers(tmp_path: Path, monkeypatch) -> None:

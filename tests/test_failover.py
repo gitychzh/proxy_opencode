@@ -274,6 +274,7 @@ async def test_recovery_needs_consecutive_successes(caplog) -> None:  # type: ig
         primary.outcomes = [{"id": "p2"}]
         assert await adapter.chat({"model": "m"}) == {"id": "p2"}
         assert caplog.text.count("FALLBACK RECOVERED") == 1
+        assert "PRODUCTION INCIDENT CLOSED" in caplog.text
 
 
 async def test_failure_resets_the_recovery_streak() -> None:
@@ -316,3 +317,282 @@ async def test_re_trip_is_logged_as_continuation(caplog) -> None:  # type: ignor
         await adapter.chat({"model": "m"})
     assert caplog.text.count("FALLBACK ENGAGED") == 0
     assert caplog.text.count("FALLBACK RE-ENGAGED") == 1
+
+
+# ------------------------------------------------ timeout / gate triggers
+# Owner requirement (2026-10-26): ANY failure OR timeout on the primary must
+# slide to GLM-5.3-Flash on the ModelScope gateway (proxy_ms), visibly.
+
+
+async def test_gate_403_and_upstream_408_engage_backup() -> None:
+    """Free-tier shape gate (403) and upstream timeout (408) both fail over."""
+
+    for status in (403, 408):
+        primary = FakeAdapter()
+        adapter, secondary = make_adapter(primary)
+        secondary.outcomes = [{"id": "ok"}]
+        primary.outcomes = [relay(status)]
+        assert await adapter.chat({"model": "m1"}) == {"id": "ok"}
+        assert adapter.fallback_status()["engaged"] is True
+
+
+async def test_client_fault_401_422_never_switches() -> None:
+    for status in (401, 422):
+        primary = FakeAdapter()
+        adapter, secondary = make_adapter(primary)
+        primary.outcomes = [relay(status)]
+        assert await adapter.chat({"model": "m1"}) == relay(status)
+        assert secondary.calls == []
+
+
+async def test_primary_deadline_fails_over() -> None:
+    """A primary that never answers within the deadline is a timeout, not a hang."""
+
+    import asyncio
+
+    class HangingPrimary(FakeAdapter):
+        async def chat(self, payload: dict[str, Any]) -> Any:
+            await asyncio.sleep(30)
+            return {"id": "never"}
+
+    primary = HangingPrimary()
+    adapter, secondary = make_adapter(primary, zen_fallback_primary_timeout_s=0.05)
+    secondary.outcomes = [{"id": "via-ms"}]
+
+    result = await adapter.chat({"model": "m"})
+
+    assert result == {"id": "via-ms"}
+    assert adapter.fallback_status()["engaged"] is True
+
+
+async def test_stalled_stream_prefetch_fails_over() -> None:
+    """A stream with headers but no first byte must fail over before any output."""
+
+    import asyncio
+
+    from proxy_opencode.upstreams.openai_http import StreamRelay
+
+    class SilentResponse:
+        status_code = 200
+        headers = {}
+
+        async def aiter_bytes(self):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(30)
+            yield b"data: {}\n\n"
+
+        async def aiter_lines(self):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(30)
+            yield ""
+
+        async def aclose(self) -> None:
+            return None
+
+    class StreamingPrimary(FakeAdapter):
+        async def chat(self, payload: dict[str, Any]) -> Any:
+            self.calls.append(payload)
+            return StreamRelay(SilentResponse(), {})  # type: ignore[arg-type]
+
+    primary = StreamingPrimary()
+    adapter, secondary = make_adapter(
+        primary, zen_fallback_first_chunk_timeout_s=0.05
+    )
+    secondary.outcomes = [{"id": "via-ms"}]
+
+    result = await adapter.chat({"model": "m", "stream": True})
+
+    assert result == {"id": "via-ms"}
+    assert adapter.fallback_status()["engaged"] is True
+
+
+async def test_prefetched_stream_replays_first_chunk_once() -> None:
+    """A healthy stream: the prefetched first chunk is handed over intact."""
+
+    from proxy_opencode.upstreams.openai_http import StreamRelay
+
+    class Response:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        async def aiter_bytes(self):  # type: ignore[no-untyped-def]
+            yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+        async def aiter_lines(self):  # type: ignore[no-untyped-def]
+            yield 'data: {"choices":[{"delta":{"content":"hi"}}]}'
+
+        async def aclose(self) -> None:
+            return None
+
+    class StreamingPrimary(FakeAdapter):
+        async def chat(self, payload: dict[str, Any]) -> Any:
+            self.calls.append(payload)
+            return StreamRelay(Response(), {})  # type: ignore[arg-type]
+
+    primary = StreamingPrimary()
+    adapter, secondary = make_adapter(primary, zen_fallback_first_chunk_timeout_s=5)
+    result = await adapter.chat({"model": "m", "stream": True})
+
+    assert isinstance(result, StreamRelay)
+    body = b"".join([chunk async for chunk in result.chunks()])
+    assert body.count(b'"content":"hi"') == 1
+    assert b"[DONE]" in body
+    assert secondary.calls == []
+
+
+async def test_backup_is_announced_to_the_client() -> None:
+    """Headers + SSE comment must name the backup and the model it served."""
+
+    from proxy_opencode.upstreams.failover import (
+        FALLBACK_HEADER,
+        FALLBACK_MODEL_HEADER,
+        fallback_headers,
+        fallback_note,
+    )
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(
+        primary, zen_fallback_default_model="ZhipuAI/GLM-5.3-Flash"
+    )
+    primary.outcomes = [relay(429)]
+    secondary.outcomes = [{"id": "ok"}]
+
+    await adapter.chat({"model": "big-pickle"})
+
+    headers = fallback_headers()
+    assert headers[FALLBACK_HEADER] == "proxy_ms"
+    assert headers[FALLBACK_MODEL_HEADER] == "ZhipuAI/GLM-5.3-Flash"
+    note = fallback_note()
+    assert note.startswith(": ")
+    assert "model=ZhipuAI/GLM-5.3-Flash" in note
+    assert note.endswith("\n\n")
+
+
+async def test_primary_answer_leaves_no_marker() -> None:
+    from proxy_opencode.upstreams.failover import fallback_headers, fallback_note
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary)
+    primary.outcomes = [{"id": "primary-ok"}]
+
+    await adapter.chat({"model": "m"})
+
+    assert fallback_headers() == {}
+    assert fallback_note() == ""
+
+
+# ---------------------------------------------- production-incident logging
+# Owner requirement (2026-10-27): a fallback engagement is a production
+# incident and must be impossible to miss — ERROR level (survives
+# INFO-filtered collection), a greppable "PRODUCTION INCIDENT" prefix, and a
+# severity field on the JSONL event; recovery closes the incident.
+
+
+async def test_first_trip_is_error_level_production_incident(caplog) -> None:  # type: ignore[no-untyped-def]
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary)
+    primary.outcomes = [relay(429)]
+    secondary.outcomes = [{"id": "ok"}]
+
+    with caplog.at_level("INFO", logger="proxy_opencode.failover"):
+        await adapter.chat({"model": "m"})
+
+    error_lines = [
+        r for r in caplog.records
+        if r.name == "proxy_opencode.failover" and r.levelname == "ERROR"
+    ]
+    assert any("PRODUCTION INCIDENT - FALLBACK ENGAGED" in r.getMessage()
+               for r in error_lines)
+    assert any("proxy_ms" in r.getMessage() for r in error_lines)
+
+
+async def test_incident_severity_lands_on_jsonl_events(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import json
+
+    from proxy_opencode.egress.eventlog import EVENTS
+
+    path = tmp_path / "events.jsonl"
+    EVENTS.configure(str(path))
+    try:
+        primary = FakeAdapter()
+        adapter, secondary = make_adapter(primary)
+        primary.outcomes = [relay(429)]
+        secondary.outcomes = [{"id": "ok"}]
+        await adapter.chat({"model": "m"})
+
+        events = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        engaged = [e for e in events if e["event"] == "fallback_engaged"]
+        assert len(engaged) == 1
+        assert engaged[0]["severity"] == "incident"
+        assert engaged[0]["secondary"]
+        # "m" maps to the default model; with no default configured the
+        # unmapped id would pass through unchanged — both are valid shapes,
+        # so only assert the field exists.
+        assert "model" in engaged[0]
+    finally:
+        EVENTS.configure("")
+
+
+async def test_backup_failure_is_marked_as_incident(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import json
+
+    import pytest
+
+    from proxy_opencode.egress.eventlog import EVENTS
+
+    path = tmp_path / "events.jsonl"
+    EVENTS.configure(str(path))
+    try:
+        primary = FakeAdapter()
+        adapter, secondary = make_adapter(primary)
+        primary.outcomes = [relay(429)]
+        secondary.outcomes = [ConnectionError("proxy_ms down")]
+        with pytest.raises(ConnectionError, match="both unreachable"):
+            await adapter.chat({"model": "m"})
+
+        events = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        failed = [e for e in events if e["event"] == "fallback_failed"]
+        assert len(failed) == 1
+        assert failed[0]["severity"] == "incident"
+    finally:
+        EVENTS.configure("")
+
+
+async def test_re_trip_keeps_continuation_severity(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A re-trip is the same incident continuing, not a new one."""
+
+    import json
+    import time
+
+    from proxy_opencode.egress.eventlog import EVENTS
+
+    path = tmp_path / "events.jsonl"
+    EVENTS.configure(str(path))
+    try:
+        primary = FakeAdapter()
+        adapter, secondary = make_adapter(primary, zen_fallback_hold_s=3600.0)
+        primary.outcomes = [relay(429)]
+        secondary.outcomes = [{"id": "via-ms"}]
+        await adapter.chat({"model": "m"})
+
+        adapter._fallback_until = time.monotonic() - 1.0
+        primary.outcomes = [relay(429)]
+        secondary.outcomes = [{"id": "via-ms-2"}]
+        await adapter.chat({"model": "m"})
+
+        events = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        engaged = [e for e in events if e["event"] == "fallback_engaged"]
+        assert [e["severity"] for e in engaged] == ["incident", "continuation"]
+    finally:
+        EVENTS.configure("")

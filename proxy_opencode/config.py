@@ -294,6 +294,18 @@ class Settings:
     # (the first success still gets served by the primary) while requiring
     # evidence of sustained recovery before announcing it.
     zen_fallback_recover_after: int = 2
+    # Per-request deadline for the primary attempt (seconds, 0 = off). When
+    # it expires the backup serves the turn instead, so a blackholed egress
+    # hop costs `ZEN_FALLBACK_PRIMARY_TIMEOUT_S`, not the full
+    # `ZEN_TIMEOUT_S`. Must stay above the healthy p99 (time-to-headers p95
+    # 21s on the production pool) so normal slow turns are never switched.
+    zen_fallback_primary_timeout_s: float = 90.0
+    # First-chunk deadline for a streaming primary turn (seconds, 0 = off).
+    # The wrapper prefetches the first SSE chunk before handing the response
+    # to the client; if it does not arrive in time the turn fails over with
+    # no byte written downstream. Above the p99 of a healthy first chunk
+    # (headers + first delta), below the point where a client gives up.
+    zen_fallback_first_chunk_timeout_s: float = 30.0
     zen_fallback_model_map: dict[str, str] = field(default_factory=dict)
     # Catch-all for ids the map misses: the zen catalogue's bare ids can never
     # exist on the backup gateway, so an unmapped id would be rejected there.
@@ -554,6 +566,12 @@ def load_settings() -> Settings:
         zen_fallback_hold_s=float(os.environ.get("ZEN_FALLBACK_HOLD_S", "120")),
         zen_fallback_recover_after=max(
             1, int(os.environ.get("ZEN_FALLBACK_RECOVER_AFTER", "2"))
+        ),
+        zen_fallback_primary_timeout_s=max(
+            0.0, float(os.environ.get("ZEN_FALLBACK_PRIMARY_TIMEOUT_S", "90"))
+        ),
+        zen_fallback_first_chunk_timeout_s=max(
+            0.0, float(os.environ.get("ZEN_FALLBACK_FIRST_CHUNK_TIMEOUT_S", "30"))
         ),
         zen_fallback_model_map=_model_map(
             os.environ.get("ZEN_FALLBACK_MODEL_MAP", "")

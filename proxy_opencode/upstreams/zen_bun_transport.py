@@ -163,8 +163,10 @@ class BunTransport:
         env["ZEN_UPSTREAM_BASE"] = base_url
         env["ZEN_BUN_HEADERS"] = json.dumps(dict(headers))
         env["ZEN_BUN_TIMEOUT_MS"] = str(int(timeout_s * 1000))
-        if self._ttfb_s > 0:
-            env["ZEN_BUN_TTFB_MS"] = str(int(self._ttfb_s * 1000))
+        # Always exported, including "0": forward.ts defaults to 60000ms when
+        # the variable is absent, so omitting it turned ``ZEN_TTFB_S=0``
+        # ("disables the extra timer") into the default deadline instead.
+        env["ZEN_BUN_TTFB_MS"] = str(int(self._ttfb_s * 1000))
         try:
             proc = await asyncio.create_subprocess_exec(
                 self._bin,

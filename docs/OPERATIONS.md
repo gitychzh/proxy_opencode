@@ -62,11 +62,18 @@ IP 域 cordon 并接受轮换结果，前缀不符只记 `prefix_mismatch` 事�
 - 容器经 `172.17.0.1:10003` 访问，**不要带 `/v1`**（适配器自己拼路径）。
 - 状态：`curl -s http://127.0.0.1:10010/healthz` 看 `fallback.engaged` /
   `hold_remaining_s`；`docker logs zen-gw --since 1h 2>&1 | grep FALLBACK`。
+- **事故级留痕（2026-10-27 起）**：首次跳闸 = ERROR
+  `PRODUCTION INCIDENT - FALLBACK ENGAGED`，重复跳闸 = INFO `FALLBACK
+  RE-ENGAGED`，恢复 = WARNING `PRODUCTION INCIDENT CLOSED - FALLBACK
+  RECOVERED`；JSONL 事件带 `severity`（incident/continuation/recovered），
+  可 `grep severity\": \"incident` 直接拉事故清单。
 - **备用也会挂**：proxy_ms 欠费回 `429 insufficient balance`，网关原样透传并
   立即释放保持窗口，客户端会判 `billing/retryable:false` —— 那是备用链路的账，
   不要去查 zen 侧。
-- 演练（不动生产容器）：起临时容器把主链路指到死端口，打一次请求即可看到
-  `FALLBACK ENGAGED` + 备用真实回包，完成后 `docker rm -f zen-gw-probe`。
+- 演练（不动生产容器）：起临时容器把主链路指到死 key（死端口也行），打一次
+  请求即可看到 `PRODUCTION INCIDENT - FALLBACK ENGAGED` + 备用真实回包 +
+  `x-gateway-fallback-*` 响应头；hold 过期后自然 RE-ENGAGE，完成后
+  `docker rm -f zen-gw-probe`（2026-10-27 实弹演练通过）。
 
 ### 2.2 owin10 上 Hermes 客户端（只保留 `oc_uni`）
 

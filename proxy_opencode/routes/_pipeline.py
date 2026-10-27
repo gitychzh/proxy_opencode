@@ -271,6 +271,38 @@ def is_error_relay(result: Any) -> bool:
     return isinstance(result, dict) and "__status__" in result
 
 
+async def with_fallback_note(
+    chunks: AsyncIterator[bytes], note: str
+) -> AsyncIterator[bytes]:
+    """Prepend an SSE comment announcing the backup chain (if any).
+
+    A comment line (`: ...`) is ignored by every SSE parser, so clients see
+    no protocol difference — but `curl`, logs and packet captures show the
+    answer did not come from the primary. The note is captured by the route
+    before the response starts (the contextvar marker is request-scoped).
+    """
+
+    if note:
+        yield note.encode("utf-8")
+    async for chunk in chunks:
+        yield chunk
+
+
+def fallback_log_fields() -> dict[str, Any]:
+    """Per-request log fields naming the backup chain that served the turn."""
+
+    from ..upstreams.failover import current_marker
+
+    marker = current_marker()
+    if not marker:
+        return {}
+    return {
+        "fallback": marker.get("secondary"),
+        "fallback_model": marker.get("model"),
+        "fallback_reason": marker.get("reason"),
+    }
+
+
 async def relay_stream(
     chunks: AsyncIterator[bytes],
     usage_holder: dict[str, Any],

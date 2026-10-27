@@ -1,56 +1,165 @@
-"""Backup-upstream failover wrapper: zen-direct primary -> proxy_ms secondary.
+"""Backup-upstream failover wrapper: zen-direct primary -> proxy_ms (GLM-5.3-Flash).
 
-Owner requirement (2026-10-25): when the zen free-tier chain fails at the
-egress level (quota 429, 5xx, transport failure, free-tier gate 503), the
-gateway must switch to the ModelScope aggregation gateway (``proxy_ms``,
-same ECS host, :10003) automatically and conspicuously — then come back.
+Owner requirement (2026-10-25, extended 2026-10-26): when the zen free-tier
+chain fails — quota 429, 5xx, transport failure, free-tier gate 403/503,
+*timeout* (header deadline, whole-request deadline, or a stream that never
+produces its first chunk) — the gateway must switch to the ModelScope
+aggregation gateway (``proxy_ms``, same ECS host, :10003, serving
+``ZhipuAI/GLM-5.3-Flash``) automatically and conspicuously, then come back.
 
 Design:
   * Wrapper adapter around the primary (built in ``build_adapter``). All
     three protocol routes plus /v1/models consume ``app.state.adapter``, so
     one wrapper covers every surface.
-  * Failover triggers are EGRESS-level only: a raised ConnectionError or an
-    error-relay dict whose ``__status__`` is 429/5xx/503. Request-level 4xx
-    (bad model id, bad key) is the client's fault — relayed untouched.
+  * Failover triggers: any exception raised by the primary (transport
+    error, timeout, adapter fault) or an upstream error relay whose status
+    is >= 400, EXCEPT the explicit client-fault statuses in
+    ``_PASSTHROUGH_STATUSES`` — a malformed request or an unknown model
+    replayed on another vendor is still malformed, and retrying it only
+    doubles the client's latency.
+  * Deadlines: ``ZEN_FALLBACK_PRIMARY_TIMEOUT_S`` bounds the whole primary
+    attempt (0 = off), and ``ZEN_FALLBACK_FIRST_CHUNK_TIMEOUT_S`` prefetches
+    the first SSE chunk so a stream that never starts still fails over
+    *before* any byte reaches the client (0 = off). Once the first chunk is
+    out the turn is committed: a mid-stream failure is the stream
+    watchdog's business, never a silent retry that would duplicate output.
   * Circuit breaker: once tripped, every request goes straight to the
     secondary for ``ZEN_FALLBACK_HOLD_S`` (default 120s); the first request
-    after the window probes the primary again (half-open). A primary
-    success closes the breaker and logs the recovery.
+    after the window probes the primary again (half-open). The breaker only
+    closes after ``ZEN_FALLBACK_RECOVER_AFTER`` consecutive primary
+    successes.
   * Prominent notifications (red-line compliant: no content, no keys):
-      - WARNING "FALLBACK ENGAGED" / "FALLBACK RECOVERED" log records
+      - the FIRST trip of an outage is a production incident: ERROR
+        "PRODUCTION INCIDENT - FALLBACK ENGAGED" (cannot be filtered away
+        by INFO-tuned log collection) plus ``severity: incident`` on the
+        JSONL event; a re-trip inside the same outage is the incident
+        continuing (INFO, ``severity: continuation``)
+      - recovery closes the incident: WARNING "FALLBACK RECOVERED" +
+        ``severity: recovered``
+      - per-request INFO "FALLBACK ROUTING" with the rewritten model
       - structured JSONL events via the shared egress event sink
-      - /healthz grows a "fallback" block (engaged / hold remaining)
+      - response headers ``X-Gateway-Fallback`` /
+        ``X-Gateway-Fallback-Model`` / ``X-Gateway-Fallback-Reason`` and a
+        leading SSE comment on streamed answers served by the backup
+      - /healthz grows a "fallback" block (engaged / hold remaining / model)
   * Model ids: the secondary speaks ModelScope ids, not zen bare ids.
-    ``ZEN_FALLBACK_MODEL_MAP`` (``from=to`` csv) rewrites the upstream model
-    before handing the payload over; unmapped ids pass through unchanged.
+    ``ZEN_FALLBACK_MODEL_MAP`` (``from=to`` csv) rewrites the request model
+    before handing the payload over; ``ZEN_FALLBACK_DEFAULT_MODEL`` catches
+    everything unmapped (production: ``ZhipuAI/GLM-5.3-Flash``).
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import logging
 import time
 from dataclasses import replace
-from typing import Any
+from typing import Any, AsyncIterator
 
 from ..config import Settings
 from ..egress.eventlog import EVENTS
-from .openai_http import OpenAIHttpAdapter
+from .openai_http import OpenAIHttpAdapter, StreamRelay
 
 logger = logging.getLogger("proxy_opencode.failover")
 
-# Egress-level upstream statuses worth a backup attempt. 429 = free-tier
-# quota (per-IP/UTC-day); 5xx = upstream/transport; 503 = the zen adapter's
-# own egress-gate answer (cordoned pool / free-tier 403 rewrite). Anything
-# else is request-level and relayed verbatim.
-_FAILOVER_STATUSES = frozenset({429, 500, 502, 503, 504})
+# Statuses relayed to the client untouched instead of triggering the backup:
+# the request body (or the requested model id / key) is wrong, so another
+# vendor cannot serve it either.
+_PASSTHROUGH_STATUSES = frozenset({400, 401, 404, 422})
+
+# Client-visible provenance marker (owner requirement 2026-10-26: the
+# failover must be *noticeable*, not just present in the logs). Routes
+# promote it to response headers; streams also carry a leading SSE comment.
+FALLBACK_HEADER = "X-Gateway-Fallback"
+FALLBACK_MODEL_HEADER = "X-Gateway-Fallback-Model"
+FALLBACK_REASON_HEADER = "X-Gateway-Fallback-Reason"
+FALLBACK_NAME = "proxy_ms"
+
+# Marker of the in-flight request's fallback decision. ``dispatch`` awaits
+# ``chat()`` in the same task, so the value set here is visible to the route
+# that built the request and to nobody else (asyncio gives every task its own
+# context copy) — safe under concurrency.
+_MARKER: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "proxy_opencode_fallback_marker", default=None
+)
+
+
+def current_marker() -> dict[str, Any] | None:
+    """Marker of the in-flight request's fallback decision (None = primary)."""
+
+    return _MARKER.get()
+
+
+def fallback_headers() -> dict[str, str]:
+    """HTTP headers announcing that the backup chain served this answer."""
+
+    marker = current_marker()
+    if not marker:
+        return {}
+    return {
+        FALLBACK_HEADER: str(marker.get("secondary") or FALLBACK_NAME),
+        FALLBACK_MODEL_HEADER: str(marker.get("model") or ""),
+        FALLBACK_REASON_HEADER: str(marker.get("reason") or "")[:120],
+    }
+
+
+def fallback_note() -> str:
+    """SSE comment line (ignored by every SSE parser) naming the backup."""
+
+    marker = current_marker()
+    if not marker:
+        return ""
+    return (
+        f": gateway-fallback secondary={marker.get('secondary') or FALLBACK_NAME}"
+        f" model={marker.get('model') or ''}"
+        f" reason={(marker.get('reason') or '')[:120]}\n\n"
+    )
 
 
 def _is_error_relay(result: Any) -> bool:
     return isinstance(result, dict) and isinstance(result.get("__status__"), int)
 
 
+class _PrefetchedRelay(StreamRelay):
+    """A StreamRelay whose first SSE chunk was already pulled.
+
+    Exists so a streaming turn that stalls before its first body byte can be
+    retried on the backup *before* the route starts the response; once the
+    first chunk has been handed over the turn is committed. Subclasses
+    ``StreamRelay`` so every route's ``isinstance(result, StreamRelay)``
+    branch keeps working unchanged.
+    """
+
+    def __init__(
+        self,
+        inner: StreamRelay,
+        first: bytes,
+        chunks: AsyncIterator[bytes],
+    ) -> None:
+        super().__init__(inner.response, inner.usage_holder, stall_s=0.0)
+        self._inner = inner
+        self._first = first
+        self._chunks = chunks
+
+    async def chunks(self) -> AsyncIterator[bytes]:
+        try:
+            yield self._first
+            async for chunk in self._chunks:
+                yield chunk
+        finally:
+            # Closing the iterator runs StreamRelay.chunks' own finally, which
+            # releases the upstream response and fires the pool close hook.
+            aclose = getattr(self._chunks, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:  # pragma: no cover - teardown must not mask exit
+                    pass
+
+
 class FailoverAdapter:
-    """Serve chat through ``primary``; fail over to proxy_ms on egress faults."""
+    """Serve chat through ``primary``; fail over to proxy_ms on any failure."""
 
     def __init__(
         self,
@@ -65,7 +174,7 @@ class FailoverAdapter:
         self._hold_s = max(1.0, float(settings.zen_fallback_hold_s))
         # Secondary client: the plain OpenAI passthrough adapter pointed at
         # the backup gateway (proxy_ms), reusing its stream relay semantics.
-        # Tests inject a pre-built secondary instead (see inject_secondary).
+        # Tests inject a pre-built secondary instead.
         self._secondary: Any = (
             OpenAIHttpAdapter(
                 replace(
@@ -89,6 +198,13 @@ class FailoverAdapter:
         self._recover_after = max(1, int(settings.zen_fallback_recover_after))
         self._primary_streak = 0
         self._last_trip_at = 0.0
+        # 0 disables the corresponding guard.
+        self._primary_timeout_s = max(
+            0.0, float(settings.zen_fallback_primary_timeout_s)
+        )
+        self._first_chunk_timeout_s = max(
+            0.0, float(settings.zen_fallback_first_chunk_timeout_s)
+        )
 
     # ------------------------------------------------------------ status
 
@@ -98,6 +214,7 @@ class FailoverAdapter:
         return {
             "engaged": remaining > 0,
             "secondary": self._secondary_name,
+            "model": str(self._default_model or ""),
             "hold_remaining_s": round(remaining, 1) if remaining > 0 else 0,
         }
 
@@ -112,17 +229,19 @@ class FailoverAdapter:
             return await self._secondary.list_models()
 
     async def chat(self, payload: dict[str, Any]) -> Any:
+        _MARKER.set(None)
         if time.monotonic() < self._fallback_until:
             # Breaker open: skip the (recently failed) primary entirely.
             return await self._via_secondary(payload, "hold window")
         try:
-            result = await self._primary.chat(payload)
-        except ConnectionError as exc:
-            return await self._trip(payload, f"transport failure: {exc}")
-        if _is_error_relay(result) and int(result["__status__"]) in _FAILOVER_STATUSES:
-            return await self._trip(
-                payload, f"upstream HTTP {result['__status__']}"
-            )
+            result = await self._call_primary(payload)
+        except Exception as exc:  # transport, timeout, adapter fault
+            return await self._trip(payload, _describe(exc))
+        status = result.get("__status__") if _is_error_relay(result) else None
+        if isinstance(status, int) and status >= 400:
+            if status in _PASSTHROUGH_STATUSES:
+                return result
+            return await self._trip(payload, f"upstream HTTP {status}")
         # The primary answered this request. Past the hold window that makes
         # this request a half-open probe; the breaker only closes once
         # ``_recover_after`` consecutive probes have succeeded.
@@ -134,6 +253,55 @@ class FailoverAdapter:
         return result
 
     # ---------------------------------------------------------- internals
+
+    async def _call_primary(self, payload: dict[str, Any]) -> Any:
+        """Call the primary under the request deadline, prefetching SSE.
+
+        The deadline covers everything up to "the adapter handed us a
+        result": for a streaming turn that includes the first body byte,
+        because the prefetch below pulls it. That is exactly where the
+        client's clock starts and the last moment a retry is invisible.
+        """
+        call = self._primary.chat(payload)
+        if self._primary_timeout_s > 0:
+            result = await asyncio.wait_for(call, timeout=self._primary_timeout_s)
+        else:
+            result = await call
+        if not isinstance(result, StreamRelay) or self._first_chunk_timeout_s <= 0:
+            return result
+        return await self._prefetch(result)
+
+    async def _prefetch(self, relay: StreamRelay) -> StreamRelay:
+        """Pull the first SSE chunk so a stalled stream can still fail over."""
+
+        chunks = relay.chunks()
+        try:
+            first = await asyncio.wait_for(
+                chunks.__anext__(), timeout=self._first_chunk_timeout_s
+            )
+        except BaseException:
+            # The generator body may already have started, so aclose() runs
+            # the relay's pool-release hook. A first-chunk timeout is treated
+            # as a primary fault by the caller (see _trip), and the lease must
+            # be returned as a *failure* or the bucket's health would look
+            # fine after a stall.
+            relay.end_reason = "stalled"
+            aclose = getattr(chunks, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:  # pragma: no cover - best-effort teardown
+                    pass
+            raise
+        logger.debug(
+            "stream first chunk prefetched",
+            extra={"bytes": len(first), "timeout_s": self._first_chunk_timeout_s},
+        )
+        return _PrefetchedRelay(relay, first, chunks)
+
+    def _map_model(self, requested: str) -> str:
+        mapped = self._model_map.get(requested) or self._default_model
+        return str(mapped or "")
 
     async def _trip(self, payload: dict[str, Any], reason: str) -> Any:
         self._fallback_until = time.monotonic() + self._hold_s
@@ -156,19 +324,27 @@ class FailoverAdapter:
                 self._hold_s,
             )
         else:
-            logger.warning(
-                "FALLBACK ENGAGED: primary upstream %s unavailable (%s); "
-                "serving via backup gateway for the next %.0fs",
+            # Production-incident grade: the primary chain just died and
+            # clients are being served by a different model. ERROR so the
+            # line survives even INFO-filtered log collection, and a greppable
+            # "PRODUCTION INCIDENT" prefix the operator can alert on.
+            logger.error(
+                "PRODUCTION INCIDENT - FALLBACK ENGAGED: primary upstream %s "
+                "unavailable (%s); serving via backup gateway %s for the "
+                "next %.0fs",
                 self.name,
                 reason,
+                FALLBACK_NAME,
                 self._hold_s,
             )
         EVENTS.emit(
             "fallback_engaged",
+            severity="continuation" if re_trip else "incident",
             primary=self.name,
             reason=reason[:120],
             hold_s=self._hold_s,
             secondary=self._secondary_name,
+            model=self._map_model(str(payload.get("model") or "")),
             re_trip=re_trip,
         )
         return await self._via_secondary(payload, reason)
@@ -176,28 +352,44 @@ class FailoverAdapter:
     async def _via_secondary(self, payload: dict[str, Any], reason: str) -> Any:
         body = dict(payload)
         requested = str(body.get("model") or "")
-        mapped = self._model_map.get(requested) or self._default_model
+        mapped = self._map_model(requested)
         if mapped:
             body["model"] = mapped
-        logger.warning(
-            "FALLBACK ROUTING: model %r -> %r via %s",
+        # Client-visible marker: routes promote it to response headers and
+        # streams to a leading SSE comment, so a switched answer is never
+        # mistaken for a primary answer.
+        _MARKER.set(
+            {
+                "secondary": FALLBACK_NAME,
+                "model": body.get("model") or "",
+                "requested_model": requested,
+                "reason": reason,
+                "hold_s": self._hold_s,
+            }
+        )
+        logger.info(
+            "FALLBACK ROUTING: model %r -> %r via %s (%s)",
             requested,
             body.get("model"),
             self._secondary_name,
+            reason,
         )
         try:
             result = await self._secondary.chat(body)
-        except ConnectionError as exc:
+        except Exception as exc:
             # Backup also unreachable: surface it loudly, nothing else to try.
+            # BOTH chains are dead — the incident just got worse, so this is
+            # ERROR with the incident prefix (not a mere warning).
             logger.error(
-                "FALLBACK FAILED: backup gateway %s unreachable (%s); "
-                "primary was down (%s)",
+                "PRODUCTION INCIDENT - FALLBACK FAILED: backup gateway %s "
+                "unreachable (%s); primary was down (%s)",
                 self._secondary_name,
                 exc,
                 reason,
             )
             EVENTS.emit(
                 "fallback_failed",
+                severity="incident",
                 primary=self.name,
                 secondary=self._secondary_name,
                 reason=str(exc)[:120],
@@ -216,15 +408,16 @@ class FailoverAdapter:
             # and session gates), and a fresh rotation may have fixed it.
             status = int(result.get("__status__") or 0)
             logger.error(
-                "FALLBACK FAILED: backup gateway %s answered HTTP %s; "
-                "releasing the hold so the next request retries the primary "
-                "(primary fault was: %s)",
+                "PRODUCTION INCIDENT - FALLBACK FAILED: backup gateway %s "
+                "answered HTTP %s; releasing the hold so the next request "
+                "retries the primary (primary fault was: %s)",
                 self._secondary_name,
                 status,
                 reason,
             )
             EVENTS.emit(
                 "fallback_failed",
+                severity="incident",
                 primary=self.name,
                 secondary=self._secondary_name,
                 status=status,
@@ -237,12 +430,13 @@ class FailoverAdapter:
         self._last_trip_at = 0.0
         self._primary_streak = 0
         logger.warning(
-            "FALLBACK RECOVERED: primary upstream %s is serving again; "
-            "traffic returned to the primary chain",
+            "PRODUCTION INCIDENT CLOSED - FALLBACK RECOVERED: primary upstream "
+            "%s is serving again; traffic returned to the primary chain",
             self.name,
         )
         EVENTS.emit(
             "fallback_recovered",
+            severity="recovered",
             primary=self.name,
             secondary=self._secondary_name,
         )
@@ -252,3 +446,13 @@ class FailoverAdapter:
             aclose = getattr(adapter, "aclose", None)
             if aclose is not None:
                 await aclose()
+
+
+def _describe(exc: BaseException) -> str:
+    """One-line, content-free fault description for logs/events."""
+
+    detail = str(exc).strip().replace("\n", " ")[:120]
+    name = type(exc).__name__
+    if name in ("TimeoutError", "Timeout"):
+        return f"primary timeout: {detail}" if detail else "primary timeout"
+    return f"{name}: {detail}" if detail else name

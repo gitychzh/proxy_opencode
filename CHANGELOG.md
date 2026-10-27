@@ -5,7 +5,75 @@
 
 ## [Unreleased]
 
+### Added
+
+- **feat(egress): 按请求数的周期性出口轮换（每桶 500 条成功请求换 IP）** — 此前
+  轮换只由硬 429 / 403 触发（即「烧穿之后才换」），运维侧要求在配额耗尽**之前**
+  主动换 IP，避免单桶当日成功请求数逼近免费层上限触发 429。新增
+  `ZEN_EGRESS_ROTATION`（如 `owin10-mobile=500,owin10-telecom=500,cc9=500`）：
+  `counters.record()` 后达到阈值即 `rotation_requested`（trigger=`threshold`，
+  ONT 重启换 IP），计数器随成功轮换归零重新武装；与既有机制协同——硬 429 仍
+  绕过阈值立即轮换、`HARD_ROTATE_MIN_INTERVAL_S` 下限防抖、失败重试冷却。
+  测试 `test_threshold_triggers_rotation_and_resets_counter` /
+  `test_threshold_fires_exactly_once_and_resets_on_rotation` /
+  `test_settings_parse_rotation_thresholds`。
+
+- **feat(failover): 兜底启用升格为生产事故级记录** — 运维侧要求备用链路接管时
+  「醒目提醒 + 日志留痕」。首次跳闸从 WARNING 升为 **ERROR**
+  `PRODUCTION INCIDENT - FALLBACK ENGAGED`（INFO 过滤的采集也必留存，
+  `PRODUCTION INCIDENT` 前缀可直接 grep 告警）；同一轮故障内的再次跳闸仍是 INFO
+  `FALLBACK RE-ENGAGED`（continuation，不重复报事故）；备用链也不可达时 ERROR
+  `PRODUCTION INCIDENT - FALLBACK FAILED`；恢复闭合记 WARNING
+  `PRODUCTION INCIDENT CLOSED - FALLBACK RECOVERED`。JSONL 事件新增 `severity`
+  字段（`incident` / `continuation` / `recovered`），事件账本可按严重度过滤。
+  测试 `test_first_trip_is_error_level_production_incident` /
+  `test_incident_severity_lands_on_jsonl_events` /
+  `test_backup_failure_is_marked_as_incident` /
+  `test_re_trip_keeps_continuation_severity`。
+
 ### Fixed
+
+- **fix(responses): 生命周期事件名改回 `response.in_progress`** — 流式 `/v1/responses`
+  在 `response.created` 之后发的是裸 `in_progress`，而 Responses 线上事件名是
+  `response.in_progress`。`event:` 头与 `data.type` 都不匹配任何 SDK 的分派表，
+  客户端**静默丢弃**该事件：网关自己的流看着完整，codex 之类客户端却看不到进度
+  态。测试 `test_responses_endpoint_streams_masked_events` 现在同时断言正确名存在、
+  裸名不存在。
+
+- **fix(routes): 聚合响应体的"合成 SSE"分支补上 `relay_stream`** — `/v1/responses`
+  与 `/v1/messages` 在客户端 `stream=true`、上游却返回整包 JSON 时，直接把单块
+  SSE 交给 `StreamingResponse`，绕过了 `relay_stream`：因此**没有 `stream ended`
+  终态记录**（延迟/结束原因丢失），也没有客户端写停顿看门狗。现在两条路由都走同
+  一个包装器，成功率与流生命周期记账和真流式一致。测试
+  `test_stream_from_aggregated_body_still_logs_the_stream_end`。
+
+- **fix(egress): 租约释放幂等 + 取消时归还 in-flight 名额** — `Pool.release` 无条件
+  `inflight -= 1`，而传输层存在「先 `release` 再抛出」的路径（bun 传输失败后
+  `raise ConnectionError`），网关的 `except` 分支又不会再释放一次——两种写法叠加
+  会让一次请求的释放被记两次，**把别的请求的 in-flight 名额也减掉**，least-in-flight
+  选择因此长期偏斜。`Lease` 增加 `released` 标记，重复判决直接忽略（并记 debug）。
+  同时新增 `Pool.abandon(lease)`：客户端中断 / 任务取消这类「桶没有过错」的退出
+  只归还名额，不记成功、不记失败、不写事件、不 cordon；适配器在
+  `except BaseException` 里调用它再重新抛出（此前的写法会永久泄漏名额，只能靠重启
+  进程回收）。测试 `test_release_is_idempotent_for_the_same_lease` /
+  `test_abandon_returns_the_slot_without_a_verdict`。
+
+- **fix(egress): 探针容忍非对象 JSON** — `_probe_one` 对 200 响应只做
+  `payload = resp.json()`，随后 `payload.get(...)`。agent 返回数组或裸字符串时
+  会抛 `AttributeError` 逸出探针循环（与 1c2413d 修掉的「僵尸桶」是同一处代码
+  路径的另一种触发形式）。现在非 dict 载荷按空对象处理，走正常的
+  healthy/unhealthy 判定。测试 `test_probe_tolerates_non_object_health_payload`。
+
+- **fix(bun): `ZEN_TTFB_S=0` 必须显式导出 `ZEN_BUN_TTFB_MS=0`** — 文档语义是「0
+  关闭额外首字节计时器」，但 Python 侧只在 `ttfb_s > 0` 时才设置该环境变量；
+  变量缺失让 `forward.ts` 落到默认 `60000`ms，于是"关闭"实际变成"60 秒硬截止"。
+  改为无条件导出（含 `"0"`）。测试
+  `test_post_without_header_deadline_exports_explicit_zero`（旧用例断言"不导出"，
+  即把缺陷写成了契约）。
+
+- **fix(failover): 每请求的 `FALLBACK ROUTING` 从 WARNING 降为 INFO** — 这是一条
+  **正常路由**记录（备用链路启用期间每个请求一行），24h 实测 238 行，把真正的
+  WARNING 淹在同一级别里。跳闸/恢复的状态跃迁日志保持 WARNING/INFO 原有级别。
 
 - **fix(errors): 只有显式请求错才回 400，其余 ValueError 一律 500** — 管线把适配器
   抛出的**任何** `ValueError` 映射成 `invalid_request_error`，包括上游响应体解析

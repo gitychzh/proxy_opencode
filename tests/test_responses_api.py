@@ -386,6 +386,11 @@ async def test_responses_endpoint_streams_masked_events(tmp_path):
         )
     assert resp.status_code == 200
     assert "response.completed" in resp.text
+    # The lifecycle opener must use the wire name; a bare `in_progress` is not
+    # a Responses event type and clients dropped it silently.
+    assert "event: response.created" in resp.text
+    assert "event: response.in_progress" in resp.text
+    assert "event: in_progress" not in resp.text
     assert "big-pickle" not in resp.text
     # The adapter must have received the upstream model id (bare id since the
     # 2026-10-02 zen catalogue drift — see config.py).
@@ -505,3 +510,72 @@ def test_reasoning_only_input_never_yields_empty_messages():
     )
     assert payload["messages"]
     assert payload["messages"][-1]["role"] == "user"
+
+class DictFakeAdapter:
+    """zen-direct style: returns an aggregated chat body, never a relay."""
+
+    name = "zen-direct"
+
+    def __init__(self):
+        self.last_payload = None
+
+    async def list_models(self):
+        return {"object": "list", "data": []}
+
+    async def chat(self, payload):
+        self.last_payload = payload
+        return {
+            "id": "chatcmpl-agg",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "big-pickle",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "aggregated"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        }
+
+
+@pytest.mark.asyncio
+async def test_stream_from_aggregated_body_still_logs_the_stream_end(
+    tmp_path, caplog
+):
+    """Regression: the synthetic-SSE branch logged the completion but skipped
+    relay_stream, so it never emitted a "stream ended" record (and had no
+    client-stall watchdog)."""
+
+    import logging
+
+    from proxy_opencode.app import create_app
+    from proxy_opencode.config import Settings
+
+    app = create_app(
+        Settings(
+            upstream_mode="zen-direct",
+            gateway_api_keys=["gw-key"],
+            key_store_path=str(tmp_path / "keys.json"),
+        )
+    )
+    app.state.adapter = DictFakeAdapter()
+    with caplog.at_level(logging.INFO):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/v1/responses",
+                json={
+                    "model": "deepseek-ai/deepseek-v4.1-flash",
+                    "input": "hello",
+                    "stream": True,
+                },
+                headers={"Authorization": "Bearer gw-key"},
+            )
+    assert resp.status_code == 200
+    assert "aggregated" in resp.text
+    assert "response.completed" in resp.text
+    assert caplog.text.count("responses completion") == 1
+    assert caplog.text.count("stream ended") == 1

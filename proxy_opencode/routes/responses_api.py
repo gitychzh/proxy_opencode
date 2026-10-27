@@ -27,15 +27,18 @@ from ..formats.responses_proto import (
 )
 from ..registry import ModelRegistry
 from ..sse_mask import mask_json_model
+from ..upstreams.failover import fallback_headers, fallback_note
 from ..upstreams.openai_http import StreamRelay
 from ..upstreams.opencode_serve import ServeCompletion, completion_to_chat_response
 from ._pipeline import (
     dispatch,
+    fallback_log_fields,
     is_error_relay,
     new_call,
     openai_error_factory,
     parse_json_object,
     relay_stream,
+    with_fallback_note,
 )
 
 logger = logging.getLogger("proxy_opencode.responses")
@@ -76,10 +79,19 @@ def make_router(
         if isinstance(result, JSONResponse):
             return result
 
+        # Fallback provenance: headers on every answer, plus a leading SSE
+        # comment when the backup chain served a stream (see routes/chat.py).
+        extra_headers = fallback_headers()
+        note = fallback_note()
+        call.extra_log_fields.update(fallback_log_fields())
+
         if isinstance(result, StreamRelay):
+            chunks = stream_responses_events(result.chunks(), call.public_model)
+            if note:
+                chunks = with_fallback_note(chunks, note)
             return StreamingResponse(
                 relay_stream(
-                    stream_responses_events(result.chunks(), call.public_model),
+                    chunks,
                     result.usage_holder,
                     lambda status, usage=None: call.log(logger, status, usage),
                     request_id=call.request_id,
@@ -89,7 +101,7 @@ def make_router(
                 ),
                 status_code=200,
                 media_type="text/event-stream",
-                headers=_SSE_HEADERS,
+                headers={**_SSE_HEADERS, **extra_headers},
             )
         if is_error_relay(result):
             status = int(result["__status__"])
@@ -99,24 +111,42 @@ def make_router(
             content = result["content"]
             if registry.enabled and isinstance(content, dict):
                 content = mask_json_model(content, call.public_model)
-            return JSONResponse(status_code=status, content=content)
+            return JSONResponse(
+                status_code=status, content=content, headers=extra_headers
+            )
         if isinstance(result, ServeCompletion):
             result = completion_to_chat_response(call.upstream_model, result)
         if isinstance(result, dict):
             # Exactly one completion record per request, carrying usage.
             if call.stream:
-                call.log(logger, 200, result.get("usage"))
+                # Relay through the shared wrapper even though the body is a
+                # single synthetic chunk: it owns the "stream ended" record
+                # (latency, reason) and the client-stall watchdog, which this
+                # branch used to skip entirely.
+                chunks = stream_responses_events(
+                    _serve_completion_sse_from_chat(result), call.public_model
+                )
+                if note:
+                    chunks = with_fallback_note(chunks, note)
                 return StreamingResponse(
-                    stream_responses_events(
-                        _serve_completion_sse_from_chat(result), call.public_model
+                    relay_stream(
+                        chunks,
+                        {"usage": result.get("usage")},
+                        lambda status, usage=None: call.log(logger, status, usage),
+                        request_id=call.request_id,
+                        model=call.upstream_model,
+                        client=call.client,
+                        client_stall_s=settings.client_stall_s,
                     ),
                     status_code=200,
                     media_type="text/event-stream",
-                    headers=_SSE_HEADERS,
+                    headers={**_SSE_HEADERS, **extra_headers},
                 )
             body_out = chat_to_responses_body(result, call.public_model)
             call.log(logger, 200, result.get("usage"))
-            return JSONResponse(status_code=200, content=body_out)
+            return JSONResponse(
+                status_code=200, content=body_out, headers=extra_headers
+            )
 
         call.log(logger, 502)
         return openai_error(502, "Unexpected upstream result type.")

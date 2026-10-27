@@ -176,10 +176,14 @@ class EgressState:
 class Lease:
     """One acquired egress; the holder releases it with success/failure."""
 
-    __slots__ = ("state",)
+    __slots__ = ("state", "released")
 
     def __init__(self, state: EgressState) -> None:
         self.state = state
+        # Guard against a double verdict: a transport that already released
+        # the lease and then re-raised must not decrement ``inflight`` twice
+        # (that would under-count another request's in-flight slot).
+        self.released = False
 
     @property
     def name(self) -> str:
@@ -428,9 +432,21 @@ class EgressPool:
     async def release(
         self, lease: Lease, *, ok: bool, kind: str = "", retry_after_s: float | None = None
     ) -> None:
-        """Release a lease and fold its outcome into cordon accounting."""
+        """Release a lease and fold its outcome into cordon accounting.
+
+        Idempotent: the second call for the same lease is a no-op, so a
+        transport that released and then re-raised cannot corrupt the
+        bucket's in-flight accounting.
+        """
 
         state = lease.state
+        if lease.released:
+            logger.debug(
+                "lease already released; ignoring duplicate verdict",
+                extra={"egress": state.spec.name, "reason": kind},
+            )
+            return
+        lease.released = True
         state.inflight = max(0, state.inflight - 1)
         state.total += 1
         now = time.monotonic()
@@ -503,6 +519,22 @@ class EgressPool:
                 detail={"egress_ip": state.egress_ip},
             )
         self._notify_observer(state, ok, kind, retry_after_s)
+
+    def abandon(self, lease: Lease) -> None:
+        """Drop a lease with NO verdict about the bucket.
+
+        Used when the request went away before any upstream byte reached the
+        client (client disconnect / task cancellation): the bucket is not at
+        fault, so nothing is counted — not a success, not a failure, no
+        observer call. Only the in-flight slot is returned, which is what
+        keeps least-in-flight selection honest for the rest of the day: a
+        cancelled attempt used to leak the slot until the process restarted.
+        """
+
+        if lease.released:
+            return
+        lease.released = True
+        lease.state.inflight = max(0, lease.state.inflight - 1)
 
     def _enter_cordon(
         self,
@@ -703,6 +735,12 @@ class EgressPool:
             # and 305s header stalls on the same bucket).
             self._mark_probe_failed(state, type(exc).__name__)
             return
+        if not isinstance(payload, dict):
+            # Any non-object JSON (a list, a bare string) is a broken agent,
+            # not a crash: treating it as an empty payload keeps the loop on
+            # its normal healthy/unhealthy path instead of raising
+            # AttributeError out of ``payload.get`` below.
+            payload = {}
         now = time.monotonic()
         state.last_probe_at = now
         ok = bool(payload.get("ready")) and resp.status_code == 200
