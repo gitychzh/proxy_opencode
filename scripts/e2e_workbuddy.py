@@ -280,6 +280,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base", default="http://127.0.0.1:8787")
     parser.add_argument("--key", default="", help="gateway API key (dev-open if empty)")
     parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="skip TLS verification (the ECS edge serves a self-signed cert)",
+    )
+    parser.add_argument(
         "--only",
         action="append",
         choices=sorted(CHECKS),
@@ -295,6 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         headers=headers,
         timeout=httpx.Timeout(240.0, connect=15.0),
         trust_env=False,
+        verify=not args.insecure,
     ) as client:
         for name in selected:
             try:

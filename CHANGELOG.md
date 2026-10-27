@@ -3,6 +3,23 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.7.4] - 2026-10-28
+
+### Fixed
+
+- **请求级错误不再冒充链路故障** — `FailoverAdapter` 原先 `except Exception` 通吃：
+  `ContextOverflow`（提示词过长，客户端的问题）被当成主链不可用，于是
+  ①记一条 `PRODUCTION INCIDENT - FALLBACK ENGAGED` ②熔断 120s，其间**所有**
+  客户端的请求都被送到 proxy_ms ③把同一个超长请求换个模型再答一遍，客户端永远
+  学不到「你超长了」。实测证据：`fallback_reason: "ContextOverflow: ... this
+  request is about ..."`，随后 60s 内三条正常请求都带 `fallback_reason:
+  "hold window"`。现在 `InvalidRequest`（含 `ContextOverflow`）直接抛出，路由层
+  回 400 `context_length_exceeded`，兜底链不动。回归测试
+  `test_request_level_fault_never_engages_the_backup_chain` /
+  `test_invalid_request_also_skips_the_backup_chain`。
+- 说明：兜底命中期间（熔断窗口）请求由 proxy_ms 的模型服务，其限额自然是它自己的
+  ——上下文守卫因此留在「模型侧」的 zen 适配器里，与所调模型一致。
+
 ## [0.7.3] - 2026-10-28
 
 > 主题：模型参数与 opencode 本体对齐 + ECS 侧旧部署彻底清理重建。端口、链路、

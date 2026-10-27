@@ -636,3 +636,50 @@ async def test_re_trip_keeps_continuation_severity(tmp_path) -> None:  # type: i
         assert [e["severity"] for e in engaged] == ["incident", "continuation"]
     finally:
         EVENTS.configure("")
+
+
+async def test_request_level_fault_never_engages_the_backup_chain() -> None:
+    """A client-fault fault (too-long prompt) is not chain unavailability.
+
+    Production 2026-10-28: an oversized request tripped the breaker, logged a
+    PRODUCTION INCIDENT and had the same prompt answered by proxy_ms, so the
+    client never learned its request was too long — and every other client was
+    routed to the backup for the whole hold window.
+    """
+
+    from proxy_opencode.errors import ContextOverflow
+
+    overflow = ContextOverflow(
+        model="big-pickle",
+        estimated_tokens=175_000,
+        input_limit=160_000,
+        context_limit=200_000,
+        compaction_ceiling=136_000,
+    )
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary)
+    primary.outcomes = [overflow]
+
+    with pytest.raises(ContextOverflow):
+        await adapter.chat({"model": "big-pickle", "messages": []})
+
+    assert secondary.calls == []
+    status = adapter.fallback_status()
+    assert status["engaged"] is False
+    assert status["hold_remaining_s"] == 0
+
+
+async def test_invalid_request_also_skips_the_backup_chain() -> None:
+    """Any request-shape fault must reach the client, not the backup."""
+
+    from proxy_opencode.errors import InvalidRequest
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary)
+    primary.outcomes = [InvalidRequest("messages must contain at least one turn")]
+
+    with pytest.raises(InvalidRequest):
+        await adapter.chat({"model": "big-pickle", "messages": []})
+
+    assert secondary.calls == []
+    assert adapter.fallback_status()["engaged"] is False

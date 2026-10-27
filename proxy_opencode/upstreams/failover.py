@@ -59,6 +59,7 @@ from typing import Any, AsyncIterator
 
 from ..config import Settings
 from ..egress.eventlog import EVENTS
+from ..errors import InvalidRequest
 from .openai_http import OpenAIHttpAdapter, StreamRelay
 
 logger = logging.getLogger("proxy_opencode.failover")
@@ -266,6 +267,15 @@ class FailoverAdapter:
             return await self._via_secondary(payload, "hold window")
         try:
             result = await self._call_primary(payload)
+        except InvalidRequest:
+            # A request-level fault is the CLIENT's, not the chain's: the
+            # prompt is too long, the body is malformed, and the backup would
+            # answer the very same bad request from a different model. Tripping
+            # on it opened the breaker for every other client and — measured in
+            # production 2026-10-28 — replayed an oversized prompt against
+            # proxy_ms while logging a PRODUCTION INCIDENT. Re-raise so the
+            # route answers 400 with its own code (context_length_exceeded).
+            raise
         except Exception as exc:  # transport, timeout, adapter fault
             return await self._trip(payload, _describe(exc))
         status = result.get("__status__") if _is_error_relay(result) else None
