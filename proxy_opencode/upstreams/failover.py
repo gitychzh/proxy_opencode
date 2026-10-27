@@ -121,6 +121,37 @@ def _is_error_relay(result: Any) -> bool:
     return isinstance(result, dict) and isinstance(result.get("__status__"), int)
 
 
+def _backup_error_relay(
+    upstream_status: int, secondary: str, reason: str
+) -> dict[str, Any]:
+    """Reshape a failed backup answer into a gateway-owned retryable 503.
+
+    The backup's own error (e.g. proxy_ms billing 429) must never reach the
+    client wearing the primary chain's identity: Hermes classifies a 429
+    carrying ModelScope's billing text as ``layer: billing / retryable:
+    false`` and stops, and ops read it as a zen quota burn worth an IP
+    rotation — neither of which is true here. The shape is the gateway's
+    own (``fallback_backup_error``), explicitly retryable, with the backup
+    chain and the original upstream status named for attribution; the
+    upstream body is not echoed (it may name upstream model ids and the
+    route layer only masks success-shaped bodies).
+    """
+    return {
+        "__status__": 503,
+        "content": {
+            "error": {
+                "message": (
+                    f"primary upstream unavailable ({reason[:120]}); backup "
+                    f"gateway {secondary} also failed with HTTP {upstream_status}"
+                ),
+                "type": "api_error",
+                "param": None,
+                "code": "fallback_backup_error",
+            }
+        },
+    }
+
+
 class _PrefetchedRelay(StreamRelay):
     """A StreamRelay whose first SSE chunk was already pulled.
 
@@ -398,14 +429,20 @@ class FailoverAdapter:
                 f"primary ({self.name}) and backup gateway both unreachable"
             ) from exc
         if _is_error_relay(result):
-            # The backup answered with an error (measured 2026-10-25:
-            # proxy_ms 429 "insufficient balance", i.e. its own billing is
-            # dead). Relay it honestly, but do NOT keep parking traffic on a
-            # backup that cannot serve: release the breaker so the next
-            # request probes the primary again. That matters because the
-            # primary 429 may not have been a real quota burn at all (the
-            # FreeUsageLimitError shape is reused by the transport, prompt
-            # and session gates), and a fresh rotation may have fixed it.
+            # The backup answered with an error (measured 2026-10-25 and
+            # again 2026-10-27 00:03Z: proxy_ms 429 "insufficient balance",
+            # i.e. its own billing is dead). Two hard rules:
+            #   1. do NOT relay the backup error verbatim — the client would
+            #      read the backup's billing 429 as the *primary* chain's
+            #      quota wall ("provider: oc1id ... billing"), classify it
+            #      non-retryable and stop, and ops would chase IP rotation
+            #      that cannot fix an account balance. Reshape it into one
+            #      gateway-owned retryable 503 instead.
+            #   2. do NOT keep parking traffic on a backup that cannot
+            #      serve: release the breaker so the next request probes
+            #      the primary again (the primary 429 may not have been a
+            #      real quota burn at all — the FreeUsageLimitError shape is
+            #      reused by the transport, prompt and session gates).
             status = int(result.get("__status__") or 0)
             logger.error(
                 "PRODUCTION INCIDENT - FALLBACK FAILED: backup gateway %s "
@@ -424,6 +461,7 @@ class FailoverAdapter:
                 reason=reason[:120],
             )
             self._fallback_until = 0.0
+            return _backup_error_relay(status, self._secondary_name, reason)
         return result
 
     def _announce_recovery(self) -> None:

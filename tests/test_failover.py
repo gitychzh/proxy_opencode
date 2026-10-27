@@ -50,8 +50,11 @@ def make_adapter(
     return adapter, secondary
 
 
-def relay(status: int) -> dict[str, Any]:
-    return {"__status__": status, "content": {"error": {"message": "x"}}}
+def relay(status: int, content: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "__status__": status,
+        "content": content or {"error": {"message": "x"}},
+    }
 
 
 async def test_transport_failure_engages_backup() -> None:
@@ -192,12 +195,49 @@ async def test_backup_error_relay_releases_hold_for_next_primary_probe() -> None
     secondary.outcomes = [relay(429), {"id": "ok-via-ms"}]
 
     first = await adapter.chat({"model": "m"})
-    assert first["__status__"] == 429  # backup error relayed honestly
+    # Backup billing 429 is reshaped into a gateway-owned retryable 503:
+    # the client must never see the backup's billing error wearing the
+    # primary chain's identity.
+    assert first["__status__"] == 503
+    assert first["content"]["error"]["code"] == "fallback_backup_error"
+    assert "backup gateway" in first["content"]["error"]["message"]
     assert adapter.fallback_status()["engaged"] is False  # hold released
     # Next request goes back to the primary instead of the dead backup.
     second = await adapter.chat({"model": "m"})
     assert second["id"] == "ok-after-recovery"
     assert len(primary.calls) == 2 and len(secondary.calls) == 1
+
+
+async def test_backup_error_body_is_not_echoed_to_client() -> None:
+    """The backup's own error body must not leak through the relay.
+
+    Measured 2026-10-27 00:03Z: the client received ModelScope's billing
+    text ("HTTP 429: insufficient balance") attributed to the zen chain,
+    which read as a non-retryable billing wall and killed retries. The
+    reshaped answer names the backup chain and status instead.
+    """
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary)
+    primary.outcomes = [relay(429)]
+    secondary.outcomes = [
+        relay(
+            429,
+            {
+                "error": {
+                    "message": "HTTP 429: insufficient balance",
+                    "code": "insufficient_balance",
+                }
+            },
+        )
+    ]
+
+    result = await adapter.chat({"model": "m"})
+    assert result["__status__"] == 503  # retryable, gateway-owned shape
+    body = result["content"]
+    assert body["error"]["code"] == "fallback_backup_error"
+    assert "insufficient balance" not in body["error"]["message"]
+    assert "HTTP 429" in body["error"]["message"]  # attribution, not echo
 
 
 async def test_backup_unreachable_raises_loudly() -> None:

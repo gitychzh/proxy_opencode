@@ -33,6 +33,15 @@
 
 ### Fixed
 
+- **fix(failover): 备用链路错误不再顶替主链路身份（billing 429 归因错乱）** —
+  2026-10-27 00:03Z 客户端收到 `provider: oc1id / layer: billing / retryable:false /
+  HTTP 429: insufficient balance`：proxy_ms 的计费 429 被原样中继，客户端读成 zen
+  主链路的配额墙并放弃重试，运维还会误判为「该换 IP」。现在 `_via_secondary` 把
+  备用错误重塑为网关自有的 `503 fallback_backup_error`（消息只带备用地址与原状态
+  码，不回显上游正文），并照旧清零 `_fallback_until` 让下一请求立刻探测主链路。
+  测试 `test_backup_error_body_is_not_echoed_to_client` +
+  `test_backup_error_relay_releases_hold_for_next_primary_probe`。
+
 - **fix(responses): 生命周期事件名改回 `response.in_progress`** — 流式 `/v1/responses`
   在 `response.created` 之后发的是裸 `in_progress`，而 Responses 线上事件名是
   `response.in_progress`。`event:` 头与 `data.type` 都不匹配任何 SDK 的分派表，
