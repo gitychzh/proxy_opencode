@@ -10,6 +10,13 @@
 
 ### Changed
 
+- **refactor(insights): 拆为 `insights/` 包** — `parse`（JSONL 账本 + 文本/JSON 日志，
+  含从行头恢复 message）、`metrics`（计数/占比/最近秩分位/相位配对）、
+  `diagnose`（规则与阈值）、`render`（报告）。对外仍是 `proxy_opencode.insights`
+  的 `analyze/diagnose/...`，调用方无感；规则与阈值集中在 `diagnose`。
+- **refactor(egress): `pool.py` 拆出 `models.py`** — `EgressSpec`/`EgressState`/
+  `Lease`/配额窗口助手独立成纯数据模块，`pool.py` 只保留选择、cordon、探活与租约记账
+  （845 → 678 行）。`from .pool import EgressSpec, Lease, ...` 的既有引用照旧可用。
 - **refactor(upstreams): `zen_direct.py`（1166 行）拆为 `upstreams/zen/` 包** —
   按关注点分离，单文件不再同时承担六件事：
   `protocol`（请求头/UA/Retry-After 解析）、`ids`（session/request/workspace 标识）、
