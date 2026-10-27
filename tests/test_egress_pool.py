@@ -692,6 +692,101 @@ async def test_probe_failure_logs_once_per_transition(
     finally:
         cleanup()
 
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_probe_success_keeps_request_failure_streak(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A healthy probe must not wipe request-level failures (zombie bucket).
+
+    Measured 2026-10-27 on the esp32 bucket: the agent's control channel
+    (what ``/healthz`` sees) stayed up all day while its MiFi data path
+    failed ~97% of client requests. The probe succeeded every 30s and reset
+    ``failures`` to 0 between requests, so the 3-consecutive-failure cordon
+    could NEVER fire and the bucket kept receiving ~25% of all traffic —
+    44 first hops, 43 of them 502/ECONNRESET — while looking perfectly
+    healthy. Request failures are only ever wiped by a successful request
+    (``release(ok=True)``) or a real agent recovery, never by a probe that
+    merely confirms the control channel is alive.
+    """
+
+    pool = make_pool("a", "b", failure_threshold=3, cordon_s=120)
+    mark_healthy(pool)
+    a, b = pool._states
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://a:10001/healthz").respond(
+            json={"ready": True, "egress_ip": "1.2.3.4"}
+        )
+        # acquire() round-robins between the two idle buckets: land on 'a'
+        # exactly twice (the second failure is what the probe must not wipe).
+        landed = 0
+        for _ in range(6):
+            lease = await pool.acquire()
+            hit_a = lease.name == "a"
+            await pool.release(lease, ok=False, kind="transport")
+            if hit_a:
+                landed += 1
+            if landed == 2:
+                break
+        assert a.failures == 2
+        await pool._probe_one(a)  # noqa: SLF001 - the 30s probe loop
+        assert a.healthy is True
+        assert a.failures == 2  # streak survives the probe
+        # no recovery event, no failure-wipe side effects (only the first
+        # egress_ip_observed from the probe learning the bucket's IP)
+        assert [e["event"] for e in read()] == ["egress_ip_observed"]
+        # ...and the third failure still cordons
+        for _ in range(4):
+            lease = await pool.acquire()
+            hit_a = lease.name == "a"
+            await pool.release(lease, ok=False, kind="transport")
+            if hit_a:
+                break
+        assert a.cordoned(time.monotonic())
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_probe_recovery_after_outage_resets_and_emits_once(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Agent down -> probe fails; agent back -> one 'egress_recovered' + clean slate.
+
+    The failure-streak reset belongs to the unhealthy->healthy *transition*
+    (stale evidence about the unreachable incarnation), not to every
+    successful probe.
+    """
+
+    pool = make_pool("a", failure_threshold=3, cordon_s=120)
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        for _ in range(2):
+            lease = await pool.acquire()
+            await pool.release(lease, ok=False, kind="transport")
+        assert state.failures == 2
+        # agent outage
+        respx.get("http://a:10001/healthz").mock(
+            side_effect=httpx.ConnectTimeout("tailnet down")
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.healthy is False
+        # agent back — the streak predates the outage and is wiped exactly once
+        respx.get("http://a:10001/healthz").respond(
+            json={"ready": True, "egress_ip": "1.2.3.4"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.healthy is True
+        assert state.failures == 0
+        # a second clean probe must NOT re-emit recovery
+        await pool._probe_one(state)  # noqa: SLF001
+        events = [e["event"] for e in read()]
+        assert events.count("egress_recovered") == 1
+    finally:
+        cleanup()
+
+
 # ------------------------------------------------------- lease bookkeeping
 
 

@@ -41,6 +41,20 @@
 
 ### Fixed
 
+- **fix(egress): 探针成功不再清零请求级失败连击（esp32 僵尸桶当日 43/44 失败从未
+  cordon）** — `_probe_one` 成功路径无条件把 `failures` 清零并刷 `egress_recovered`
+  事件，本意是「agent 恢复后给干净档案」。但 `/healthz` 只反映 agent 控制通道：
+  2026-10-27 esp32 桶的 ESP32 控制通道全天在线（探针 30s 一次全绿），其移动 MiFi
+  数据面却已劣化（6 次 CONNECT 2 次超时，1MB 下载仅 6.7KB/s），客户端请求 44 次
+  首跳 43 次 `502 Tunnel Failed`/`ECONNRESET`。每次探针成功都把请求失败连击在
+  凑满 3 之前抹掉，3 连败 cordon **永远无法触发**，least-in-flight 继续把 ~25% 流量
+  送进坏桶（当日 44 次 `egress_recovered` 事件刷屏佐证）。现在失败连击只能由
+  **成功的请求**（`release(ok=True)`）或**真实的 agent 恢复**（探针从 unhealthy→
+  healthy 的跃迁，即控制通道确实断过又回来）清零；`egress_recovered` 事件也随之
+  只在跃迁时发一次，不再每 30s 刷屏。测试
+  `test_probe_success_keeps_request_failure_streak` /
+  `test_probe_recovery_after_outage_resets_and_emits_once`。
+
 - **fix(failover): 备用链路错误不再顶替主链路身份（billing 429 归因错乱）** —
   2026-10-27 00:03Z 客户端收到 `provider: oc1id / layer: billing / retryable:false /
   HTTP 429: insufficient balance`：proxy_ms 的计费 429 被原样中继，客户端读成 zen

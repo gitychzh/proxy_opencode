@@ -797,11 +797,13 @@ class EgressPool:
             self._lift_ip_scoped_cordon(state, current_ip)
         if previous_ok is False:
             logger.info("egress agent reachable again", extra={"egress": state.spec.name})
-        if state.healthy and state.failures > 0 and not state.cordoned(now):
-            state.failures = 0
-            state.cordon_reason = ""
-            logger.info("egress recovered", extra={"egress": state.spec.name})
             EVENTS.emit("egress_recovered", egress=state.spec.name)
+            # The agent just came back from a probe-level outage: any failure
+            # streak it accumulated while it was down is stale evidence about
+            # the old (unreachable) incarnation, so give it a clean slate.
+            if not state.cordoned(now):
+                state.failures = 0
+                state.cordon_reason = ""
 
     def _mark_probe_failed(
         self, state: EgressState, reason: str, *, was_healthy: bool | None = None
