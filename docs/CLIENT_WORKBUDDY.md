@@ -55,6 +55,34 @@ true}`，没有 `effort` 列表，opencode 本体因此不提供调节项。桌�
 `reasoning_effort` 塞进请求，网关会丢弃该字段（`ZEN_REASONING_POLICY=max`）并
 记一条 `thinking controls dropped`，模型按自身上限推理——这是对齐，不是降级。
 
+### 2.1 兜底链（单 IP 部署的必需品，2026-10-28 实测事故）
+
+本机实例只有一个公网 IP、没有出口池，免费层额度按 IP 每日重置。额度一旦用尽，
+上游对**每个**请求都答 `429 FreeUsageLimitError`，而客户端只会把它渲染成
+「请求过于频繁，请等几秒再发送」——等几秒没有任何用，要到次日 UTC 零点。
+
+所以本机实例必须挂兜底链（`gateway_wb.bat` 已内置）：
+
+```bat
+set ZEN_FALLBACK_BASE_URL=http://115.29.231.25:10003
+set ZEN_FALLBACK_API_KEY=<proxy_ms 的 key>
+set ZEN_FALLBACK_DEFAULT_MODEL=ZhipuAI/GLM-5.3-Flash
+set ZEN_FALLBACK_HOLD_S=300
+set ZEN_FALLBACK_RECOVER_AFTER=2
+```
+
+* `ZEN_FALLBACK_BASE_URL` **不带 `/v1`**：适配器自己拼 `/v1/chat/completions`，
+  写成 `.../v1` 会拼出 `/v1/v1/...` 得到 404（0.7.5 起配置层会把尾部的 `/v1`
+  归一化掉，但别依赖它）。
+* 触发即熔断：首个 429 / 5xx / 传输失败就切 `proxy_ms`（ModelScope
+  `ZhipuAI/GLM-5.3-Flash`），熔断窗口内所有请求直接走备份，不再等主链。
+* 验收：`curl -s http://127.0.0.1:8787/healthz` 应出现
+  `"fallback":{"secondary":"http://115.29.231.25:10003","model":"ZhipuAI/GLM-5.3-Flash"}`；
+  实测主链 429 时 `scripts/e2e_workbuddy.py` 仍 **6/6 通过**（含工具调用），
+  日志会有 `FALLBACK ROUTING: model 'big-pickle' -> 'ZhipuAI/GLM-5.3-Flash'`。
+* 备份链只保「能继续干活」，不保「同一个模型」：GLM-5.3-Flash 的上下文与
+  工具调用能力够跑桌面端，但答案来自另一个模型，响应头会带兜底标记。
+
 ## 3. 验收（端到端）
 
 ```bash

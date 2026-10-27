@@ -364,6 +364,24 @@ def _csv(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
+def _api_base(value: str) -> str:
+    """Normalise an OpenAI-compatible base URL to its scheme://host[:port] root.
+
+    Adapters append ``/v1/chat/completions`` themselves, so a base that ends
+    in ``/v1`` composes ``/v1/v1/chat/completions``. Measured 2026-10-28 on the
+    desktop instance: with ``.../10003/v1`` the backup chain answered 404 on
+    every request, turning a rate-limited primary into ``fallback_backup_error``
+    instead of an answer — the failure looked like "the backup is broken" while
+    the real cause was one duplicated path segment. Both spellings are accepted
+    and address the same endpoint.
+    """
+
+    base = value.strip().rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")].rstrip("/")
+    return base
+
+
 def _model_map(value: str) -> dict[str, str]:
     """Parse ``ZEN_MODEL_MAP`` entries of the form ``from=to`` (csv)."""
     mapping: dict[str, str] = {}
@@ -613,7 +631,9 @@ def load_settings() -> Settings:
         zen_egress_event_log=os.environ.get(
             "ZEN_EGRESS_EVENT_LOG", ""
         ).strip(),
-        zen_fallback_base_url=os.environ.get("ZEN_FALLBACK_BASE_URL", "").strip(),
+        zen_fallback_base_url=_api_base(
+            os.environ.get("ZEN_FALLBACK_BASE_URL", "")
+        ),
         zen_fallback_api_key=os.environ.get("ZEN_FALLBACK_API_KEY", "").strip(),
         zen_fallback_hold_s=float(os.environ.get("ZEN_FALLBACK_HOLD_S", "120")),
         zen_fallback_recover_after=max(

@@ -218,3 +218,28 @@ def test_fallback_recover_after_floor(monkeypatch):
     # A nonsense value must not disable recovery entirely.
     monkeypatch.setenv("ZEN_FALLBACK_RECOVER_AFTER", "0")
     assert config.load_settings().zen_fallback_recover_after == 1
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("http://172.17.0.1:10003", "http://172.17.0.1:10003"),
+        ("http://172.17.0.1:10003/", "http://172.17.0.1:10003"),
+        # Measured 2026-10-28: this spelling composed /v1/v1/chat/completions,
+        # so the backup answered 404 and a 429 primary looked unfixable.
+        ("http://172.17.0.1:10003/v1", "http://172.17.0.1:10003"),
+        ("http://172.17.0.1:10003/v1/", "http://172.17.0.1:10003"),
+        ("  https://api.modelscope.cn/v1  ", "https://api.modelscope.cn"),
+        # Only the trailing version segment is stripped, never a deeper path.
+        ("https://gw.example.comrelay/v1", "https://gw.example.comrelay"),
+        ("", ""),
+    ],
+)
+def test_fallback_base_url_is_normalised(raw, expected):
+    assert config._api_base(raw) == expected
+
+
+def test_fallback_base_url_v1_suffix_does_not_double_the_path(monkeypatch):
+    monkeypatch.setenv("ZEN_FALLBACK_BASE_URL", "http://172.17.0.1:10003/v1")
+    settings = config.load_settings()
+    assert settings.zen_fallback_base_url == "http://172.17.0.1:10003"

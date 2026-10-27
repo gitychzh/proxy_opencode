@@ -3,6 +3,35 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.7.5] - 2026-10-28
+
+### Fixed
+
+- **桌面端实例完全没有兜底链：主链 429 直通客户端** — 生产报障「请求过于频繁，
+  请等几秒再发送 / 429 Free usage limit reached」，`request_id=...` 与本机会话
+  一致。定位：请求打的是 `http://127.0.0.1:8787`（`~/.workbuddy/models.json`），
+  而 `gateway_wb.bat` 里**没有任何 `ZEN_FALLBACK_*`**，`build_adapter` 在不配
+  base URL 时根本不包 `FailoverAdapter` —— 兜底链只存在于 ECS 的 `.env`。
+  本机单 IP、无出口池，免费额度一穿就无路可走，于是 6 条请求连续
+  `status=429 latency_ms≈1.6-2.4s`，客户端只能报「稍后再试」（实际要等次日）。
+  修法：本机实例接上 proxy_ms（`http://115.29.231.25:10003`，ModelScope
+  `ZhipuAI/GLM-5.3-Flash`）作为备份链，`HOLD_S=300`（额度是整天级的，短窗口
+  只会反复撞同一个 429）。验收：主链 429 时日志出现
+  `PRODUCTION INCIDENT - FALLBACK ENGAGED` + `FALLBACK ROUTING: model
+  'big-pickle' -> 'ZhipuAI/GLM-5.3-Flash'`，`scripts/e2e_workbuddy.py`
+  **6/6 通过**（含工具调用、Responses、Anthropic 事件）。
+- **兜底 base URL 多写一个 `/v1` 就让整条备份链 404** — 适配器自己拼
+  `/v1/chat/completions`，`ZEN_FALLBACK_BASE_URL=http://host:10003/v1` 会拼成
+  `/v1/v1/chat/completions`，proxy_ms 回 404，`FailoverAdapter` 判为「备份也
+  失败」并回 503 `fallback_backup_error`——现象是「兜底配了却不生效」。
+  实测证据：`backup gateway http://115.29.231.25:10003/v1 answered HTTP 404`。
+  现在 `config._api_base` 归一化（剥离尾部 `/`、`/v1`，只此一段），两种写法
+  等价；8 条参数化测试钉住（含「更深路径不被剥」的反例）。
+- **本机常驻任务其实不存在** — 计划任务 `proxy_opencode-wb-gateway` 查无此项，
+  8787 是一个早于配置变更的手工进程（`created 01:13:45`，`Stop-Process` 失败后
+  仍在服务旧 env）。已重新注册（SYSTEM / AtLogOn / 失败重启 3 次 / 无执行时限）
+  并重启，`/healthz` 现在带 `fallback` 状态块。
+
 ## [0.7.4] - 2026-10-28
 
 ### Fixed
