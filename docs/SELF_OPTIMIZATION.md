@@ -140,7 +140,7 @@ ZEN_FALLBACK_FIRST_CHUNK_TIMEOUT_S=30
 | 级别 | 范围 | 谁做 | 门禁 |
 |---|---|---|---|
 | **T0 自动应用** | `.env` 调参（`ZEN_TTFB_S`、`STREAM_STALL_S`、`ZEN_EGRESS_ROTATION`、`ZEN_FALLBACK_*`）、日志字段白名单、文档 | WorkBuddy 直接改 + 重启容器 | 改后必须跑一轮真实流量验证 |
-| **T1 改码** | `insights.py` 规则、转换器、路由、测试 | WorkBuddy 改 + 跑全部门禁 | `pytest tests/` + `pytest balancer/tests/` + `ruff` + `mypy`（+ egress-agent 侧） |
+| **T1 改码** | `insights.py` 规则、转换器、路由、测试 | WorkBuddy 改 + 跑全部门禁 | `pytest tests/` + `ruff check proxy_opencode tests scripts` + `mypy proxy_opencode`（+ egress-agent 侧三项） |
 | **T2 只报告** | 协议常量（session 编码、UA、prompt 资产）、熔断语义、出口池判据、任何会改变对外契约的项 | 只写报告，等人决策 | 需 §7 的完整流量验证 |
 
 判据：**能靠一次容器重启回滚的进 T0；需要改代码才能回滚的进 T1；改错会让上游

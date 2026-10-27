@@ -29,7 +29,7 @@ BREAKING 变更在正文写 `BREAKING CHANGE:` 说明，并升级 major 版本�
 
 ## PR 检查清单
 
-- [ ] CI 通过（gateway + balancer + egress-agent 三个 job）
+- [ ] CI 通过（gateway + egress-agent 两个 job）
 - [ ] 行为变更已补/改 `tests/` 中的测试
 - [ ] 无密钥、无上真实 key、无消息体日志
 - [ ] 涉及约束变更时同步更新 `docs/engineering-constraints.md` 并在 PR 说明原因
@@ -52,8 +52,7 @@ BREAKING 变更在正文写 `BREAKING CHANGE:` 说明，并升级 major 版本�
 ```bash
 pip install -e ".[test,dev]"
 pytest tests/ -q
-pytest balancer/tests/ -q
-ruff check proxy_opencode tests balancer
+ruff check proxy_opencode tests scripts
 mypy proxy_opencode
 # egress-agent 侧（同一套三项）
 cd egress-agent && pytest tests/ -q && ruff check egress_agent tests && mypy egress_agent

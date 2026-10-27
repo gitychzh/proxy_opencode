@@ -118,8 +118,8 @@ tail -f /opt/zen-gw/src/deploy/ecs/data/egress_events.jsonl
 桶请求量统计口径与 jq/python 示例见 [`EGRESS_OBSERVABILITY.md`](EGRESS_OBSERVABILITY.md)
 （必须带 `bucket_name + egress_ip`）。
 
-质量门禁：`pytest tests/`、`pytest balancer/tests/`、`ruff check proxy_opencode
-tests balancer`、`mypy proxy_opencode`，以及 `egress-agent/` 侧同三项；
+质量门禁：`pytest tests/`、`ruff check proxy_opencode
+tests scripts`、`mypy proxy_opencode`，以及 `egress-agent/` 侧同三项；
 `python scripts/e2e_protocols.py` 用 mock upstream 做协议端到端。
 
 ## 4. 排障

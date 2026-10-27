@@ -57,7 +57,7 @@ jq -r 'select(.event=="rotation_succeeded" or .event=="cordon")
 
 现在的网关没有独立 LB 进程：选桶发生在容器内的 `egress/pool.py`
 （`acquire()` 返回 `Lease`），请求收尾在 `zen_direct` 的释放钩子。所以埋点应在
-**`Lease` 的生命周期**里完成，而不是旧设计的 `balancer/lb.py`：
+**`Lease` 的生命周期**里完成，而不是边缘 LB 时代的设计：
 
 - `acquire()` 时把 `bucket_name` + **当时**的 `egress_ip` + `inflight_before`
   写入 `ContextVar`（选桶时刻的口径，避免转发中状态变化导致不一致）；

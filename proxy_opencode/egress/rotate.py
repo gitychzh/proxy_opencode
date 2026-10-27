@@ -32,7 +32,8 @@ from .pool import EgressPool, EgressSpec
 
 logger = logging.getLogger("proxy_opencode.egress.rotate")
 
-# ONT reboot + PPPoE redial measured ~80s + ~30-40s on opc2-eth (2026-10-14);
+# ONT reboot + PPPoE redial measured ~80s + ~30-40s on the since-retired
+# opc2-eth bucket (2026-10-14);
 # the wifi/cc9 ONTs may be slower. Poll well past that, in 10s steps.
 ROTATE_TIMEOUT_S = 420.0
 ROTATE_POLL_S = 10.0
@@ -317,13 +318,15 @@ class EgressRotator:
         """POST the agent's control endpoint; ``{"ok": bool, "detail": str}``.
 
         The agent runs the P1 four-step Huawei ONT reboot (production-
-        verified on opc2-eth) and answers once the reset command went out;
+        verified on the since-retired opc2-eth) and answers once the reset command
+        went out;
         the gateway itself waits out the ~80s recovery + ~40s PPPoE redial
         by polling ``/healthz``. A transport-level failure carries
         ``unreachable=True``: the command may still have gone out (or the
         ONT is independently re-dialing), so the caller keeps polling
         instead of declaring the rotation dead — observed 2026-10-24:
-        opc2-eth rotated fine during a tunnel flap that killed the POST.
+        the (since-retired) opc2-eth rotated fine during a tunnel flap that killed
+        the POST.
         """
 
         url = f"{spec.agent_url.rstrip('/')}/rotate"
@@ -372,7 +375,8 @@ class EgressRotator:
         several ``49.x``/``121.234.x`` addresses were not listed, so 11 of
         21 rotations were recorded as failures and the bucket stayed
         cordoned for the rest of the day. The measured failure the check
-        was built for (opc2's eth leg silently falling back to the wifi
+        was built for (the retired opc2 device's eth leg silently falling back to
+        its wifi
         uplink) cannot happen on the Windows buckets, which pin the source
         address with ``bind_source``.
         """

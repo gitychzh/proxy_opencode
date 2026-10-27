@@ -18,8 +18,9 @@ from pathlib import Path
 import httpx
 
 REPO = Path(__file__).resolve().parent.parent
-PROMPT = (REPO / "proxy_opencode/upstreams/zen_prompt_default.txt").read_text(encoding="utf-8")
-TOOLS_PATH = REPO / "proxy_opencode/upstreams/zen_builtin_tools.json"
+_UPSTREAMS = REPO / "proxy_opencode/upstreams/zen/assets"
+PROMPT = (_UPSTREAMS / "zen_prompt_default.txt").read_text(encoding="utf-8")
+TOOLS_PATH = _UPSTREAMS / "zen_builtin_tools.json"
 TOOLS = json.loads(TOOLS_PATH.read_text(encoding="utf-8"))
 if isinstance(TOOLS, dict):
     TOOLS = TOOLS.get("tools", [])

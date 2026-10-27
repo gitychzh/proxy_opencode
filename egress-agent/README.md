@@ -32,7 +32,7 @@ inspection — and by design it never logs tunnel targets or content.
 
 JSON (stdlib-only), mode `600` on the device, real credentials never in the
 repo. See [`deploy/config.example.json`](deploy/config.example.json) for a
-fully commented example and the opc2 dual-uplink pattern.
+fully commented example and the owin10 dual-uplink pattern.
 
 ```bash
 egress-agent status --config /etc/egress-agent/agent.json        # secret-free
@@ -54,7 +54,7 @@ curl -sS -X POST -u user:pass -H 'Content-Type: application/json' \
 ```
 
 Device install notes (PyPI slow on CN networks → prefer a local mirror;
-the opc2 dual-uplink uid-routing gotchas): [`deploy/README.md`](deploy/README.md).
+the owin10 dual-uplink uid-routing gotchas): [`deploy/README.md`](deploy/README.md).
 
 ## Local development
 

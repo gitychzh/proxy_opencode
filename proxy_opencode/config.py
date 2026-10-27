@@ -205,7 +205,7 @@ class Settings:
     # Whether the httpx clients may follow ambient proxy settings
     # (HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY, plus the Windows
     # registry proxy). Applies to every outbound client: zen-direct, the
-    # generic openai passthrough adapter and the balancer.
+    # generic openai passthrough adapter.
     #
     # Default FALSE. Measured 2026-10-01: the win10-local bucket inherited a
     # stale HTTP_PROXY pointing at a dead Clash instance, so every upstream
@@ -243,7 +243,7 @@ class Settings:
     # Optional bucket-identity prefixes (an agent reporting an IP outside the
     # prefix is treated as unhealthy — it would silently consume another
     # bucket's quota):
-    #   ZEN_EGRESS_EXPECT_PREFIX="opc2-wifi=117.95.231.0/24,..."
+    #   ZEN_EGRESS_EXPECT_PREFIX="owin10-mobile=117.95.231.0/24,..."
     zen_egress_proxies: dict[str, str] = field(default_factory=dict)
     zen_egress_expect_prefix: dict[str, str] = field(default_factory=dict)
     # Shared secret for the agents' /healthz + /rotate endpoints (basic auth).
@@ -260,7 +260,7 @@ class Settings:
     # P5 IP rotation: per-bucket daily request threshold. Only listed
     # buckets rotate (those whose agent has an ONT configured); empty =
     # the whole rotation feature is off.
-    #   ZEN_EGRESS_ROTATION="opc2-eth=500,opc2-wifi=500,cc9=500"
+    #   ZEN_EGRESS_ROTATION="owin10-telecom=500,owin10-mobile=500,cc9=500"
     zen_egress_rotation: dict[str, int] = field(default_factory=dict)
     # Counters/rotation JSON snapshot for restart survival (container has
     # a /data volume for exactly this); empty = in-memory only.

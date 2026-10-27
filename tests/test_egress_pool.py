@@ -96,15 +96,15 @@ def test_from_settings_none_when_unset() -> None:
 def test_from_settings_builds_specs_and_prefixes() -> None:
     settings = Settings(
         zen_egress_proxies={
-            "opc2-wifi": "http://100.0.0.1:10001",
-            "opc2-eth": "http://100.0.0.1:10002",
+            "owin10-mobile": "http://100.0.0.1:10001",
+            "owin10-telecom": "http://100.0.0.1:10002",
         },
-        zen_egress_expect_prefix={"opc2-wifi": "117.95.231.0/24"},
+        zen_egress_expect_prefix={"owin10-mobile": "117.95.231.0/24"},
         zen_egress_secret="s3cret",
     )
     pool = EgressPool.from_settings(settings)
     assert pool is not None
-    assert pool.names() == ["opc2-wifi", "opc2-eth"]
+    assert pool.names() == ["owin10-mobile", "owin10-telecom"]
     wifi = pool._states[0].spec  # noqa: SLF001
     assert wifi.agent_url == "http://100.0.0.1:10001"
     assert wifi.expect_prefix == "117.95.231.0/24"
@@ -263,7 +263,7 @@ async def test_quota_cordoned_bucket_is_skipped_then_returns_after_deadline() ->
 @pytest.mark.asyncio
 async def test_probe_healthy_when_ip_matches_prefix() -> None:
     pool = EgressPool(
-        [EgressSpec("opc2-wifi", "http://agent1:10001", "117.95.231.0/24")]
+        [EgressSpec("owin10-mobile", "http://agent1:10001", "117.95.231.0/24")]
     )
     respx.get("http://agent1:10001/healthz").respond(
         json={"ready": True, "egress_ip": "117.95.231.70", "egress_ip_at": "t0"}
@@ -279,7 +279,7 @@ async def test_probe_healthy_when_ip_matches_prefix() -> None:
 @pytest.mark.asyncio
 async def test_probe_unhealthy_on_prefix_mismatch() -> None:
     pool = EgressPool(
-        [EgressSpec("opc2-eth", "http://agent2:10002", "36.149.54.0/24")]
+        [EgressSpec("owin10-telecom", "http://agent2:10002", "36.149.54.0/24")]
     )
     respx.get("http://agent2:10002/healthz").respond(
         json={"ready": True, "egress_ip": "117.95.231.70"}
@@ -377,7 +377,8 @@ def _capture_events(tmp_path):  # type: ignore[no-untyped-def]
 async def test_quota_cordon_lifted_when_isp_changes_ip(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """ISP re-dial + fresh quota ⇒ the full-day 429 cordon must not persist.
 
-    Measured 2026-10-24: opc2-eth exhausted its per-IP daily quota and was
+    Measured 2026-10-24 (on the since-retired opc2-eth bucket): that IP exhausted
+    its daily quota and was
     cordoned until the window reset; while benched the ISP re-issued
     36.149.55.24 on its own, and the fresh (healthy, in-prefix) IP kept
     serving nothing until UTC 00:00. Both 429 quota verdicts and free-tier

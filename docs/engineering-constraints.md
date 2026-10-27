@@ -5,8 +5,8 @@
    （历史文档曾写 `==3.12.13`，与 pyproject 不一致，已按事实更正。）
 2. **全程 Git + Conventional Commits**：功能 `feat:`、修复 `fix:`、文档
    `docs:`、重构 `refactor:`；合入 main 前 CI 四项门禁必须全绿：
-   `pytest tests/`、`pytest balancer/tests/`、`ruff check proxy_opencode
-   tests balancer`、`mypy proxy_opencode`。门禁**不得**写成“未安装则跳过”
+   `pytest tests/`、`ruff check proxy_opencode
+   tests scripts`、`mypy proxy_opencode`。门禁**不得**写成“未安装则跳过”
    ——那会让它静默失效（0.6.2 之前 ruff 步骤就是这样从未真正跑过）。
 3. **语义化版本**：`pyproject.toml` 的 `version` 与 `CHANGELOG.md` 同步；
    `v*` tag 触发 release workflow（同样执行四项门禁）。

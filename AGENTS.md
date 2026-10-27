@@ -7,6 +7,7 @@
 > - [`docs/ACCESS.md`](docs/ACCESS.md) = 入口、凭据名称与去向（不含值）
 > - [`docs/EGRESS_OBSERVABILITY.md`](docs/EGRESS_OBSERVABILITY.md) = 事件流与逐请求账本规格
 > - [`docs/SELF_OPTIMIZATION.md`](docs/SELF_OPTIMIZATION.md) = 自我优化闭环（诊断规则、执行分级、兜底保证）
+> - [`docs/CLIENT_WORKBUDDY.md`](docs/CLIENT_WORKBUDDY.md) = 桌面端（WorkBuddy）接入与端到端验收
 > - [`docs/engineering-constraints.md`](docs/engineering-constraints.md) = 工程化基线
 > - [`README.md`](README.md) = 对外说明；[`CHANGELOG.md`](CHANGELOG.md) = 版本历史
 
@@ -92,8 +93,7 @@ UA `opencode/1.19.4 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4`（值不敏�
 
 ```bash
 pytest tests/
-pytest balancer/tests/
-ruff check proxy_opencode tests balancer
+ruff check proxy_opencode tests scripts
 mypy proxy_opencode
 cd egress-agent && pytest tests/ -q && ruff check egress_agent tests && mypy egress_agent
 ```

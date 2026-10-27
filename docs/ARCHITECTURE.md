@@ -60,7 +60,6 @@ cordon、换 IP、failover 语义与传输无关。
 | `egress-agent-android/` | 原生 Kotlin 版占位（wire 契约已冻结，P6） |
 | `egress-agent-esp32/` | ESP32 桶（移动 MiFi 上行）：PlatformIO 固件 + 网关侧反向隧道适配器 + MiFi 换 IP 工具；线协议契约 v4（HELLO 共享密钥鉴权） |
 | `deploy/ecs/` | Dockerfile / compose / env.example / Caddyfile 片段 |
-| `balancer/` | 旧栈边缘 LB（保留实现与测试，现役栈不部署） |
 
 ## 4. 分期与状态
 

@@ -15,7 +15,6 @@ from ..config import Settings
 from ..errors import openai_error
 from ..registry import ModelRegistry
 from ..sse_mask import mask_json_model, mask_model_field
-from ..upstreams.failover import fallback_headers, fallback_note
 from ..upstreams.openai_http import StreamRelay
 from ..upstreams.opencode_serve import ServeCompletion
 from ..upstreams.opencode_serve import (
@@ -23,14 +22,13 @@ from ..upstreams.opencode_serve import (
 )
 from ._pipeline import (
     dispatch,
-    fallback_log_fields,
     is_error_relay,
     new_call,
     openai_error_factory,
     parse_json_object,
-    relay_stream,
     with_fallback_note,
 )
+from ._render import begin, json_response, streaming
 
 logger = logging.getLogger("proxy_opencode.chat")
 
@@ -69,9 +67,7 @@ def make_router(
         # Fallback provenance: headers on every answer, plus a leading SSE
         # comment when the backup chain served a stream. Captured here
         # because the contextvar marker only lives for this request.
-        extra_headers = fallback_headers()
-        note = fallback_note()
-        call.extra_log_fields.update(fallback_log_fields())
+        extra_headers, note = begin(call)
 
         if isinstance(result, StreamRelay):
             chunks_iter = result.chunks()
@@ -79,23 +75,13 @@ def make_router(
                 chunks_iter = with_fallback_note(chunks_iter, note)
             if registry.enabled:
                 chunks_iter = mask_model_field(chunks_iter, call.public_model)
-            return StreamingResponse(
-                relay_stream(
-                    chunks_iter,
-                    result.usage_holder,
-                    lambda status, usage=None: call.log(logger, status, usage),
-                    request_id=call.request_id,
-                    model=call.upstream_model,
-                    client=call.client,
-                    client_stall_s=settings.client_stall_s,
-                ),
-                status_code=200,
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                    **extra_headers,
-                },
+            return streaming(
+                chunks_iter,
+                result.usage_holder,
+                call,
+                settings,
+                logger,
+                extra_headers=extra_headers,
             )
         if is_error_relay(result):  # relayed upstream error, original status
             status = int(result["__status__"])
@@ -111,9 +97,8 @@ def make_router(
         if isinstance(result, dict):  # openai passthrough non-stream JSON
             if registry.enabled:
                 mask_json_model(result, call.public_model)
-            call.log(logger, 200, result.get("usage"))
-            return JSONResponse(
-                status_code=200, content=result, headers=extra_headers
+            return json_response(
+                result, call, logger, extra_headers=extra_headers
             )
         if isinstance(result, ServeCompletion):
             response = _serve_response(model, result)

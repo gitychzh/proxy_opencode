@@ -9,7 +9,7 @@ module owns:
   ``trust_env=False`` (ambient HTTP_PROXY poison is a measured failure
   mode — see the zen_direct client comment);
 * least-in-flight selection among healthy egresses with round-robin
-  tie-breaking (mirrors the balancer) — the ties are the common case for
+  tie-breaking — the ties are the common case for
   sequential traffic, and breaking them by name pinned every request to
   one bucket until its daily quota drained; bounded saturation behaviour
   (when every bucket is saturated the request still proceeds — queueing
@@ -336,7 +336,7 @@ class EgressPool:
         name-based order this replaced pinned every sequential request to
         the alphabetically-first bucket and drained its per-IP daily quota
         first (observed in the 2026-10-15 ECS e2e). The rotation is applied
-        before the stable least-inflight sort, exactly like the balancer.
+        before the stable least-inflight sort.
         """
 
         now = time.monotonic()
@@ -356,7 +356,7 @@ class EgressPool:
         state.inflight += 1
         if not ready and state.cordoned(now):
             # Everything is cordoned/saturated: queue upstream rather than
-            # inventing a 502 (mirrors the balancer's rule).
+            # inventing a 502.
             logger.warning(
                 "no healthy egress; using cordoned bucket",
                 extra={"egress": state.spec.name, "reason": state.cordon_reason},
@@ -644,7 +644,8 @@ class EgressPool:
         fresh IP, reject the flagged one). The rotation driver already
         clears cordon on a verified rotation; this closes the remaining
         gap: the ISP re-dials on its own while the bucket sits on a
-        full-day quota cordon — observed 2026-10-24, opc2-eth re-dialed
+        full-day quota cordon — observed 2026-10-24 on the since-retired opc2
+        bucket, which re-dialed
         after its rotate call was unreachable and the healthy new
         ``36.149.55.24`` stayed benched until the window reset.
 

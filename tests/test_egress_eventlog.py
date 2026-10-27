@@ -50,7 +50,7 @@ def test_disabled_by_default_writes_nothing(tmp_path):
 def test_emit_writes_jsonl_with_timestamp_and_fields(tmp_path):
     path = tmp_path / "events.jsonl"
     EVENTS.configure(str(path))
-    EVENTS.emit("rotation_succeeded", egress="opc2-eth", ip_from=OLD_IP, ip_to=NEW_IP)
+    EVENTS.emit("rotation_succeeded", egress="owin10-telecom", ip_from=OLD_IP, ip_to=NEW_IP)
     EVENTS.emit("cordon", egress="cc9", cordon_reason="free_quota_exhausted")
     events = read_events(str(path))
     assert [e["event"] for e in events] == [

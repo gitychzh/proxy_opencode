@@ -31,7 +31,7 @@
 | agent 共享 secret | ECS `.env` 的 `ZEN_EGRESS_SECRET` + 各设备 JSON 的 `listener.*` | 网关用它作 CONNECT 的 Basic 凭据；两处必须一致（注意 CRLF 会多一个 `\r`） |
 | 备用链路 key | ECS `.env` 的 `ZEN_FALLBACK_API_KEY` | proxy_ms 的 `CLIENT_KEYS`，见 `/opt/proxy_ms/env.list` |
 | ONT 账号口令 | 设备侧 agent 实例 JSON（600） | 仅设备本地；型号/拓扑记在 `ARCHITECTURE.md` §8 |
-| LB 管理 key | ECS 环境（旧栈） | `ZEN_LB_API_KEY`；`balancer/` 已不部署，仅保留代码与测试 |
+| ~~LB 管理 key~~ | — | 旧栈已删除（0.7.2），`ZEN_LB_API_KEY` 不再使用 |
 | SSH / GitHub | 各机 `~/.ssh/` | 只授公钥，私钥不入仓（§4） |
 | 临时探测 key | 运行时生成 | 用后吊销，不落盘 |
 

@@ -2,15 +2,16 @@
 
 One agent instance fronts exactly one uplink, so every outbound socket
 must leave through that uplink's address even when the OS default route
-points elsewhere (opc2: default route is wifi, but the wired bucket must
-egress via the wired address — same trick the old gateway used with its
-uid policy routing, here it is explicit).
+points elsewhere (the owin10-telecom bucket pins 192.168.2.235 so it cannot
+silently egress over the mobile uplink — same idea as the old gateway's uid
+policy routing, here it is explicit).
 
 * ``interface_address`` — resolve a Linux interface name to its IPv4
-  (``SIOCGIFADDR``). Used to reach the right ONT when two ONTs share one
-  IP (opc2: wired V173-50 vs wireless HG8020C both on 192.168.1.1 — the
-  source address is the only reliable discriminator, exactly like the
-  ``curl --interface`` method proven in production).
+  (``SIOCGIFADDR``). Used to reach the right ONT when two ONTs share one IP:
+  that was the retired opc2 device (wired V173-50 vs wireless HG8020C both
+  on 192.168.1.1, offline since the owin10 cutover), where the source
+  address was the only reliable discriminator — the same ``curl
+  --interface`` method proven in production.
 * ``local_addr_for`` — the ``local_addr`` tuple ``asyncio.open_connection``
   and ``aiohttp.TCPConnector`` want, or ``None`` for OS routing.
 

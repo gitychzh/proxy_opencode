@@ -3,6 +3,47 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.7.2] - 2026-10-28
+
+> 主题：按关注点重构 + 清理下线物 + 桌面端接入。协议事实未变（AGENTS.md 硬约束 1
+> 全部保持不变），门禁由四条收敛为 gateway 三条 + egress-agent 三条。
+
+### Changed
+
+- **refactor(upstreams): `zen_direct.py`（1166 行）拆为 `upstreams/zen/` 包** —
+  按关注点分离，单文件不再同时承担六件事：
+  `protocol`（请求头/UA/Retry-After 解析）、`ids`（session/request/workspace 标识）、
+  `prompt`（body 门模板与逐请求渲染）、`tools`（形状门工具注入）、
+  `body`（请求体组装）、`aggregate`（SSE → 单条 completion）、`errors`（免费层 403
+  改写）、`client`（适配器编排：桶级 failover、传输选择、租约释放）。
+  prompt/tools 资产移入 `upstreams/zen/assets/`。所有纯函数不再依赖 Settings
+  对象，可直接单测；`upstreams/__init__` 只暴露 `zen.ZenDirectAdapter`。
+- **refactor(routes): 三条协议路由的响应装配去重** — 新增 `routes/_render.py`
+  （`begin` / `streaming` / `json_response`），三处重复的「兜底头 + SSE 注记 +
+  生命周期 relay + usage 记录」收敛为一处；此前三份拷贝已经开始漂移（一条路由
+  漏注记、另一条跳过 stream 记录）。
+- **refactor(docs): 门禁口径同步** — `ruff check proxy_opencode tests scripts`
+  （scripts 纳入静态检查）。
+
+### Removed
+
+- **chore: 删除 `balancer/`（旧栈边缘 LB）** — `ARCHITECTURE.md` 早已标注
+  「现役栈不部署」，0.7.x 单栈后它是纯维护负担（~700 行 + 33 测试 + 一个 CI job）。
+  CI 两个 workflow、AGENTS/CONTRIBUTING/README/OPERATIONS/engineering-constraints
+  与代码注释里的引用同步清除；需要时从 git 历史取回。
+- **chore: 清理 opc2 下线设备引用** — 示例值/夹具/部署文档改为现役桶名
+  （`owin10-mobile` / `owin10-telecom` / `cc9`）；**历史测量记录保留原设备名并标注
+  `since-retired`**，不把旧证据改写成现役设备。
+
+### Added
+
+- **feat(client): WorkBuddy 桌面端接入 + 端到端验收** — `docs/CLIENT_WORKBUDDY.md`
+  记录桌面版 `~/.workbuddy/models.json` 的格式（数组、字段、热重载、日志判据）与
+  本机回环实例（`127.0.0.1:8787`，计划任务 `proxy_opencode-wb-gateway`，
+  bun 传输栈）。新增 `scripts/e2e_workbuddy.py`：六项检查覆盖桌面端真实形态
+  （别名不泄漏、SSE + 工具 + reasoning、非流式聚合、tool_calls、Responses 与
+  Anthropic 事件序列），实测 6/6 PASS。
+
 ## [0.7.1] - 2026-10-27
 
 ### Added

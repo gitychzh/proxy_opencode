@@ -9,7 +9,7 @@ from egress_agent.health import PROBE_READY_GRACE_S, HealthState, extract_ip
 
 
 def _state() -> HealthState:
-    return HealthState(egress_name="opc2-wifi", bind_source=None, echo_url="http://x")
+    return HealthState(egress_name="owin10-mobile", bind_source=None, echo_url="http://x")
 
 
 def test_extract_ip_ipv4_from_chinese_echo() -> None:
@@ -35,7 +35,7 @@ def test_payload_shape_and_counters() -> None:
     state.tunnels_active = 2
     state.tunnels_total = 7
     payload = state.payload()
-    assert payload["egress"] == "opc2-wifi"
+    assert payload["egress"] == "owin10-mobile"
     assert payload["ready"] is True
     assert payload["tunnels_active"] == 2
     assert payload["tunnels_total"] == 7

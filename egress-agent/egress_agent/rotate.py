@@ -1,7 +1,7 @@
 """Huawei ONT reboot driver — renew the egress IP (P1).
 
 The four-step pure-HTTP flow below is the one already proven in production
-on this hardware (see the opc2 runbooks): it needs no browser, no session
+on this hardware (see the owin10 runbooks): it needs no browser, no session
 cookies and no firmware-specific CLI. The gateway triggers it through the
 agent's ``POST /rotate``; the ONT password stays on the device.
 

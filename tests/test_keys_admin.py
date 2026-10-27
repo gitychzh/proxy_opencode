@@ -227,8 +227,8 @@ async def test_admin_endpoints_reject_non_admin(tmp_path):
 async def test_admin_egresses_reports_pool_status(tmp_path):
     app = make_app(
         tmp_path,
-        zen_egress_proxies={"opc2-wifi": "http://100.0.0.1:10001"},
-        zen_egress_expect_prefix={"opc2-wifi": "117.95.231.0/24"},
+        zen_egress_proxies={"owin10-mobile": "http://100.0.0.1:10001"},
+        zen_egress_expect_prefix={"owin10-mobile": "117.95.231.0/24"},
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -237,7 +237,7 @@ async def test_admin_egresses_reports_pool_status(tmp_path):
     assert r.status_code == 200
     body = r.json()
     assert body["pool"] is True
-    assert body["egresses"][0]["name"] == "opc2-wifi"
+    assert body["egresses"][0]["name"] == "owin10-mobile"
     assert body["egresses"][0]["expect_prefix"] == "117.95.231.0/24"
 
 

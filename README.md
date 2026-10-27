@@ -56,8 +56,8 @@ uv pip install -e '.[test,dev]' --python .venv/Scripts/python.exe
 pip install -e 'egress-agent[test,dev]'
 
 # 全绿才算完成（完整要求见 AGENTS.md 硬约束 3）
-pytest tests/ -q && pytest balancer/tests/ -q
-ruff check proxy_opencode tests balancer && mypy proxy_opencode
+pytest tests/ -q
+ruff check proxy_opencode tests scripts && mypy proxy_opencode
 cd egress-agent && pytest tests/ -q && ruff check egress_agent tests && mypy egress_agent
 ```
 
@@ -71,6 +71,7 @@ cd egress-agent && pytest tests/ -q && ruff check egress_agent tests && mypy egr
 | [`docs/ACCESS.md`](docs/ACCESS.md) | 入口、凭据名称与去向（不含值） |
 | [`docs/EGRESS_OBSERVABILITY.md`](docs/EGRESS_OBSERVABILITY.md) | 事件流现状 + 逐请求账本规格与统计示例 |
 | [`docs/SELF_OPTIMIZATION.md`](docs/SELF_OPTIMIZATION.md) | 自我优化闭环：观测契约、诊断规则、执行分级、proxy_ms 兜底保证 |
+| [`docs/CLIENT_WORKBUDDY.md`](docs/CLIENT_WORKBUDDY.md) | 桌面端接入：models.json 格式、本机实例、端到端验收 |
 | [`docs/engineering-constraints.md`](docs/engineering-constraints.md) | 工程化基线 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本历史 |
 

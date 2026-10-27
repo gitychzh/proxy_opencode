@@ -11,7 +11,7 @@ def _config(tmp_path) -> str:
         json.dumps(
             {
                 "listener": {"port": 10001},
-                "egress": {"name": "opc2-wifi"},
+                "egress": {"name": "owin10-mobile"},
                 "onts": [{"name": "hg8020c", "interface": "wlx0c9160fb3c7c"}],
             }
         ),
@@ -26,7 +26,7 @@ def test_status_human_readable(tmp_path, capsys) -> None:
     rc = main(["--config", _config(tmp_path), "status"])
     out = capsys.readouterr().out
     assert rc == EXIT_OK
-    assert "opc2-wifi" in out
+    assert "owin10-mobile" in out
     assert "hg8020c" in out
     assert "wlx0c9160fb3c7c" in out
 
@@ -38,7 +38,7 @@ def test_status_json(tmp_path, capsys) -> None:
     out = capsys.readouterr().out
     assert rc == EXIT_OK
     payload = json.loads(out)
-    assert payload["egress_name"] == "opc2-wifi"
+    assert payload["egress_name"] == "owin10-mobile"
     assert payload["listen"] == "0.0.0.0:10001"
     assert payload["onts"][0]["name"] == "hg8020c"
 
@@ -50,7 +50,7 @@ def test_run_check_mode_validates_config(tmp_path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert rc == EXIT_OK
     assert payload["ok"] is True
-    assert payload["config"]["egress_name"] == "opc2-wifi"
+    assert payload["config"]["egress_name"] == "owin10-mobile"
 
 
 def test_rotate_reports_driver_result(tmp_path, capsys, monkeypatch) -> None:
@@ -63,7 +63,7 @@ def test_rotate_reports_driver_result(tmp_path, capsys, monkeypatch) -> None:
     monkeypatch.setattr("egress_agent.rotate.restart_ont", fake_restart)
     cfg = tmp_path / "agent.json"
     cfg.write_text(json.dumps({
-        "egress": {"name": "opc2-wifi"},
+        "egress": {"name": "owin10-mobile"},
         "onts": [{"name": "hg8020c"}],
     }), encoding="utf-8")
     rc = main(["--config", str(cfg), "rotate", "--ont", "hg8020c"])
@@ -78,7 +78,7 @@ def test_rotate_unknown_ont_exit_code(tmp_path, capsys) -> None:
 
     cfg = tmp_path / "agent.json"
     cfg.write_text(json.dumps({
-        "egress": {"name": "opc2-wifi"},
+        "egress": {"name": "owin10-mobile"},
         "onts": [{"name": "hg8020c"}],
     }), encoding="utf-8")
     rc = main(["--config", str(cfg), "rotate", "--ont", "nope"])
@@ -110,7 +110,7 @@ def test_config_flag_accepted_after_subcommand(tmp_path, capsys) -> None:
     rc = main(["status", "--config", _config(tmp_path), "--json"])
     assert rc == EXIT_OK
     payload = json.loads(capsys.readouterr().out)
-    assert payload["egress_name"] == "opc2-wifi"
+    assert payload["egress_name"] == "owin10-mobile"
 
 
 def test_build_agent_serves_healthz(tmp_path) -> None:

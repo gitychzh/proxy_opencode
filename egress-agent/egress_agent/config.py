@@ -6,7 +6,7 @@ devices)::
     {
       "listener": {"host": "0.0.0.0", "port": 10001,
                    "username": null, "password": null},
-      "egress":   {"name": "opc2-wifi", "bind_source": null},
+      "egress":   {"name": "owin10-mobile", "bind_source": null},
       "echo_url": "https://myip.ipip.net",
       "onts": [
         {"name": "hg8020c", "kind": "huawei", "url": "http://192.168.1.1",
@@ -17,16 +17,18 @@ devices)::
 
 Semantics:
 
-* One agent instance fronts exactly ONE egress path (one uplink). Devices
-  with two uplinks (opc2: wifi + eth) run two instances — see the deploy
-  templates and docs/ARCHITECTURE.md.
+* One agent instance fronts exactly ONE egress path (one uplink). A device
+  with two uplinks (the owin10 host: mobile + telecom) runs two instances —
+  see the deploy templates and docs/ARCHITECTURE.md.
 * ``egress.bind_source``: optional source IP pinned on outbound sockets so
   traffic leaves through the intended interface even when the OS default
   route points elsewhere (Linux). ``null`` = OS routing decides.
 * ``onts[].interface``: source interface used to REACH the ONT console. On
-  opc2 the wired and wireless ONTs share 192.168.1.1, so the interface is
-  the only reliable discriminator. Linux resolves an interface name through
-  ``SIOCGIFADDR``; hosts without that ioctl path (Windows/Android) may put
+  the retired dual-ONT device (opc2, offline since the owin10 cutover) the
+  wired and wireless ONTs shared 192.168.1.1, so the interface was the only
+  reliable discriminator; the live owin10 buckets reach distinct ONT
+  addresses, but the field stays because ``SIOCGIFADDR`` resolution is what
+  makes it portable. Hosts without that ioctl path (Windows/Android) may put
   the uplink's literal IPv4 address here instead.
 * ``onts[].password`` is secret: never commit the real file, and
   :meth:`AgentConfig.summary` redacts it for ``egress-agent status``.

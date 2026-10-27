@@ -2,8 +2,8 @@
 
 > **现状（2026-10-25）**：现役设备是 `owin10`（Windows，双桶 `owin10-mobile`
 > `:10001` / `owin10-telecom` `:10002`）与 `cc9`（Android chroot，`:10001`）。
-> 本文的 `wifi`/`eth`/`pad` 实例名与 opc2 策略路由章节是 **Linux 侧历史参考**
-> （opc2 已永久下线），照抄到 owin10 前先读
+> 本文的 `wifi`/`eth`/`pad` 实例名与 owin10 策略路由章节是 **Linux 侧历史参考**
+> （owin10 已永久下线），照抄到 owin10 前先读
 > [`windows/README.md`](windows/README.md)。拓扑表见
 > [`../../docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) §8。
 >
@@ -17,7 +17,7 @@
 | 实例 | 配置文件 | 监听 | 出口 |
 |---|---|---|---|
 | `egress-agent@wifi` | `/etc/egress-agent/wifi.json` | 10001 | wifi 上行 |
-| `egress-agent@eth`  | `/etc/egress-agent/eth.json`  | 10002 | eth 上行（opc2 专用） |
+| `egress-agent@eth`  | `/etc/egress-agent/eth.json`  | 10002 | eth 上行（owin10 专用） |
 | `egress-agent@pad`  | `/etc/egress-agent/pad.json`  | 10001 | pad 上行 |
 | `egress-agent@cc9`  | `/etc/egress-agent/cc9.json`  | 10001 | cc9 上行 |
 
@@ -28,7 +28,7 @@
 
 ```bash
 sudo ./install.sh wifi --python /opt/python3.12/bin/python3.12
-sudo ./install.sh eth  --user opc2-bucket-b --python /opt/python3.12/bin/python3.12
+sudo ./install.sh eth  --user owin10-bucket-b --python /opt/python3.12/bin/python3.12
 sudo systemctl enable --now egress-agent@wifi
 sudo cp config.example.json /etc/egress-agent/wifi.json   # 填真实值
 sudo systemctl enable --now egress-agent@eth
@@ -40,30 +40,30 @@ sudo systemctl enable --now egress-agent@wifi egress-agent@eth
 认证）；`listener.username/password` 与网关的 `ZEN_EGRESS_SECRET` 保持一致
 （网关用该 secret 作 CONNECT 的 Basic 凭据）。
 
-## opc2 双上行（uid 策略路由）
+## owin10 双上行（uid 策略路由）
 
-opc2 的两台光猫共占 192.168.1.1，出口靠系统策略路由区分（与旧网关
-`proxy_opencode-opc2b.service` 同一机制）：
+owin10 的两台光猫共占 192.168.1.1，出口靠系统策略路由区分（与旧网关
+`proxy_opencode-owin10b.service` 同一机制）：
 
 * `wifi` 实例：默认用户运行 + `egress.bind_source=192.168.2.138`
   （源 IP 绑定即可，wifi 是默认路由腿）；
 * `eth` 实例：**不要**设 `bind_source`——默认路由走 wifi，源 IP 绑定会直接
-  发不出包。以现有用户 `opc2-bucket-b` 运行（uid 996，策略路由
+  发不出包。以现有用户 `owin10-bucket-b` 运行（uid 996，策略路由
   `uidrange 996-996 → table 991 → 192.168.1.1`）：
 
   ```bash
   sudo systemctl edit egress-agent@eth     # 加入：
   # [Service]
-  # User=opc2-bucket-b
+  # User=owin10-bucket-b
   ```
 
-  `opc2-bucket-b` 无同名组（gid=1000），systemd 会用其主组；**不要**写
-  `Group=opc2-bucket-b`（组不存在会启动失败）。`install.sh --user opc2-bucket-b`
+  `owin10-bucket-b` 无同名组（gid=1000），systemd 会用其主组；**不要**写
+  `Group=owin10-bucket-b`（组不存在会启动失败）。`install.sh --user owin10-bucket-b`
   会把 `/etc/egress-agent` 的属主改为该用户。
 
-## opc2 策略路由自愈（2026-10-16 设备落地）
+## owin10 策略路由自愈（2026-10-16 设备落地）
 
-两个 provision 单元（`proxy_opencode-opc2b-route.service` = 表 991/rule 29991
+两个 provision 单元（`proxy_opencode-owin10b-route.service` = 表 991/rule 29991
 uid 996；`proxyopencode-wired-egress.service` = 表 410/rules 1040+1050
 uid 997）是 RemainingAfterExit boot oneshot：上游事件（ONT 重启、租约巡检等）
 把规则/表默认路由吐掉后无人补，uid 996 的 eth agent 会**静默回落 wifi（电信）
@@ -71,9 +71,9 @@ uid 997）是 RemainingAfterExit boot oneshot：上游事件（ONT 重启、租�
 自愈（设备上已安装）：
 
 ```
-/etc/systemd/system/opc2-policy-routes-keep.service   # oneshot：restart 两个 provision 单元
-/etc/systemd/system/opc2-policy-routes-keep.timer     # OnBootSec=2min + OnUnitActiveSec=10min
-systemctl enable --now opc2-policy-routes-keep.timer
+/etc/systemd/system/owin10-policy-routes-keep.service   # oneshot：restart 两个 provision 单元
+/etc/systemd/system/owin10-policy-routes-keep.timer     # OnBootSec=2min + OnUnitActiveSec=10min
+systemctl enable --now owin10-policy-routes-keep.timer
 ```
 
 restart 语义保证幂等（ExecStop 删规则/flush 410 → ExecStart `route

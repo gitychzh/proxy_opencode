@@ -76,7 +76,7 @@ echo "==> prepare config/log dirs"
 install -d -m 750 /etc/egress-agent
 install -d -m 755 /var/log/egress-agent
 if [[ -n "$RUN_USER" ]]; then
-  # Owner only: the run user may have no same-named group (e.g. opc2-bucket-b
+  # Owner only: the run user may have no same-named group (e.g. owin10-bucket-b
   # is gid 1000). systemd then uses the user's primary group.
   chown -R "$RUN_USER" /etc/egress-agent /var/log/egress-agent
 fi

@@ -25,7 +25,7 @@ from proxy_opencode.egress.counters import HARD_QUOTA_RETRY_AFTER_S, EgressCount
 from proxy_opencode.egress.pool import EgressPool, EgressSpec, EgressState, Lease
 from proxy_opencode.egress.rotate import EgressRotator
 from proxy_opencode.routes.admin import make_router
-from proxy_opencode.upstreams.zen_direct import ZenDirectAdapter, _retry_after_seconds
+from proxy_opencode.upstreams.zen import ZenDirectAdapter, _retry_after_seconds
 from tests.test_zen_direct import make_settings
 
 CST = timezone(timedelta(hours=8))

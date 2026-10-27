@@ -23,7 +23,7 @@ jobs:
         run: pip install -e '.[test,dev]'
 
       - name: Ruff
-        run: ruff check proxy_opencode tests balancer
+        run: ruff check proxy_opencode tests scripts
 
       - name: Mypy
         run: mypy proxy_opencode

@@ -27,7 +27,7 @@ def test_defaults_are_valid() -> None:
 def test_load_from_file_round_trip(tmp_path) -> None:
     data = {
         "listener": {"host": "0.0.0.0", "port": 10002},
-        "egress": {"name": "opc2-eth", "bind_source": "192.168.1.222"},
+        "egress": {"name": "owin10-telecom", "bind_source": "192.168.1.222"},
         "onts": [
             {
                 "name": "v173-50",

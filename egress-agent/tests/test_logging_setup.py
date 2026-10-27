@@ -13,13 +13,13 @@ def test_json_formatter_emits_one_line(caplog) -> None:
         name="egress_agent", level=logging.INFO, pathname=__file__, lineno=1,
         msg="tunnel opened %s", args=("wifi",), exc_info=None,
     )
-    record.egress = "opc2-wifi"
+    record.egress = "owin10-mobile"
     line = JsonFormatter().format(record)
     assert "\n" not in line
     payload = json.loads(line)
     assert payload["level"] == "INFO"
     assert payload["msg"] == "tunnel opened wifi"
-    assert payload["egress"] == "opc2-wifi"
+    assert payload["egress"] == "owin10-mobile"
     assert "ts" in payload and "logger" in payload
 
 

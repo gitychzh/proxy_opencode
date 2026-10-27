@@ -23,29 +23,13 @@ jobs:
       # Lint and type gates are unconditional: the previous "only if ruff is
       # installed" guard meant they silently never ran in CI.
       - name: Ruff
-        run: ruff check proxy_opencode tests balancer
+        run: ruff check proxy_opencode tests scripts
 
       - name: Mypy
         run: mypy proxy_opencode
 
       - name: Run tests
         run: pytest tests/ -q
-
-  balancer:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12.13"
-          cache: pip
-
-      - name: Install balancer deps
-        run: pip install 'httpx>=0.27' 'uvicorn[standard]>=0.29' 'pytest>=8' 'pytest-asyncio>=0.24'
-
-      - name: Run balancer tests
-        run: pytest balancer/tests/ -q
 
   # The 0.7.x stack splits the gateway (this repo, containerised on the ECS)
   # from the device-side egress-agent (egress-agent/, Python). Both sides

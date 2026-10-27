@@ -12,7 +12,7 @@ from typing import Any, Protocol
 
 from ..config import Settings
 from ..egress.pool import EgressPool
-from . import failover, openai_http, opencode_serve, zen_direct
+from . import failover, openai_http, opencode_serve, zen
 from .openai_http import StreamRelay
 from .opencode_serve import ServeCompletion
 
@@ -51,7 +51,7 @@ def build_adapter(
     if settings.is_opencode_serve:
         primary = opencode_serve.ServeAdapter(settings)
     elif settings.is_zen_direct:
-        primary = zen_direct.ZenDirectAdapter(settings, pool=pool)
+        primary = zen.ZenDirectAdapter(settings, pool=pool)
     else:
         primary = openai_http.OpenAIHttpAdapter(settings)
     if settings.zen_fallback_base_url:

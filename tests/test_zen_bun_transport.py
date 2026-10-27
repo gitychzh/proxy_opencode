@@ -22,11 +22,11 @@ from proxy_opencode.config import Settings
 from proxy_opencode.egress.pool import EgressPool, EgressSpec, EgressState, Lease
 from proxy_opencode.upstreams import zen_bun_transport as zt
 from proxy_opencode.upstreams.openai_http import StreamRelay
+from proxy_opencode.upstreams.zen import ZenDirectAdapter
 from proxy_opencode.upstreams.zen_bun_transport import (
     BunTransport,
     BunTransportError,
 )
-from proxy_opencode.upstreams.zen_direct import ZenDirectAdapter
 
 _UPSTREAM = "https://opencode.ai/inference/openai/v1"
 

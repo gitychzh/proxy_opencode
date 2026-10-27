@@ -14,9 +14,9 @@ import respx
 
 from proxy_opencode.config import Settings
 from proxy_opencode.egress.pool import EgressSpec, EgressState, Lease
-from proxy_opencode.upstreams import zen_direct
+from proxy_opencode.upstreams import zen as zen_direct
 from proxy_opencode.upstreams.openai_http import StreamRelay
-from proxy_opencode.upstreams.zen_direct import ZenDirectAdapter
+from proxy_opencode.upstreams.zen import ZenDirectAdapter
 
 
 def make_settings(**kw: Any) -> Settings:

@@ -14,7 +14,7 @@ import uuid
 from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 
 from ..auth import build_auth_dependency
 from ..auth.keystore import KeyStore
@@ -27,19 +27,17 @@ from ..formats.responses_proto import (
 )
 from ..registry import ModelRegistry
 from ..sse_mask import mask_json_model
-from ..upstreams.failover import fallback_headers, fallback_note
 from ..upstreams.openai_http import StreamRelay
 from ..upstreams.opencode_serve import ServeCompletion, completion_to_chat_response
 from ._pipeline import (
     dispatch,
-    fallback_log_fields,
     is_error_relay,
     new_call,
     openai_error_factory,
     parse_json_object,
-    relay_stream,
     with_fallback_note,
 )
+from ._render import begin, json_response, streaming
 
 logger = logging.getLogger("proxy_opencode.responses")
 
@@ -81,27 +79,19 @@ def make_router(
 
         # Fallback provenance: headers on every answer, plus a leading SSE
         # comment when the backup chain served a stream (see routes/chat.py).
-        extra_headers = fallback_headers()
-        note = fallback_note()
-        call.extra_log_fields.update(fallback_log_fields())
+        extra_headers, note = begin(call)
 
         if isinstance(result, StreamRelay):
             chunks = stream_responses_events(result.chunks(), call.public_model)
             if note:
                 chunks = with_fallback_note(chunks, note)
-            return StreamingResponse(
-                relay_stream(
-                    chunks,
-                    result.usage_holder,
-                    lambda status, usage=None: call.log(logger, status, usage),
-                    request_id=call.request_id,
-                    model=call.upstream_model,
-                    client=call.client,
-                    client_stall_s=settings.client_stall_s,
-                ),
-                status_code=200,
-                media_type="text/event-stream",
-                headers={**_SSE_HEADERS, **extra_headers},
+            return streaming(
+                chunks,
+                result.usage_holder,
+                call,
+                settings,
+                logger,
+                extra_headers=extra_headers,
             )
         if is_error_relay(result):
             status = int(result["__status__"])
@@ -121,31 +111,27 @@ def make_router(
             if call.stream:
                 # Relay through the shared wrapper even though the body is a
                 # single synthetic chunk: it owns the "stream ended" record
-                # (latency, reason) and the client-stall watchdog, which this
-                # branch used to skip entirely.
+                # (latency, reason) and the client-stall watchdog.
                 chunks = stream_responses_events(
                     _serve_completion_sse_from_chat(result), call.public_model
                 )
                 if note:
                     chunks = with_fallback_note(chunks, note)
-                return StreamingResponse(
-                    relay_stream(
-                        chunks,
-                        {"usage": result.get("usage")},
-                        lambda status, usage=None: call.log(logger, status, usage),
-                        request_id=call.request_id,
-                        model=call.upstream_model,
-                        client=call.client,
-                        client_stall_s=settings.client_stall_s,
-                    ),
-                    status_code=200,
-                    media_type="text/event-stream",
-                    headers={**_SSE_HEADERS, **extra_headers},
+                return streaming(
+                    chunks,
+                    {"usage": result.get("usage")},
+                    call,
+                    settings,
+                    logger,
+                    extra_headers=extra_headers,
                 )
             body_out = chat_to_responses_body(result, call.public_model)
-            call.log(logger, 200, result.get("usage"))
-            return JSONResponse(
-                status_code=200, content=body_out, headers=extra_headers
+            return json_response(
+                body_out,
+                call,
+                logger,
+                extra_headers=extra_headers,
+                usage=result.get("usage"),
             )
 
         call.log(logger, 502)
