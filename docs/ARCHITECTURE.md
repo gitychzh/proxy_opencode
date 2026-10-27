@@ -58,6 +58,7 @@ cordon、换 IP、failover 语义与传输无关。
 | `proxy_opencode/` | 网关：`routes/`（薄路由）、`formats/`（协议转换）、`upstreams/`（zen_direct / bun 传输 / failover）、`egress/`（pool / counters / rotate / catalog / eventlog / updater） |
 | `egress-agent/` | 设备侧 Python 包：CONNECT 代理 + healthz + ONT 换 IP；`deploy/` 含 systemd 与 Windows schtasks 两条已验证路径 |
 | `egress-agent-android/` | 原生 Kotlin 版占位（wire 契约已冻结，P6） |
+| `egress-agent-esp32/` | ESP32 桶（移动 MiFi 上行）：PlatformIO 固件 + 网关侧反向隧道适配器 + MiFi 换 IP 工具；线协议契约冻结 v3 |
 | `deploy/ecs/` | Dockerfile / compose / env.example / Caddyfile 片段 |
 | `balancer/` | 旧栈边缘 LB（保留实现与测试，现役栈不部署） |
 

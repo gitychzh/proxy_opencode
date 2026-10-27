@@ -1,0 +1,14 @@
+[Unit]
+Description=ESP32 bucket adapter (egress reverse-tunnel to ESP32 on MiFi)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/zen-gw/src
+ExecStart=/usr/bin/python3 /opt/zen-gw/src/esp32_bucket_adapter.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
