@@ -6,6 +6,7 @@
 > - [`docs/OPERATIONS.md`](docs/OPERATIONS.md) = 当前部署状态、常用操作、排障与风险
 > - [`docs/ACCESS.md`](docs/ACCESS.md) = 入口、凭据名称与去向（不含值）
 > - [`docs/EGRESS_OBSERVABILITY.md`](docs/EGRESS_OBSERVABILITY.md) = 事件流与逐请求账本规格
+> - [`docs/SELF_OPTIMIZATION.md`](docs/SELF_OPTIMIZATION.md) = 自我优化闭环（诊断规则、执行分级、兜底保证）
 > - [`docs/engineering-constraints.md`](docs/engineering-constraints.md) = 工程化基线
 > - [`README.md`](README.md) = 对外说明；[`CHANGELOG.md`](CHANGELOG.md) = 版本历史
 

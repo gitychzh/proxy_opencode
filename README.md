@@ -70,6 +70,7 @@ cd egress-agent && pytest tests/ -q && ruff check egress_agent tests && mypy egr
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | 部署现状、常用操作、排障顺序、风险与待办 |
 | [`docs/ACCESS.md`](docs/ACCESS.md) | 入口、凭据名称与去向（不含值） |
 | [`docs/EGRESS_OBSERVABILITY.md`](docs/EGRESS_OBSERVABILITY.md) | 事件流现状 + 逐请求账本规格与统计示例 |
+| [`docs/SELF_OPTIMIZATION.md`](docs/SELF_OPTIMIZATION.md) | 自我优化闭环：观测契约、诊断规则、执行分级、proxy_ms 兜底保证 |
 | [`docs/engineering-constraints.md`](docs/engineering-constraints.md) | 工程化基线 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本历史 |
 

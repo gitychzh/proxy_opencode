@@ -31,7 +31,7 @@ import ipaddress
 import itertools
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
@@ -835,11 +835,3 @@ class EgressPool:
 
     def names(self) -> list[str]:
         return [state.spec.name for state in self._states]
-
-
-@dataclass
-class PoolStats:
-    """Aggregate counters for logs and healthz extensions."""
-
-    total_requests: int = 0
-    cordon_events: int = field(default=0)

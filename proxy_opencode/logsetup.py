@@ -64,6 +64,17 @@ FIELDS = (
     "ip_to",
     "elapsed_s",
     "cordon_reason",
+    # Backup-chain failover provenance (routes/_pipeline.fallback_log_fields):
+    # without these the per-request log line loses the only evidence that a
+    # turn was served by proxy_ms instead of the primary chain.
+    "fallback",
+    "fallback_model",
+    "fallback_reason",
+    # Client-write stall watchdog (relay_stream) and the failover prefetch
+    # debug line.
+    "blocked_s",
+    "bytes",
+    "timeout_s",
 )
 
 _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"

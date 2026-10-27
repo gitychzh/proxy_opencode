@@ -17,9 +17,7 @@ from ..registry import ModelRegistry
 from ..sse_mask import mask_json_model, mask_model_field
 from ..upstreams.failover import fallback_headers, fallback_note
 from ..upstreams.openai_http import StreamRelay
-from ..upstreams.opencode_serve import (
-    ServeCompletion,
-)
+from ..upstreams.opencode_serve import ServeCompletion
 from ..upstreams.opencode_serve import (
     completion_to_chat_response as _serve_response,
 )

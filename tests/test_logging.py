@@ -70,6 +70,33 @@ def test_key_lifecycle_fields_are_rendered():
     assert parsed["shape"] == "list"
 
 
+def test_fallback_provenance_fields_are_rendered():
+    """Regression: fallback/fallback_model/fallback_reason (per-request
+    backup-chain attribution) and blocked_s (client-write stall) were passed
+    as `extra` but missing from the whitelist, so every fallback-served turn
+    looked like a primary turn in the logs and the stall warning lost its
+    blocked duration."""
+    fmt = ExtraFormatter(fmt="%(message)s")
+    out = fmt.format(
+        _record(
+            fallback="proxy_ms",
+            fallback_model="ZhipuAI/GLM-5.3-Flash",
+            fallback_reason="upstream HTTP 429",
+        )
+    )
+    for fragment in (
+        "fallback=proxy_ms",
+        "fallback_model=ZhipuAI/GLM-5.3-Flash",
+        "fallback_reason=upstream HTTP 429",
+    ):
+        assert fragment in out
+    parsed = json.loads(
+        JsonFormatter().format(_record(fallback="proxy_ms", blocked_s=61.2))
+    )
+    assert parsed["fallback"] == "proxy_ms"
+    assert parsed["blocked_s"] == 61.2
+
+
 def test_setup_logging_env_json(monkeypatch):
     monkeypatch.setenv("LOG_FORMAT", "json")
     setup_logging()

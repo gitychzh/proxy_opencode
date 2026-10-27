@@ -3,6 +3,41 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.7.1] - 2026-10-27
+
+### Added
+
+- **feat(insights): 日志驱动的自我优化闭环** — 新增
+  `proxy_opencode/insights.py`（纯函数：解析 / 指标 / 诊断 / 渲染）+
+  `scripts/self_optimize.py`（CLI，退出码 1 = 有 critical）+ 设计文档
+  `docs/SELF_OPTIMIZATION.md`。把网关自身三源遥测（JSONL 事件账本、
+  请求/流日志记录、`/admin/egresses` 快照）折成 11 条确定性诊断规则
+  （兜底链自身故障 / 主链抖动 / 截断率 / 静默超时 / 首块期限 / 换 IP 未落地 /
+  模型漂移 / 账本未开…），每条带 `evidence` 与按代价排序的 `action`；
+  429 归因一律遵守「传输 → prompt → session → 才 IP 配额」红线，不诱导换 IP。
+  相位口径（`latency_ms − duration_ms`）按 `request_id` 跨两条日志行配对，
+  单行相减会永远缺字段（本模块首版即踩此坑，已改并加测）。
+  测试 `tests/test_insights.py`（20 条，含 CLI 退出码与文本/JSON 双格式）。
+
+### Fixed
+
+- **fix(observability): 日志字段白名单补齐兜底归因与写停滞字段** —
+  `logsetup.FIELDS` 缺 `fallback`/`fallback_model`/`fallback_reason`
+  （`routes/_pipeline.fallback_log_fields()` 每个兜底请求都会携带）与
+  `blocked_s`（client-write-stall 警告）、`bytes`/`timeout_s`（failover 首块
+  预取 debug 行），两个 formatter 把它们静默丢弃——兜底服务的轮次在日志里
+  看起来与主链完全一样，写停滞警告丢失阻塞时长（该坑曾咬过 key_id/ttl_hours，
+  见 `test_key_lifecycle_fields_are_rendered` 同类回归）。
+  回归测试 `test_fallback_provenance_fields_are_rendered`。
+
+### Changed
+
+- **chore(cleanup): 清理死代码与多余换行** — 删除 `egress/pool.py` 末尾全仓库
+  零引用的 `PoolStats` dataclass（`field` 导入一并移除）；`routes/chat.py` 里
+  单名 `ServeCompletion` 的 import 去掉无意义的括号换行，3 行变 1 行。
+  （同文件里那段同名模块的别名 import 被 ruff/isort 的 `combine-as-imports`
+  规则要求单独成段，属规范输出而非冗余，未合并。）
+
 ## [0.7.0] - 2026-10-27
 
 > 本节覆盖 v0.5.0 以来 0.6.x→0.7.x 的全部累计变更（107 commits，2026-10-13 →
