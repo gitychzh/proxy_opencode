@@ -3,6 +3,28 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.7.14] - 2026-10-29
+
+### Fixed
+
+- **额度刚耗尽的那一个请求仍然走完四个桶** — 0.7.12 的黑名单只在请求**开始**
+  时判定，重启后的进程 cordon 状态是空的，于是第一个请求照样逐个桶试（实测
+  7.14s 才拿到 fallback 的 16 token 回答）。现在 429 分支在每次桶被判配额
+  耗尽后立即复查 `quota_blackout_s()`，一旦全池见底就停手并带上重置期限，
+  首个请求也走"秒回 + 熔断撑到重置"的路径。证据：
+  `test_chat_stops_retrying_once_a_429_tips_the_pool_into_blackout`。
+
+## [0.7.14] - 2026-10-29
+
+### Fixed
+
+- **额度刚耗尽的那一个请求仍然走完四个桶** — 0.7.12 的黑名单只在请求**开始**
+  时判定，重启后的进程 cordon 状态是空的，于是第一个请求照样逐个桶试（实测
+  7.14s 才拿到 fallback 的 16 token 回答）。现在 429 分支在每次桶被判配额
+  耗尽后立即复查 `quota_blackout_s()`，一旦全池见底就停手并带上重置期限，
+  首个请求也走"秒回 + 熔断撑到重置"的路径。证据：
+  `test_chat_stops_retrying_once_a_429_tips_the_pool_into_blackout`。
+
 ## [0.7.13] - 2026-10-29
 
 ### Fixed

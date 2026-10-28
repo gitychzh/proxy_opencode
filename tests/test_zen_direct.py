@@ -1620,3 +1620,45 @@ async def test_chat_answers_quota_blackout_without_touching_upstream() -> None:
     assert result["__status__"] == 429
     assert result["__quota_blackout_s__"] == 20893.0
     assert result["content"]["error"]["code"] == "free_quota_exhausted"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_stops_retrying_once_a_429_tips_the_pool_into_blackout() -> None:
+    """The first request of an exhausted day must stop at the tipping 429.
+
+    Before this, a fresh process (cordon state empty) walked every bucket —
+    four upstream round trips, 7.14s measured — before the fallback chain
+    could answer a 16-token prompt.
+    """
+
+    class _TippingPool(_StubPool):
+        @property
+        def size(self) -> int:
+            return 4  # four benchable buckets in this scenario
+
+        def __init__(self, client: httpx.AsyncClient) -> None:
+            super().__init__(client)
+            self.probes = 0
+
+        def quota_blackout_s(self) -> float:
+            self.probes += 1
+            # 0 while the pre-loop check runs, then "everything is benched".
+            return 0.0 if self.probes == 1 else 20893.0
+
+    route = respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=429,
+        headers={"retry-after": "20893"},
+        json={"error": {"type": "FreeUsageLimitError", "message": "limit"}},
+    )
+    client = _leased_client()
+    pool = _TippingPool(client)
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+
+    assert route.call_count == 1, "must not walk the rest of the dead pool"
+    assert result["__status__"] == 429
+    assert result["__quota_blackout_s__"] == 20893.0

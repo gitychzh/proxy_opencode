@@ -225,6 +225,19 @@ class ZenDirectAdapter:
             status = result.get("__status__")
             if status == 429:
                 attempts -= 1
+                # The bucket that just answered 429 is already cordoned. If
+                # that left the whole pool benched on quota verdicts, the
+                # remaining attempts are guaranteed to fail too: report the
+                # blackout here so the *first* request of an exhausted day
+                # also stops early and the fallback chain gets the reset
+                # deadline instead of a flat hold.
+                blackout = float(blackout_probe()) if callable(blackout_probe) else 0.0
+                if blackout > 0:
+                    logger.warning(
+                        "egress pool in quota blackout after 429; stopping retries",
+                        extra={"blackout_s": round(blackout, 1)},
+                    )
+                    return quota_exhausted_result(blackout)
                 if attempts <= 0:
                     return result
                 _log_failover(kind="http_429", remaining=attempts)
