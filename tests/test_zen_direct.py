@@ -1662,3 +1662,39 @@ async def test_chat_stops_retrying_once_a_429_tips_the_pool_into_blackout() -> N
     assert route.call_count == 1, "must not walk the rest of the dead pool"
     assert result["__status__"] == 429
     assert result["__quota_blackout_s__"] == 20893.0
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_final_429_retry_after_becomes_the_blackout_deadline() -> None:
+    """With 3 attempts for 4 buckets the pool never looks fully benched.
+
+    The last 429 still carries the definitive evidence — Retry-After beyond the
+    throttle boundary — so the fallback chain gets the reset deadline instead
+    of the flat hold, on the very first request of an exhausted day.
+    """
+
+    class _NeverBlackoutPool(_StubPool):
+        @property
+        def size(self) -> int:
+            return 4
+
+        def quota_blackout_s(self) -> float:
+            return 0.0
+
+    route = respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=429,
+        headers={"retry-after": "20893"},
+        json={"error": {"type": "FreeUsageLimitError", "message": "limit"}},
+    )
+    client = _leased_client()
+    pool = _NeverBlackoutPool(client)
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+
+    assert route.call_count == 3, "attempt budget still caps the walk"
+    assert result["__status__"] == 429
+    assert result["__quota_blackout_s__"] == 20893.0

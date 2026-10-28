@@ -31,6 +31,7 @@ from urllib.parse import quote_plus, urlparse
 import httpx
 
 from ...config import Settings
+from ...egress.models import HARD_QUOTA_RETRY_AFTER_S
 from ...egress.pool import EgressPool, Lease
 from ...model_profile import profile as model_profile
 from ..openai_http import ResponseLike, StreamRelay, _raw_relay_body
@@ -239,6 +240,9 @@ class ZenDirectAdapter:
                     )
                     return quota_exhausted_result(blackout)
                 if attempts <= 0:
+                    hinted = result.get("__quota_blackout_s__")
+                    if isinstance(hinted, (int, float)) and hinted > 0:
+                        return quota_exhausted_result(float(hinted))
                     return result
                 _log_failover(kind="http_429", remaining=attempts)
                 lease = await _acquire()
@@ -406,11 +410,23 @@ class ZenDirectAdapter:
         """
 
         if status == 429:
+            hard_after = retry_after_seconds(headers)
+            if (
+                hard_after is not None
+                and hard_after > HARD_QUOTA_RETRY_AFTER_S
+                and isinstance(result, dict)
+            ):
+                # The definitive per-response evidence of a daily-quota
+                # verdict: a Retry-After beyond the throttle boundary. Stamp
+                # it on the relay so the caller can hand the fallback chain a
+                # real deadline even when the attempt budget ran out before
+                # every bucket had been tried (3 attempts, 4 buckets).
+                result["__quota_blackout_s__"] = float(hard_after)
             await self._release(
                 lease,
                 ok=False,
                 kind="http_429",
-                retry_after_s=retry_after_seconds(headers),
+                retry_after_s=hard_after,
             )
         elif status >= 500:
             await self._release(lease, ok=False, kind=f"http_{status}")

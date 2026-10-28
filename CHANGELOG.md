@@ -3,27 +3,29 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.7.15] - 2026-10-29
+
+### Fixed
+
+- **首个请求仍拿不到重置期限（0.7.14 的漏网）** — `FAILOVER_MAX_ATTEMPTS=3`
+  而池里有 4 个桶，所以「每个桶都被 bench」这个条件在额度刚耗尽时**永远不
+  成立**，`quota_blackout_s()` 恒为 0，最后仍退化成固定 120s 熔断（实测首个
+  请求 10.9s，0.7.14 上复现）。改为直接采信响应证据：`_release_for_status`
+  把 `Retry-After > HARD_QUOTA_RETRY_AFTER_S(3600s)` 的 429 盖上
+  `__quota_blackout_s__`，尝试预算耗尽时用它作为熔断期限。
+  证据：`test_final_429_retry_after_becomes_the_blackout_deadline`。
+
 ## [0.7.14] - 2026-10-29
 
 ### Fixed
 
 - **额度刚耗尽的那一个请求仍然走完四个桶** — 0.7.12 的黑名单只在请求**开始**
   时判定，重启后的进程 cordon 状态是空的，于是第一个请求照样逐个桶试（实测
-  7.14s 才拿到 fallback 的 16 token 回答）。现在 429 分支在每次桶被判配额
-  耗尽后立即复查 `quota_blackout_s()`，一旦全池见底就停手并带上重置期限，
-  首个请求也走"秒回 + 熔断撑到重置"的路径。证据：
+  7.14s 才拿到 fallback 的 16 token 回答）。429 分支现在每次桶被判配额耗尽
+  后立即复查 `quota_blackout_s()`，全池见底就停手并带上重置期限，首个请求
+  也走「秒回 + 熔断撑到重置」的路径。证据：
   `test_chat_stops_retrying_once_a_429_tips_the_pool_into_blackout`。
-
-## [0.7.14] - 2026-10-29
-
-### Fixed
-
-- **额度刚耗尽的那一个请求仍然走完四个桶** — 0.7.12 的黑名单只在请求**开始**
-  时判定，重启后的进程 cordon 状态是空的，于是第一个请求照样逐个桶试（实测
-  7.14s 才拿到 fallback 的 16 token 回答）。现在 429 分支在每次桶被判配额
-  耗尽后立即复查 `quota_blackout_s()`，一旦全池见底就停手并带上重置期限，
-  首个请求也走"秒回 + 熔断撑到重置"的路径。证据：
-  `test_chat_stops_retrying_once_a_429_tips_the_pool_into_blackout`。
+  （该判断在 4 桶 3 次尝试下不成立，0.7.15 用 Retry-After 证据补齐。）
 
 ## [0.7.13] - 2026-10-29
 
