@@ -450,6 +450,17 @@ class EgressCounters:
                 "dropped stale egress counter windows (post-rollover restart)",
                 extra={"egresses": stale},
             )
+        # Buckets that are no longer configured (a retired egress) must not
+        # linger in the snapshot or the admin view forever — 2026-10-28: the
+        # retired `esp32-bucket`/`ecs` rows survived every redeploy.
+        retired = [n for n in self._records if n not in self.names]
+        for name in retired:
+            del self._records[name]
+        if retired:
+            logger.info(
+                "dropped counter rows for buckets no longer configured",
+                extra={"egresses": retired},
+            )
 
     def save(self) -> None:
         self._save()

@@ -149,6 +149,23 @@ def test_token_only_bucket_still_rotates() -> None:
     assert rotator.rotatable("a") is True
 
 
+def test_snapshot_rows_of_retired_buckets_are_dropped_on_load(tmp_path) -> None:
+    """A bucket removed from the config must not linger in the snapshot.
+
+    2026-10-28: the retired `esp32-bucket` (dead probe target) and the `ecs`
+    row survived every redeploy and kept showing up in the admin view.
+    """
+
+    path = str(tmp_path / "egress_counts.json")
+    now = time.time()
+    seeded = EgressCounters({"a": 3, "retired": 3}, snapshot_path=path)
+    seeded.record("a", tokens=10, now=now)
+    seeded.record("retired", tokens=10, now=now)
+    reloaded = EgressCounters({"a": 3}, snapshot_path=path)
+    assert "retired" not in reloaded.snapshot(now=now)
+    assert reloaded.counts("a", now=now).count == 1
+
+
 def test_daily_rollover_at_0800_resets_every_counter() -> None:
     day1 = ts_cst(14, 9, 0)
     day2 = ts_cst(15, 9, 0)
