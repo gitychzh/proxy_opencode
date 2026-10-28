@@ -26,6 +26,11 @@ MIFI_PWD = os.environ.get("MIFI_ADMIN_PWD", "admin").strip()
 MIFI_REALM = "Highwmg"
 MIFI_REBOOT_PATH = "/xml_action.cgi?method=get&module=duster&file=reset"
 MIFI_TIMEOUT_S = 25.0
+# 只认这条 WiFi 上报的出口 IP。设备换 IP 时会先掉到备用网上，那台网的出口
+# 是家里的宽带地址——如果照报，网关会把"家里宽带 IP"记成这个桶的新出口，
+# 轮换审计就成了假证据（2026-10-29 实测账本里真出现过一条）。所以只要
+# ssid 不是它，就报"IP 未知"，让轮换继续等设备回到 MiFi 网再确认。
+EXPECT_SSID = os.environ.get("ESP32_EXPECT_SSID", "").strip()
 
 # relay 的空闲上限。必须高于网关自己的容忍度（ZEN_TTFB_S=60 首字节、
 # STREAM_STALL_S=60 流内静默），否则适配器会先于网关掐断一条本来健康的隧道。
@@ -353,11 +358,13 @@ def http_handler(client):
         except ValueError:
             return
         if method == "GET" and target.rstrip("/") in ("/healthz", "/health"):
+            wrong_network = bool(EXPECT_SSID) and esp_ssid != EXPECT_SSID
             body = json.dumps({"egress": NAME, "ready": esp is not None,
-                               "egress_ip": esp_peer,
+                               "egress_ip": "" if wrong_network else esp_peer,
                                "egress_ip_source": "control-peer",
-                               "egress_ip_at": esp_peer_at,
+                               "egress_ip_at": "" if wrong_network else esp_peer_at,
                                "ssid": esp_ssid, "gateway": esp_gw,
+                               "wrong_network": wrong_network,
                                "egress_probe_ok": esp is not None, "tunnels_active": stats["active"],
                                "tunnels_total": stats["tunnels"], "uptime_s": int(time.time()-START)}).encode()
             client.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
