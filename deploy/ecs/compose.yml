@@ -1,21 +1,36 @@
-# 0.7.x 新栈：ECS 网关容器。
+# 0.8.x 双容器：**edge（公网 10002，稳定）** + **zen-gw（网关本体，可随时重建）**。
 #
 # 用法（在 deploy/ecs/ 下）：
 #   cp env.example .env      # 填入真实凭据（.env 已 gitignore，绝不提交）
 #   docker compose up -d --build
 #
-# 宿主机直接发布 **10002**：容器即客户端入口，明文 HTTP + API key 鉴权。
+# 拓扑（2026-10-29 框架重构）：
+#
+#   客户端 ──10002──> edge ──primary──> zen-gw:10002 ──> Zen 上游（经设备出口池）
+#                        └──fallback──> 172.17.0.1:10003 (proxy_ms, ModelScope)
+#                                                        deepseek-v4.1-flash-1017
+#
+# 为什么拆两个容器：上游的形状门（内置工具集 / prompt 模板 / 日期）改一次就要重建
+# 一次网关，而 10002 曾经既是网关又是唯一入口 —— 重建期间用户直接断连。现在 10002
+# 归 edge 所有，edge 只在**首字节之前**做一次"主 / 备"选择：
+#
+#   * 只重建 zen-gw 时，edge 探针 2s 内发现 primary 不在，请求直接走 proxy_ms，
+#     用户看到的是"慢一点"，而不是连接错误；
+#   * edge 自身几乎不需要改（策略全在环境变量里），所以它不会被频繁重建。
+#
+# 两个服务共用同一个镜像（zen-gw:0.8），只是 command 不同 —— 一次构建、两处运行，
+# 不会出现"edge 跑旧代码"的版本漂移。
 #
 # 历史（勿删，保真）：0.7.x 早期是「caddy 监听 :10002 (自签/LE TLS) → 反代
-# 127.0.0.1:10010」，容器只绑 loopback。2026-10-28 起取消该链路——客户端装
-# 证书的代价远大于收益（用户明确否决证书方案），改为网关直接监听公网 10002。
-# 若将来恢复 TLS，则需要重新让出 10002 给 caddy、把这里改回 loopback。
+# 127.0.0.1:10010」，容器只绑 loopback；2026-10-28 取消该链路（客户端装证书的代价
+# 远大于收益，用户明确否决），改为网关直接发布公网 10002；0.8.0 起 10002 改由 edge
+# 发布，zen-gw 退回 compose 网络内部。
 services:
   zen-gw:
     build:
       context: ../..
       dockerfile: deploy/ecs/Dockerfile
-    image: zen-gw:0.7
+    image: zen-gw:0.8
     container_name: zen-gw
     restart: unless-stopped
     env_file:
@@ -25,13 +40,51 @@ services:
       PORT: "10002"
       # 动态 key 库落在挂载卷里（容器只读根文件系统）。
       KEY_STORE_PATH: /data/keys.json
-    ports:
-      # 公网直连：网关自己监听 10002，客户端只需 API key，无需证书/反代。
-      # 2026-10-28 由 127.0.0.1:10010:10002 改为 10002:10002（用户明确要求去掉证书链路）。
-      - "10002:10002"
+    # 不再发布端口：10002 归 edge，网关只在 compose 网络内被 edge 调用。
+    expose:
+      - "10002"
     volumes:
       - ./data:/data
     # 只读根文件系统 + 可写 /tmp 与 /data：缩小攻击面，重启不丢 key 库。
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "8m"
+        max-file: "3"
+
+  edge:
+    image: zen-gw:0.8
+    container_name: zen-gw-edge
+    restart: unless-stopped
+    depends_on:
+      - zen-gw
+    command: ["python", "-m", "proxy_opencode.edge"]
+    environment:
+      EDGE_HOST: "0.0.0.0"
+      EDGE_PORT: "10002"
+      EDGE_PRIMARY_BASE_URL: http://zen-gw:10002
+      # 宿主机的 proxy_ms（ModelScope 中继）：172.17.0.1 是 docker0，宿主机自己的
+      # 地址，容器内可直接访问。没有它等于没有兜底。
+      EDGE_FALLBACK_BASE_URL: http://172.17.0.1:10003
+      EDGE_FALLBACK_API_KEY: ${ZEN_FALLBACK_API_KEY}
+      EDGE_FALLBACK_MODEL: deepseek-ai/DeepSeek-V4.1-Flash-1017
+      # 只有"网关没能力服务"才算失败；4xx 是答案，不重试。
+      EDGE_FAILOVER_STATUSES: "502,503,504"
+      EDGE_FAILOVER_ON_QUOTA: "true"
+      EDGE_PROBE_INTERVAL_S: "2"
+      # 留空 = 关闭 /edge/* 管理接口（只留 /healthz）。设置后可用
+      #   curl -H "X-Admin-Key: <key>" -X POST -d '{"mode":"fallback"}' \
+      #        http://127.0.0.1:10002/edge/mode
+      # 在重建前手动把流量切到备用，重建完再切回 auto。
+      EDGE_ADMIN_KEY: ${EDGE_ADMIN_KEY:-}
+    ports:
+      # 唯一公网入口，客户端只需 API key，不需要证书。
+      - "10002:10002"
     read_only: true
     tmpfs:
       - /tmp

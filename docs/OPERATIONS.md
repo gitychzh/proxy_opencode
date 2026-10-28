@@ -7,14 +7,21 @@
 > [`AGENTS.md`](../AGENTS.md) 硬约束 1；模型参数看
 > [`MODEL_PROFILE.md`](MODEL_PROFILE.md)；凭据去向看 [`ACCESS.md`](ACCESS.md)。
 
-## 1. 现状（0.7.x 单栈）
+## 1. 现状（0.8.x 双容器）
 
 ```
 客户端 → http://115.29.231.25:10002/v1    (明文直连 + API key；唯一入口)
-      → 容器 zen-gw:10002（直接监听公网，无 caddy、无证书）
+      → 容器 zen-gw-edge:10002             (只透传 + 首字节前选路)
+          ├ primary  → zen-gw:10002        (网关本体，compose 网络内)
+          └ fallback → 172.17.0.1:10003    (proxy_ms / ModelScope
+                                            deepseek-ai/DeepSeek-V4.1-Flash-1017)
       → egress 池按桶 CONNECT 到设备 agent（bun 承担上游 TLS/H2 一跳）
       → opencode.ai/zen/v1
 ```
+
+> 2026-10-29 框架重构：网关必须频繁改（上游形状门），入口不能跟着重建。于是把
+> 公网 `10002` 交给 `zen-gw-edge`，网关退到 compose 网络内部。重建网关时 edge 不
+> 动，用户看到的是"切到备用模型"，不是连接错误。详见 §2.0。
 
 > 2026-10-28 变更：取消 caddy TLS 中转，容器直接发布 `10002`。理由——客户端
 > 装证书的代价大于收益（用户明确否决）；域名链路实测 23–68s，不可用。
@@ -28,11 +35,58 @@
 
 ## 2. 部署与桶状态
 
+### 2.0 双容器与"不中断重建"（0.8.0 起）
+
+| 容器 | 端口 | 职责 | 会不会被频繁重建 |
+|---|---|---|---|
+| `zen-gw-edge` | 宿主 `10002` → 容器 `10002` | 公网唯一入口：透传 + 探针 + 首字节前改投备用 | 否（策略全在环境变量） |
+| `zen-gw` | `expose 10002`（compose 网络内） | 网关本体：协议转换、出口池、进程内 fallback | 是（每次改上游形状都要） |
+
+edge 的降级判据（全部在**响应首字节发给客户端之前**决定，所以切换对客户端不可见）：
+
+| 触发 | 行为 |
+|---|---|
+| 探针连续失败（`GET zen-gw:10002/healthz` 每 2s，超时 2s） | 直接走备用，不再打主链 |
+| 连接被拒 / 超时（重建中） | 同一请求内改投备用 |
+| `502/503/504`（`EDGE_FAILOVER_STATUSES` 可改） | 同一请求内改投备用 |
+| `429` 且 `Retry-After > 1h` 或 `code=free_quota_exhausted` | 改投备用（主链要等窗口重置） |
+| `400/401/404/422` 等 4xx | **不**降级：这是答案不是故障 |
+
+备用请求会做三件事，保证客户端无感：换 model 为
+`EDGE_FALLBACK_MODEL`、换 `Authorization` 为 `EDGE_FALLBACK_API_KEY`、把响应里的
+`model` 改回客户端请求的那个。响应头 `X-Edge-Route: primary|fallback` 与
+`X-Edge-Fallback-Reason` 是唯一可见差异。
+
+只有 `/v1/chat/completions` 可降级（备用中继只说这一种协议），`/v1/responses`、
+`/v1/messages` 在主链挂掉时保持原错误，不会被静默换成另一种格式。
+
+**日常只重建网关（推荐，用户仅看到切到备用模型）**：
+
+```bash
+cd /opt/zen-gw/src && docker build -q -f deploy/ecs/Dockerfile -t zen-gw:0.8 .
+cd deploy/ecs && docker compose up -d --no-build zen-gw     # 只动这一个容器
+```
+
+edge 会在 2s 内把流量切到 `proxy_ms`，重建完探针恢复后自动切回。
+
+**需要零感知（连模型 ID 都不换）时**：重建前手动 drain，完了切回 auto：
+
+```bash
+K=$(grep '^EDGE_ADMIN_KEY=' deploy/ecs/.env | cut -d= -f2-)
+curl -s -H "X-Admin-Key: $K" -X POST -d '{"mode":"fallback"}' http://127.0.0.1:10002/edge/mode
+# ... 重建 zen-gw ...
+curl -s -H "X-Admin-Key: $K" -X POST -d '{"mode":"auto"}'     http://127.0.0.1:10002/edge/mode
+curl -s -H "X-Admin-Key: $K" http://127.0.0.1:10002/edge/status   # 看 primary.alive
+```
+
+**验收**：`curl -s http://127.0.0.1:10002/healthz` 必须同时有 `role: edge`、
+`primary.alive: true`、`fallback.configured: true`；三个缺一就说明 edge 的 env 没接对。
+
+
 `/opt/zen-gw/src` = **仓库 HEAD 的 `git archive` 快照**，不再是手工维护的
 「deploy 快照」。2026-10-28 已彻底重建：旧快照里的 `proxy_opencode.bak-2026*`、
 `*.egg-info`、`.pytest_cache`/`.mypy_cache`/`.ruff_cache`、`runtime-logs`、
-`.e2e_tmp`、`src-backup-*.tgz` 全部清除（2.8M，只有源码）。宿主 `10002 → 容器 10002`（明文直连；2026-10-28 前是 caddy `:10002` 反代
-loopback `10010`）。`/data` 属主必须
+`.e2e_tmp`、`src-backup-*.tgz` 全部清除（2.8M，只有源码）。宿主 `10002 → edge 容器 10002`（明文直连；0.8.0 起 edge 独占该端口）。`/data` 属主必须
 可写（uid 10002），否则 eventlog 静默禁用。
 
 **重建流程**（改代码后照抄，端口/密钥/别名全程不动）：
@@ -51,7 +105,7 @@ ssh -p 222 root@115.29.231.25 'set -e
   cp -a /tmp/keep.data /opt/zen-gw/src/deploy/ecs/data
   chmod 600 /opt/zen-gw/src/deploy/ecs/.env
   chown -R 10002:10002 /opt/zen-gw/src/deploy/ecs/data
-  cd /opt/zen-gw/src && docker build -f deploy/ecs/Dockerfile -t zen-gw:0.7 -t zen-gw:<ver> .
+  cd /opt/zen-gw/src && docker build -f deploy/ecs/Dockerfile -t zen-gw:0.8 -t zen-gw:<ver> .
   cd deploy/ecs && docker compose -f compose.yml up -d --no-build
   rm -f /root/zen-src.tar.gz'
 
@@ -61,7 +115,7 @@ python scripts/e2e_workbuddy.py --base https://115.29.231.25:10002 --key <GW_KEY
 ```
 
 硬规矩：①`.env` 与 `data/` 是唯二不可再生项，先备份再动手；②镜像只保留
-`zen-gw:0.7`（compose 引用）与当前版本 tag，回滚靠 git + 重建（约 40s），不囤
+`zen-gw:0.8`（compose 引用）与当前版本 tag，回滚靠 git + 重建（约 40s），不囤
 rollback 镜像；③上传包用完即删，部署树里不许出现 `__pycache__`/缓存/备份。
 
 | 桶 | agent | 最近出口 IP | 备注 |

@@ -48,7 +48,9 @@ COPY proxy_opencode/zen_bun/forward.ts /app/zen_bun/forward.ts
 
 USER gw
 
-# 容器内监听全部接口；compose 只把端口发布到宿主机 loopback，由 caddy 反代。
+# 容器内监听全部接口。0.8.0 起这个端口只在 compose 网络内被 zen-gw-edge 调用；
+# 公网 10002 由 edge 发布。同一个镜像两个入口：默认 CMD = 网关，
+# `python -m proxy_opencode.edge` = 透传层。
 EXPOSE 10002
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

@@ -11,17 +11,22 @@
 
 ```
 hermes / codex / 任意 OpenAI 兼容客户端
-   │ http://115.29.231.25:10002/v1    (明文 + API key；唯一入口，2026-10-28 起)
+   │ http://115.29.231.25:10002/v1    (明文 + API key；唯一入口)
    │ https://llm.223722.xyz:443/v1    (域名入口；2026-10-25 实测 404，
    │                                   见 §10「域名入口现状」)
    ▼
-ECS ┌───────────────────────────────────────────────────────────┐
-    │ docker zen-gw  :10002 （直接监听公网，无 caddy、无证书）      │
-    │ docker zen-gw（本 repo 唯一部署点）                         │
-    │  ├ routes/     chat / models / responses / anthropic /admin │
-    │  ├ upstreams/  zen_direct、bun 传输、failover（备用链路）    │
-    │  └ egress/     pool、counters、rotate、catalog、eventlog    │
-    └───────┬───────────────┬───────────────┬────────────┬──────┘
+ECS ┌───────────────────────────────────────────────────────────────┐
+    │ docker zen-gw-edge  :10002（公网唯一入口；只做透传 + 路由选择） │
+    │   ├ 探针 GET http://zen-gw:10002/healthz 每 2s                  │
+    │   ├ primary  → http://zen-gw:10002            （正常：全透传）  │
+    │   └ fallback → http://172.17.0.1:10003        （proxy_ms 兜底） │
+    │                        │                          ▲            │
+    │ docker zen-gw（网关本体；compose 网络内部，不发布端口）          │
+    │  ├ routes/     chat / models / responses / anthropic / admin    │
+    │  ├ upstreams/  zen_direct、bun 传输、failover（进程内备用链路） │
+    │  ├ egress/     pool、counters、rotate、catalog、eventlog        │
+    │  └ edge/       公网入口那层（与 zen-gw 同镜像，command 不同）    │
+    └───────┬───────────────┬───────────────┬────────────┬──────────┘
        Tailscale 100.x（+ basic auth）          loopback │
       ┌─────┴─────┐   ┌─────┴──────┐   ┌────┴─────┐  ┌─┴──────────────┐
       ▼           ▼   ▼            ▼   ▼          ▼  ▼ esp32 适配器     │
@@ -30,8 +35,11 @@ ECS ┌────────────────────────�
       └─────────────┴───────────────┴──────────────┴──▶ opencode.ai/zen/v1
 ```
 
-四跳：客户端 → 容器:10002 → 设备 agent 的 CONNECT 隧道 → Zen。明文入口
-（2026-10-28 起）把 caddy/TLS 那一跳去掉：客户端只需 API key，不装证书。
+五跳：客户端 → **edge（公网 10002）** → 网关容器 → 设备 agent 的 CONNECT 隧道
+→ Zen。0.8.0 把入口和网关拆成两个容器：上游的形状门（内置工具集 / prompt 模板 /
+日期）让网关必须频繁改动，而入口一旦跟着重建就等于把用户踢下线。edge 只做两件事
+——转发、以及在**首字节到达客户端之前**改投 `proxy_ms`，所以重建网关对用户是
+"慢一点"而不是"连接错误"。明文入口（2026-10-28 起）让客户端只需 API key，不装证书。
 出口 IP 是各设备自己的公网 IP，也就是免费层计量的维度。上游 TLS/HTTP2 那一跳
 由 `zen_bun/forward.ts` 一次性子进程承担（传输栈门），每次上游试探以当前租得桶
 的 agent 作 HTTPS 代理出站（Basic 凭据即时拼装，不落日志/spec）；池选择、
@@ -43,7 +51,8 @@ cordon、换 IP、failover 语义与传输无关。
 |---|---|---|
 | **10001** | 设备侧 egress-agent | CONNECT + `/healthz` + `/rotate` 同端口（owin10-mobile / cc9） |
 | **10002（设备）** | egress-agent 第二实例 | 同设备第二上行（owin10-telecom） |
-| **10002（ECS）** | 容器直接发布 | 客户端入口，明文 HTTP + API key（2026-10-28 起；此前是 caddy TLS 反代 `127.0.0.1:10010`） |
+| **10002（ECS）** | `zen-gw-edge` 容器发布 | 客户端入口，明文 HTTP + API key（0.8.0 起由 edge 独占；此前是网关本身直接发布 → 0.7.x 早期是 caddy TLS 反代 `127.0.0.1:10010`） |
+| **10002（compose 内）** | `zen-gw` 容器 expose | 网关本体，只在 compose 网络内被 edge 调用，不发布到宿主 |
 | **10010** | 容器宿主映射 | `since-retired`（2026-10-28）：旧 loopback 运维入口，随 caddy 链路一并下线 |
 | 10003 | proxy_ms（ECS 宿主） | 备用链路网关，见 §7 |
 | 20001 / 20002 | proxy_nv（ECS 宿主，caddy `:20002`） | 与本栈无关，不动 |
@@ -56,7 +65,7 @@ cordon、换 IP、failover 语义与传输无关。
 
 | 路径 | 内容 |
 |---|---|
-| `proxy_opencode/` | 网关：`routes/`（薄路由）、`formats/`（协议转换）、`upstreams/`（zen_direct / bun 传输 / failover）、`egress/`（pool / counters / rotate / catalog / eventlog / updater） |
+| `proxy_opencode/` | 网关：`routes/`（薄路由）、`formats/`（协议转换）、`upstreams/`（zen_direct / bun 传输 / failover）、`egress/`（pool / counters / rotate / catalog / eventlog / updater）、`edge/`（公网 10002 透传层：policy / app / probe） |
 | `egress-agent/` | 设备侧 Python 包：CONNECT 代理 + healthz + ONT 换 IP；`deploy/` 含 systemd 与 Windows schtasks 两条已验证路径 |
 | `egress-agent-android/` | 原生 Kotlin 版占位（wire 契约已冻结，P6） |
 | `egress-agent-esp32/` | ESP32 桶（移动 MiFi 上行）：PlatformIO 固件 + 网关侧反向隧道适配器 + MiFi 换 IP 工具；线协议契约 v4（HELLO 共享密钥鉴权） |

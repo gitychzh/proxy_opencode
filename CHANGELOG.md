@@ -3,6 +3,47 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.8.0] - 2026-10-29
+
+### Changed — 入口与网关拆成两个容器（框架重构）
+
+网关这一侧现在必须跟着上游的形状门频繁改动（内置工具集、prompt 模板、日期），
+而 `10002` 过去既是网关又是唯一入口 —— 重建一次就把用户踢下线一次。0.8.0 把两
+件事分开：
+
+```
+客户端 ──10002──> zen-gw-edge ──primary──> zen-gw:10002 ──> Zen 上游
+                        └───────fallback──> 172.17.0.1:10003 (proxy_ms,
+                                            deepseek-ai/DeepSeek-V4.1-Flash-1017)
+```
+
+- 新增 `proxy_opencode/edge/`：**纯 ASGI 透传**（不算业务、不校验请求体），只在
+  响应首字节发给客户端**之前**做一次选路，所以切换不会截断 SSE。
+  - 降级判据：探针失败（2s 周期）、连接被拒/超时、`502/503/504`、以及
+    `Retry-After > 1h` 或 `code=free_quota_exhausted` 的 429。
+  - `400/401/404/422` 等 4xx **不**降级：那是答案不是故障，掩盖它只会让排障更难。
+  - 备用请求改写 model（`EDGE_FALLBACK_MODEL`）与 `Authorization`
+    （`EDGE_FALLBACK_API_KEY`），并把响应里的 model 改回客户端请求的 id；客户端
+    能看到的差异只有响应头 `X-Edge-Route` / `X-Edge-Fallback-Reason`。
+  - 只有 `/v1/chat/completions` 可降级：备用中继只说这一种协议，另外两种协议
+    宁可保留原错误，也不静默换成另一种格式。
+  - `/edge/status`、`/edge/mode`（需 `EDGE_ADMIN_KEY`）支持重建前手动 drain。
+- `compose.yml`：`zen-gw` 不再发布端口（`expose 10002`，只在 compose 网络内），
+  由 `edge` 发布宿主 `10002`；两个服务共用同一镜像（`zen-gw:0.8`，command 不同），
+  一次构建、两处运行，不存在版本漂移。镜像别名随版本从 `zen-gw:0.7` 改为
+  `zen-gw:0.8`。
+- 生产 `.env` 的 `ZEN_FALLBACK_DEFAULT_MODEL` 由 GLM 改为
+  `deepseek-ai/DeepSeek-V4.1-Flash-1017`，进程内备用链路与 edge 的备用链路指向
+  同一个模型，避免"主链挂掉后到底给了哪个模型"两套答案。
+
+### 验收
+
+- `GET /healthz` 同时返回 `role: edge`、`primary.alive`、`fallback.configured`。
+- 停掉 `zen-gw` 后同一请求仍 200，响应头 `X-Edge-Route: fallback`，模型 id 仍是
+  客户端请求的那个。
+- 16 个新测试覆盖透传、4xx 不降级、连接失败降级、配额 429 降级、非 chat 路径
+  不降级、admin 开关。
+
 ## [0.7.17] - 2026-10-29
 
 ### Fixed — 真因：body 门，不是额度
