@@ -30,6 +30,11 @@ def main() -> int:
         logger.error("edge: bad configuration: %s", exc)
         return 2
 
+    # The 2s health probe would otherwise log one httpx INFO line per poll
+    # (30 lines/min of nothing). Only warnings from the transport matter here.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     port = int(os.environ.get("EDGE_PORT", "10002"))
     host = os.environ.get("EDGE_HOST", "0.0.0.0")
     logger.info(
