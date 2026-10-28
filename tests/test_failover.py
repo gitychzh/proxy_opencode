@@ -683,3 +683,39 @@ async def test_invalid_request_also_skips_the_backup_chain() -> None:
 
     assert secondary.calls == []
     assert adapter.fallback_status()["engaged"] is False
+
+
+async def test_quota_blackout_holds_breaker_until_reset() -> None:
+    """A licensed-out account must not be re-probed every hold window.
+
+    Measured 2026-10-29: the daily free-tier allowance is account-scoped, so
+    a 429 keeps failing for hours while the flat 120s hold expires every two
+    minutes — each expiry cost a dead-pool walk before the backup answered.
+    """
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary, zen_fallback_hold_s=120.0)
+    secondary.outcomes = [{"id": "ok"}]
+    blackout = relay(429)
+    blackout["__quota_blackout_s__"] = 20000.0
+    primary.outcomes = [blackout]
+
+    result = await adapter.chat({"model": "m1"})
+
+    assert result == {"id": "ok"}
+    status = adapter.fallback_status()
+    assert status["engaged"] is True
+    assert status["hold_remaining_s"] > 19000.0
+
+
+async def test_quota_blackout_hold_is_capped_at_one_day() -> None:
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary, zen_fallback_hold_s=120.0)
+    secondary.outcomes = [{"id": "ok"}]
+    blackout = relay(429)
+    blackout["__quota_blackout_s__"] = 10 * 24 * 3600.0
+    primary.outcomes = [blackout]
+
+    await adapter.chat({"model": "m1"})
+
+    assert adapter.fallback_status()["hold_remaining_s"] <= 86400.0

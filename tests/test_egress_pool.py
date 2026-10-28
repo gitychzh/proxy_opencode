@@ -889,3 +889,44 @@ async def test_probe_tolerates_non_object_health_payload() -> None:
     await pool._probe_one(state)  # noqa: SLF001 - must not raise
     assert state.last_probe_ok is False
     assert state.healthy is False
+
+
+@pytest.mark.asyncio
+async def test_quota_blackout_requires_every_bucket_to_be_benched() -> None:
+    """Pool-wide blackout is an all-or-nothing verdict.
+
+    The free tier meters the account, not the IP (measured 2026-10-29: four
+    egress IPs plus a fresh MiFi IP all 429'd together), so a single healthy
+    bucket means the pool can still serve and the blackout must read 0.
+    """
+
+    pool = make_pool("a", "b")
+    for state in pool._states:  # noqa: SLF001
+        state.healthy = True
+    assert pool.quota_blackout_s() == 0.0
+
+    lease = await pool.acquire()
+    await pool.release(lease, ok=False, kind="http_429", retry_after_s=27000.0)
+    # One dead, one alive: no blackout.
+    assert pool.quota_blackout_s() == 0.0
+
+    for _ in range(2):
+        lease = await pool.acquire()
+        if not lease.state.cordoned(time.monotonic()):
+            await pool.release(lease, ok=False, kind="http_429", retry_after_s=27000.0)
+        else:
+            pool.abandon(lease)
+    blackout = pool.quota_blackout_s()
+    assert blackout > 3600.0, "both buckets benched for the daily window"
+
+
+@pytest.mark.asyncio
+async def test_quota_blackout_ignores_transport_cordons() -> None:
+    """A bench that is not a quota verdict must not fake a blackout."""
+
+    pool = make_pool("a")
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    state.cordoned_until = time.monotonic() + 300.0
+    state.cordon_reason = "3 consecutive failures (transport)"
+    assert pool.quota_blackout_s() == 0.0

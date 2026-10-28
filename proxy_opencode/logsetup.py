@@ -39,6 +39,7 @@ FIELDS = (
     "ttfb_ms",
     "duration_ms",
     "error_detail",
+    "blackout_s",
     "key_id",
     "key_name",
     "ttl_hours",

@@ -1588,3 +1588,35 @@ async def test_relay_on_close_outcome_completed_when_finish_seen() -> None:
     relay = StreamRelay(httpx.Response(200, content=gen()), {}, on_close=hook)
     _ = b"".join([c async for c in relay.chunks()])
     assert calls == ["completed"]
+
+
+@pytest.mark.asyncio
+async def test_chat_answers_quota_blackout_without_touching_upstream() -> None:
+    """When every bucket is out of quota, skip the upstream entirely.
+
+    The allowance is account-scoped (verified 2026-10-29 with a freshly
+    rebooted MiFi IP), so walking the benched pool only added one upstream
+    round trip per bucket before the fallback chain took over.
+    """
+
+    class _BlackoutPool(_StubPool):
+        called = 0
+
+        def quota_blackout_s(self) -> float:
+            type(self).called += 1
+            return 20893.0
+
+    client = _leased_client()
+    pool = _BlackoutPool(client)
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.post("https://opencode.ai/zen/v1/chat/completions")
+        result = await adapter.chat(
+            {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+        )
+        assert route.call_count == 0, "no upstream attempt during a blackout"
+
+    assert result["__status__"] == 429
+    assert result["__quota_blackout_s__"] == 20893.0
+    assert result["content"]["error"]["code"] == "free_quota_exhausted"

@@ -37,7 +37,11 @@ from ..openai_http import ResponseLike, StreamRelay, _raw_relay_body
 from ..zen_bun_transport import BunTransport, BunTransportError
 from .aggregate import StreamStalled, aggregate_sse
 from .body import build_body
-from .errors import egress_unavailable_result, is_free_tier_rejection
+from .errors import (
+    egress_unavailable_result,
+    is_free_tier_rejection,
+    quota_exhausted_result,
+)
 from .policy import Applied, apply_request_policy
 from .protocol import build_headers, retry_after_seconds
 from .tools import builtin_tools
@@ -167,6 +171,19 @@ class ZenDirectAdapter:
                 self.client, body, self._headers(), model, stream, None
             )
             return self._egress_gate_answer(result)
+
+        # Pool-wide quota blackout: the allowance is account-scoped, so a
+        # fresh IP cannot rescue it. Answering here costs milliseconds and
+        # hands the request to the fallback chain at once, instead of walking
+        # every benched bucket (one upstream RTT each, ~1s apiece).
+        blackout_probe = getattr(self._pool, "quota_blackout_s", None)
+        blackout = float(blackout_probe()) if callable(blackout_probe) else 0.0
+        if blackout > 0:
+            logger.warning(
+                "egress pool in quota blackout; skipping upstream",
+                extra={"blackout_s": round(blackout, 1)},
+            )
+            return quota_exhausted_result(blackout)
 
         attempts = min(self._pool.size, FAILOVER_MAX_ATTEMPTS)
 

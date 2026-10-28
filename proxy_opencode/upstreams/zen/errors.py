@@ -53,9 +53,42 @@ def egress_unavailable_result() -> dict[str, Any]:
     }
 
 
+def quota_exhausted_result(blackout_s: float) -> dict[str, Any]:
+    """Shape "the whole pool is out of quota" without touching the upstream.
+
+    Measured 2026-10-29 02:00 CST: all four egress IPs AND the ECS's own IP
+    answered ``FreeUsageLimitError`` at the same time, and a brand-new ESP32
+    egress IP (``111.55.72.119`` -> ``111.55.74.1``, MiFi reboot) was rejected
+    too. The free tier's daily allowance is therefore **account-scoped**, not
+    per-IP: a fresh IP buys no quota, only a fresh rate-limit bucket. Once
+    every egress is benched on a quota verdict, spending an upstream round
+    trip per bucket per request buys nothing — it only delays the fallback
+    chain by one upstream RTT each (measured 7.25s for a 16-token answer that
+    the backup could have served immediately).
+    """
+
+    return {
+        "__status__": 429,
+        "__quota_blackout_s__": blackout_s,
+        "content": {
+            "error": {
+                "message": (
+                    "The free-tier daily allowance for this account is used "
+                    "up; every egress is benched until it resets "
+                    f"({blackout_s / 3600.0:.1f}h)."
+                ),
+                "type": "insufficient_quota",
+                "param": None,
+                "code": "free_quota_exhausted",
+            }
+        },
+    }
+
+
 __all__ = [
     "EGRESS_UNAVAILABLE_MESSAGE",
     "FREE_TIER_ERROR",
     "egress_unavailable_result",
     "is_free_tier_rejection",
+    "quota_exhausted_result",
 ]

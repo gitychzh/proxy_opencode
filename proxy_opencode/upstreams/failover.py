@@ -69,6 +69,11 @@ logger = logging.getLogger("proxy_opencode.failover")
 # vendor cannot serve it either.
 _PASSTHROUGH_STATUSES = frozenset({400, 401, 404, 422})
 
+# Upper bound on a quota-driven breaker hold. The free tier resets on a daily
+# window, so a Retry-After larger than a day is either a bug or a different
+# policy; never pin the chain to the backup longer than that.
+_QUOTA_HOLD_CAP_S = 24 * 3600.0
+
 # Client-visible provenance marker (owner requirement 2026-10-26: the
 # failover must be *noticeable*, not just present in the logs). Routes
 # promote it to response headers; streams also carry a leading SSE comment.
@@ -282,7 +287,18 @@ class FailoverAdapter:
         if isinstance(status, int) and status >= 400:
             if status in _PASSTHROUGH_STATUSES:
                 return result
-            return await self._trip(payload, f"upstream HTTP {status}")
+            # A pool-wide quota blackout carries the time left until the
+            # allowance resets. Holding the breaker for the flat 120s window
+            # re-probed a primary that could not possibly serve for hours:
+            # every 2 minutes one unlucky request paid the dead-pool walk and
+            # was then answered by a different model anyway (measured 7.25s
+            # for a 16-token reply, 2026-10-29 02:10 CST).
+            blackout = (
+                result.get("__quota_blackout_s__") if _is_error_relay(result) else None
+            )
+            return await self._trip(
+                payload, f"upstream HTTP {status}", blackout_s=blackout
+            )
         # The primary answered this request. Past the hold window that makes
         # this request a half-open probe; the breaker only closes once
         # ``_recover_after`` consecutive probes have succeeded.
@@ -344,8 +360,19 @@ class FailoverAdapter:
         mapped = self._model_map.get(requested) or self._default_model
         return str(mapped or "")
 
-    async def _trip(self, payload: dict[str, Any], reason: str) -> Any:
-        self._fallback_until = time.monotonic() + self._hold_s
+    async def _trip(
+        self,
+        payload: dict[str, Any],
+        reason: str,
+        *,
+        blackout_s: float | None = None,
+    ) -> Any:
+        hold_s = self._hold_s
+        if blackout_s is not None:
+            # Cap so a bogus Retry-After cannot pin the chain to the backup
+            # for days; the free tier's window is at most a day.
+            hold_s = max(hold_s, min(float(blackout_s), _QUOTA_HOLD_CAP_S))
+        self._fallback_until = time.monotonic() + hold_s
         self._primary_streak = 0
         # Distinguish the first trip of an outage from the re-trips that a
         # flapping primary produces: the former is an incident (WARNING), the
@@ -353,7 +380,7 @@ class FailoverAdapter:
         # JSONL event so attribution is unchanged.
         now = time.monotonic()
         re_trip = self._last_trip_at > 0.0 and (now - self._last_trip_at) < (
-            self._hold_s * 2
+            hold_s * 2
         )
         self._last_trip_at = now
         if re_trip:
@@ -362,7 +389,7 @@ class FailoverAdapter:
                 "probe (%s); backup continues for %.0fs",
                 self.name,
                 reason,
-                self._hold_s,
+                hold_s,
             )
         else:
             # Production-incident grade: the primary chain just died and
@@ -376,14 +403,15 @@ class FailoverAdapter:
                 self.name,
                 reason,
                 FALLBACK_NAME,
-                self._hold_s,
+                hold_s,
             )
         EVENTS.emit(
             "fallback_engaged",
             severity="continuation" if re_trip else "incident",
             primary=self.name,
             reason=reason[:120],
-            hold_s=self._hold_s,
+            hold_s=hold_s,
+            quota_blackout=blackout_s is not None,
             secondary=self._secondary_name,
             model=self._map_model(str(payload.get("model") or "")),
             re_trip=re_trip,

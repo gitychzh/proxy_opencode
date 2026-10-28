@@ -43,6 +43,12 @@ from .models import (
 
 logger = logging.getLogger("proxy_opencode.egress")
 
+# Cordon verdicts that mean "this account's allowance is gone", as opposed to
+# a broken tunnel. When every bucket carries one of these, the pool is in a
+# blackout: no attempt can succeed, so selection short-circuits instead of
+# paying an RTT per dead egress.
+_QUOTA_REASONS = frozenset({"free_quota_exhausted", "free_quota_soft"})
+
 
 class ReleaseObserver(Protocol):
     """Hook invoked by ``EgressPool.release`` after each lease release.
@@ -235,6 +241,28 @@ class EgressPool:
 
         self._observer = observer
 
+    def quota_blackout_s(self, now: float | None = None) -> float:
+        """Seconds of *pool-wide* quota blackout, or 0 when any bucket can serve.
+
+        The upstream's free tier meters an account, not an IP (measured
+        2026-10-29: four egress IPs plus the ECS's own IP plus a freshly
+        rebooted MiFi IP all answered ``FreeUsageLimitError`` within minutes).
+        So when every bucket carries a quota verdict there is nothing left to
+        try: the caller should answer 429 immediately and let the fallback
+        chain take over instead of paying one upstream RTT per dead bucket.
+        """
+
+        now = time.monotonic() if now is None else now
+        if not self._states:
+            return 0.0
+        remaining: list[float] = []
+        for state in self._states:
+            core = state.cordon_reason.split(" (", 1)[0]
+            if not state.cordoned(now) or core not in _QUOTA_REASONS:
+                return 0.0
+            remaining.append(state.cordon_remaining_s(now))
+        return min(remaining)
+
     def find(self, name: str) -> EgressState | None:
         return next((s for s in self._states if s.spec.name == name), None)
 
@@ -329,8 +357,16 @@ class EgressPool:
             # Soft throttling (short Retry-After) is NOT a daily-quota
             # verdict: benching the bucket until UTC midnight for a 30s
             # throttle used to cost the bucket the rest of the day. Only the
-            # hard shape (Retry-After > 1h, or none at all) means the IP's
-            # allowance is gone.
+            # hard shape (Retry-After > 1h, or none at all) means the
+            # account's allowance is gone.
+            #
+            # Scope (corrected 2026-10-29 02:00 CST): the allowance is
+            # ACCOUNT-scoped, not per-IP. Four egress IPs, the ECS's own IP
+            # and a freshly rebooted MiFi IP (111.55.72.119 -> 111.55.74.1)
+            # all returned FreeUsageLimitError within minutes of each other,
+            # with the same Retry-After pointing at the 08:00 window reset.
+            # Rotation therefore buys a fresh rate-limit bucket, never new
+            # quota; only the reset does.
             soft_s = (
                 retry_after_s
                 if retry_after_s is not None and retry_after_s <= HARD_QUOTA_RETRY_AFTER_S
@@ -348,7 +384,7 @@ class EgressPool:
                 self._enter_cordon(
                     state,
                     now + seconds_to_window_reset(),
-                    "free_quota_exhausted (per-IP daily quota)",
+                    "free_quota_exhausted (account daily quota)",
                     event_reason="free_quota_exhausted",
                     detail={
                         "reset_at": datetime.fromtimestamp(

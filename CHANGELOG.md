@@ -3,6 +3,37 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.7.12] - 2026-10-29
+
+> 0.7.9–0.7.11 的条目未补写（当时的变更只在 `git log` 里，事后重建等于伪造
+> 记录，故留空）。
+
+### Fixed
+
+- **全池额度耗尽时每个请求白跑 4 次上游** — 免费层额度是**账号级**（实测
+  2026-10-29 02:00 CST）：四个出口 IP、ECS 自己的 IP，以及刚重启 MiFi 换来的
+  全新 IP（`111.55.72.119` → `111.55.74.1`）在几分钟内先后返回同一
+  `FreeUsageLimitError`，`Retry-After` 全部指回 08:00 窗口重置。换句话说
+  **换 IP 只换限流桶，换不来额度**；池里所有桶带着配额判定被 bench 之后，
+  再逐个桶试一遍只是把 fallback 链推后一个上游 RTT/桶（实测 16 token 的回答
+  耗 7.25s）。新增 `EgressPool.quota_blackout_s()`：仅当**每个**桶都带
+  `free_quota_exhausted` / `free_quota_soft` 判定时返回剩余秒数，适配器据此
+  直接返回 429 + `__quota_blackout_s__`，一次上游都不打。
+  证据：`test_quota_blackout_requires_every_bucket_to_be_benched`、
+  `test_chat_answers_quota_blackout_without_touching_upstream`。
+- **配额型 429 只按住 fallback 熔断 120s，两分钟后又去撞死墙** — 熔断窗口是
+  固定 `ZEN_FALLBACK_HOLD_S`，而账号额度要到窗口重置才恢复：每 2 分钟就有一个
+  请求先走完死池再被备用模型回答。现在 `_trip` 接受 `blackout_s`，按
+  `min(blackout, 24h)` 撑满熔断窗口并在账本里记 `quota_blackout=true`。
+  证据：`test_quota_blackout_holds_breaker_until_reset`、
+  `test_quota_blackout_hold_is_capped_at_one_day`。
+
+### Changed
+
+- 配额熔断原因文案 `per-IP daily quota` → `account daily quota`：口径错了，
+  会误导 operator 去做无效的 IP 轮换（本次实测就是被它带偏的）。
+- 日志白名单新增 `blackout_s`（`logsetup.FIELDS` 是 `extra` 进日志的唯一通道）。
+
 ## [0.7.8] - 2026-10-28
 
 ### Fixed
