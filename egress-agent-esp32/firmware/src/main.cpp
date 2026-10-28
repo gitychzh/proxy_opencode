@@ -113,6 +113,42 @@ void checkWifiFallback() {
   tryConnect(0);
 }
 
+// 回到首选网络。
+// 这套换 IP 的机制是「重启 MiFi → 设备必然掉线 → fallback 到备用 WiFi」，
+// 而原来的 loop() 只在**断线时**才跑 fallback，于是换过一次 IP 之后设备就
+// 永远赖在备用网上：那台网里的 192.168.1.1 是家里的 TP-Link，适配器的换 IP
+// 流程会（正确地）拒绝动手，第二次换 IP 就再也做不成了。
+// 这里每 PRIMARY_RETURN_MS 扫一次，只要首选网络重新可见就切回去。
+#define PRIMARY_RETURN_MS 180000UL   // 3 分钟
+void maybeReturnToPrimary() {
+  static uint32_t lastCheck = 0;
+  if (wifiIndex == 0) return;                       // 已经在首选网
+  if (WiFi.status() != WL_CONNECTED) return;        // 断线由 checkWifiFallback 管
+  if (millis() - lastCheck < PRIMARY_RETURN_MS) return;
+  lastCheck = millis();
+  int n = WiFi.scanNetworks();
+  bool primarySeen = false;
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) == WIFI_LIST[0].ssid) { primarySeen = true; break; }
+  }
+  WiFi.scanDelete();
+  if (!primarySeen) {
+    Serial.println("[WiFi] 首选网络不可见，继续留在备用网");
+    return;
+  }
+  Serial.printf("[WiFi] 首选网络 %s 已恢复，切回\n", WIFI_LIST[0].ssid);
+  tryConnect(0);
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) {
+    delay(300);
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("[WiFi] 已回到首选网 IP=%s\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println("[WiFi] 切回失败，保持原状");
+  }
+}
+
 // ---------- 控制通道写（多任务安全） ----------
 void ctrlSend(const String &line) {
   if (!gCtrl.connected()) return;
@@ -227,11 +263,16 @@ void startTunnel(const String &id, const String &host, uint16_t port) {
 
 // ---------- 状态上报 ----------
 String statusLine() {
-  char buf[192];
+  char buf[256];
+  // SSID 与网关必须报出来：这颗设备会在两个同名网段的 WiFi 之间漫游
+  // （都发 192.168.1.x），192.168.1.1 可能是家里的 TP-Link，也可能是要
+  // 重启换 IP 的 MiFi。分不清在哪个网，服务端就没法安全地决定能不能重启。
   snprintf(buf, sizeof(buf),
-           "STAT uptime=%lus heap=%u rssi=%d ip=%s tunnels=%d total=%lu",
+           "STAT uptime=%lus heap=%u rssi=%d ip=%s gw=%s ssid=%s tunnels=%d total=%lu",
            millis() / 1000UL, (unsigned)ESP.getFreeHeap(), WiFi.RSSI(),
-           WiFi.localIP().toString().c_str(), gActiveTunnels,
+           WiFi.localIP().toString().c_str(),
+           WiFi.gatewayIP().toString().c_str(),
+           WiFi.SSID().c_str(), gActiveTunnels,
            (unsigned long)gTunnelTotal);
   return String(buf);
 }
@@ -239,7 +280,12 @@ String statusLine() {
 // ---------- 控制会话 ----------
 void runControlSession() {
   gCtrl.setNoDelay(true);
-  gCtrl.printf("HELLO esp32_p1 %s %s\n", WiFi.localIP().toString().c_str(), CTRL_SECRET);
+  // HELLO 里带上 ssid/gw：适配器只校验第 4 个字段（密钥），多出来的字段
+  // 只会进日志，却在每次重连时白送一条"我在哪个网"的证据。
+  gCtrl.printf("HELLO esp32_p1 %s %s ssid=%s gw=%s\n",
+               WiFi.localIP().toString().c_str(), CTRL_SECRET,
+               WiFi.SSID().c_str(),
+               WiFi.gatewayIP().toString().c_str());
   gCtrl.flush();
   logf("[ctrl] 已连上 %s, 等指令", CTRL_HOST.toString().c_str());
 
@@ -247,6 +293,9 @@ void runControlSession() {
   uint32_t lastRx = millis();
 
   while (gCtrl.connected() && WiFi.status() == WL_CONNECTED) {
+    // 每 3 分钟自检一次"是不是该回首选网络了"。换 IP 依赖重启 MiFi，而重启
+    // 之后设备一定先落到备用网；不自己走回来，第二次换 IP 就无从发起。
+    maybeReturnToPrimary();
     String line;
     bool got = readLine(gCtrl, line, 1000);
     uint32_t now = millis();

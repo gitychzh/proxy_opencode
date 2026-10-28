@@ -5,7 +5,8 @@
 v4: 控制通道 HELLO 鉴权（ESP32_CTRL_SECRET，空=兼容 v3 免鉴权），防公网扫描者
 冒充 ESP32 注册抢占桶槽（2026-10-27 ECS 9999 端口实测有 azenv/SSH 扫描流量）。
 """
-import os, socket, threading, time, itertools, json, signal, select
+import hashlib
+import os, socket, threading, time, itertools, json, signal, select, re
 
 CTRL_PORT = 9999
 LISTEN_PORT = 10005
@@ -13,6 +14,18 @@ ADMIN_PORT = 10006
 NAME = "esp32-bucket"
 CTRL_SECRET = os.environ.get("ESP32_CTRL_SECRET", "").strip()
 START = time.time()
+
+# --- MiFi 换 IP（2026-10-29）------------------------------------------------
+# 这颗 ESP32 挂在 4G MiFi 上，换 IP 的办法是重启那台 MiFi。MiFi 的管理页在
+# 它自己的局域网里，从 ECS 只能经 ESP32 的反向隧道够到。但同一网段里可能
+# 还有别的路由器（现场 192.168.1.1 有时是家里的 TP-Link TL-WR886N），所以
+# **必须先验明正身再动手**：MiFi 的 /login.cgi 发 `Digest realm="Highwmg"`
+# 挑战，TP-Link 则 302 到 tplogin.cn。认错设备就会把整个家庭网络重启掉。
+MIFI_USER = os.environ.get("MIFI_ADMIN_USER", "admin").strip()
+MIFI_PWD = os.environ.get("MIFI_ADMIN_PWD", "admin").strip()
+MIFI_REALM = "Highwmg"
+MIFI_REBOOT_PATH = "/xml_action.cgi?method=get&module=duster&file=reset"
+MIFI_TIMEOUT_S = 25.0
 
 # relay 的空闲上限。必须高于网关自己的容忍度（ZEN_TTFB_S=60 首字节、
 # STREAM_STALL_S=60 流内静默），否则适配器会先于网关掐断一条本来健康的隧道。
@@ -25,17 +38,22 @@ esp = None            # 当前控制通道 socket
 # 也让「换 IP 后 cordon 自动解除」永远看不到变化。改由控制通道实测。
 esp_peer = ""
 esp_peer_at = ""
+# HELLO 里由固件上报（2026-10-29 起）：设备会在两个同网段的 WiFi 之间漫游，
+# 不报告 ssid/gw 就无法判断 192.168.1.1 到底是 MiFi 还是家里的路由器。
+esp_ssid = ""
+esp_gw = ""
 pending = {}          # cid -> {"ready":Event,"tunnel":sock,"ok":bool,"leftover":bytes}
 seq = itertools.count(1)
 stats = {"tunnels": 0, "active": 0}
 ctl_lock = threading.Lock()
 ctl_replies = []      # 控制通道非 HB 应答
+rotate_lock = threading.Lock()
 
 def log(*a):
     print(f"[{time.strftime('%H:%M:%S')}]", *a, flush=True)
 
 def handle_conn(conn, addr, first):
-    global esp, esp_peer, esp_peer_at
+    global esp, esp_peer, esp_peer_at, esp_ssid, esp_gw
     if first.startswith(b"HELLO"):
         if CTRL_SECRET:
             # HELLO <name> <lan_ip> <secret>（v4）；不带 secret 的 HELLO 一律拒绝
@@ -52,6 +70,15 @@ def handle_conn(conn, addr, first):
         log(f"ESP32 上线 {first.decode(errors='replace').strip()} {addr}")
         esp_peer = str(addr[0])
         esp_peer_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        # 固件自 v4 起在 HELLO 尾部附 `ssid=... gw=...`（v3 没有，保持兼容）
+        hello = first.split(b"\n", 1)[0].decode(errors="replace").split()
+        for tok in hello[4:]:
+            if tok.startswith("ssid="):
+                esp_ssid = tok[5:]
+            elif tok.startswith("gw="):
+                esp_gw = tok[3:]
+        if esp_ssid or esp_gw:
+            log(f"ESP32 网络 ssid={esp_ssid or '?'} gw={esp_gw or '?'}")
         with lock:
             if esp:
                 try: esp.close()
@@ -179,6 +206,137 @@ def relay(c, t, cid=""):
         log(f"[tun {cid}] 隧道结束 {time.time()-started:.1f}s "
             f"up={up} down={down} ({why})")
 
+def open_tunnel(host, port, timeout=MIFI_TIMEOUT_S):
+    """Ask the ESP32 for a data tunnel to host:port and return the live socket."""
+
+    with lock:
+        if not esp:
+            raise RuntimeError("esp32-offline")
+        cid = str(next(seq))
+        ev = threading.Event()
+        pending[cid] = {"ready": ev, "tunnel": None, "ok": False,
+                        "leftover": b"", "err": ""}
+        stats["tunnels"] += 1
+        stats["active"] += 1
+        ch = esp
+    try:
+        ch.sendall(f"T {cid} {host}:{port}\n".encode())
+    except Exception as exc:
+        pending.pop(cid, None)
+        with lock:
+            stats["active"] = max(0, stats["active"] - 1)
+        raise RuntimeError(f"control-send-failed: {exc}") from exc
+    ev.wait(timeout)
+    p = pending.pop(cid, None)
+    if not p or not p.get("ok") or not p.get("tunnel"):
+        with lock:
+            stats["active"] = max(0, stats["active"] - 1)
+        raise RuntimeError("tunnel-failed: %s" % ((p or {}).get("err") or "no-tready"))
+    return p["tunnel"]
+
+
+def http_over(sock, method, path, headers=None, timeout=15.0):
+    """One HTTP/1.1 exchange over an already-open tunnel socket."""
+
+    lines = [f"{method} {path} HTTP/1.1", "Host: 192.168.1.1", "Connection: close"]
+    for k, v in (headers or {}).items():
+        lines.append(f"{k}: {v}")
+    sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
+    buf = b""
+    sock.settimeout(timeout)
+    try:
+        while True:
+            chunk = sock.recv(8192)
+            if not chunk:
+                break
+            buf += chunk
+    except socket.timeout:
+        pass
+    head, _, body = buf.partition(b"\r\n\r\n")
+    return head.decode("utf-8", "replace"), body
+
+
+def mifi_rotate():
+    """Reboot the 4G MiFi so the carrier hands out a new public IP.
+
+    Safety contract: the gateway's ONT path re-dials a *known* device; here the
+    tunnel just reaches whatever sits on the LAN's gateway address, and the
+    same address has been observed to be the home TP-Link. So identification
+    comes first — no matching digest realm, no reboot.
+    """
+
+    gw = esp_gw or "192.168.1.1"
+    if not rotate_lock.acquire(blocking=False):
+        return {"ok": False, "detail": "rotation already in progress"}
+    try:
+        sock = open_tunnel(gw, 80)
+        try:
+            head, _ = http_over(sock, "GET", "/login.cgi")
+        finally:
+            sock.close()
+        if MIFI_REALM not in head:
+            first = head.split("\r\n")[0] if head else "(no response)"
+            log(f"[rotate] 拒绝: {gw} 不是 MiFi（{first}）")
+            return {
+                "ok": False,
+                "detail": f"gateway {gw} is not the MiFi (no realm={MIFI_REALM}): {first}",
+            }
+        realm = re.search(r'realm="([^"]*)"', head)
+        nonce = re.search(r'nonce="([^"]*)"', head)
+        if not (realm and nonce):
+            return {"ok": False, "detail": "MiFi sent no digest nonce"}
+        realm, nonce = realm.group(1), nonce.group(1)
+        # 与 js/base/utils.js doLogin 完全一致：HA2 固定按 /cgi/protected.cgi 计算
+        ha1 = hashlib.md5(f"{MIFI_USER}:{realm}:{MIFI_PWD}".encode()).hexdigest()
+        ha2 = hashlib.md5(b"GET:/cgi/protected.cgi").hexdigest()
+        cnonce = hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
+        resp = hashlib.md5(
+            f"{ha1}:{nonce}:00000001:{cnonce}:auth:{ha2}".encode()
+        ).hexdigest()
+        auth = (
+            f'Digest username="{MIFI_USER}", realm="{realm}", nonce="{nonce}", '
+            f'uri="/cgi/protected.cgi", response="{resp}", qop=auth, '
+            f'nc=00000001, cnonce="{cnonce}"'
+        )
+        login = (
+            f"/login.cgi?Action=Digest&username={MIFI_USER}&realm={realm}"
+            f"&nonce={nonce}&response={resp}&qop=auth&cnonce={cnonce}&temp=asr"
+        )
+        sock = open_tunnel(gw, 80)
+        try:
+            head, _ = http_over(sock, "GET", login, {"Authorization": auth})
+        finally:
+            sock.close()
+        if "200" not in (head.split("\r\n")[0] if head else ""):
+            return {"ok": False, "detail": "MiFi login failed: %s"
+                    % (head.split("\r\n")[0] if head else "no response")}
+        # 这条 GET 在本机型上就是"重启"动作（2026-10-29 实测：发出后 MiFi 掉线
+        # 并重新拨号，SSID/配置不变，不是恢复出厂）。它是 set 语义却写成 method=get，
+        # 所以只能靠验明正身来防止误伤别的路由器。
+        sock = open_tunnel(gw, 80)
+        try:
+            head, _ = http_over(sock, "GET", MIFI_REBOOT_PATH, {"Authorization": auth})
+        except Exception:
+            # 路由器在回包前就把服务停了 —— 对重启而言这正是成功的样子
+            head = ""
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+        status = head.split("\r\n")[0] if head else "(connection dropped)"
+        log(f"[rotate] 已向 {gw} 发出重启（ssid={esp_ssid}）：{status}")
+        return {
+            "ok": True,
+            "detail": f"MiFi reboot triggered on {gw} (ssid={esp_ssid or '?'}): {status}",
+        }
+    except Exception as exc:  # noqa: BLE001
+        log(f"[rotate] 失败: {exc}")
+        return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+    finally:
+        rotate_lock.release()
+
+
 def http_handler(client):
     client.settimeout(20)
     try:
@@ -199,10 +357,21 @@ def http_handler(client):
                                "egress_ip": esp_peer,
                                "egress_ip_source": "control-peer",
                                "egress_ip_at": esp_peer_at,
+                               "ssid": esp_ssid, "gateway": esp_gw,
                                "egress_probe_ok": esp is not None, "tunnels_active": stats["active"],
                                "tunnels_total": stats["tunnels"], "uptime_s": int(time.time()-START)}).encode()
             client.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
                            + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+            client.close()
+            return
+        if method == "POST" and target.rstrip("/") == "/rotate":
+            # 标准 egress 桶接口：网关的 EgressRotator POST 这里，收到 ok 后
+            # 自己去轮询 /healthz 等出口 IP 变化（ROTATE_TIMEOUT_S=420）。
+            result = mifi_rotate()
+            payload = json.dumps(result, ensure_ascii=False).encode()
+            client.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                           b"Content-Length: " + str(len(payload)).encode()
+                           + b"\r\nConnection: close\r\n\r\n" + payload)
             client.close()
             return
         if method != "CONNECT":

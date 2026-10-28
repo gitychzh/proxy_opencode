@@ -85,6 +85,7 @@ class EgressPool:
         cordon_s: float = 300.0,
         failure_threshold: int = 3,
         observer: ReleaseObserver | None = None,
+        last_resort: frozenset[str] = frozenset(),
     ) -> None:
         if not specs:
             raise ValueError("EgressPool requires at least one egress spec")
@@ -95,6 +96,11 @@ class EgressPool:
         self._cordon_s = cordon_s
         self._failure_threshold = failure_threshold
         self._observer = observer
+        # Buckets that may only absorb overflow (see ZEN_EGRESS_LAST_RESORT).
+        # Unknown names are ignored so a retired bucket cannot silently make
+        # the whole pool last-resort.
+        known = {s.spec.name for s in self._states}
+        self._last_resort = frozenset(n for n in last_resort if n in known)
         self._probe_task: asyncio.Task[None] | None = None
         self._probe_timeout = httpx.Timeout(10.0, connect=5.0)
         self._probe_client: httpx.AsyncClient | None = None
@@ -120,6 +126,9 @@ class EgressPool:
                 getattr(settings, "zen_egress_probe_interval_s", 30) or 30
             ),
             cordon_s=float(getattr(settings, "zen_egress_cordon_s", 300) or 300),
+            last_resort=frozenset(
+                getattr(settings, "zen_egress_last_resort", frozenset()) or frozenset()
+            ),
         )
 
     # ------------------------------------------------------------ lifecycle
@@ -191,11 +200,16 @@ class EgressPool:
             for s in self._states
             if not s.cordoned(now) and s.healthy and not s.rotating
         ]
+        # Last-resort buckets (a weak uplink that cannot meet the first-byte
+        # deadline) are withheld as long as any normal bucket can serve: an
+        # equal share of round-robin picks turned every fourth turn into a
+        # 60s TTFB stall followed by a failover (measured 2026-10-29).
+        preferred = [s for s in ready if s.spec.name not in self._last_resort]
         # Last resort excludes rotating egresses too: their ONT is mid-reboot
         # and every data connection they accept dies with it. Only when the
         # entire pool is rotating fall back to them (queueing upstream).
         non_rotating = [s for s in self._states if not s.rotating]
-        usable = ready or non_rotating or list(self._states)
+        usable = preferred or ready or non_rotating or list(self._states)
         offset = next(self._rr) % len(usable)
         rotated = usable[offset:] + usable[:offset]
         state = min(rotated, key=lambda s: s.inflight)
@@ -690,7 +704,12 @@ class EgressPool:
 
     def snapshot(self) -> list[dict[str, object]]:
         now = time.monotonic()
-        return [state.snapshot(now) for state in self._states]
+        rows = []
+        for state in self._states:
+            row = state.snapshot(now)
+            row["last_resort"] = state.spec.name in self._last_resort
+            rows.append(row)
+        return rows
 
     def names(self) -> list[str]:
         return [state.spec.name for state in self._states]

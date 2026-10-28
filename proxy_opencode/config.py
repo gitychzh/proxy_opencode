@@ -277,6 +277,14 @@ class Settings:
     # bucket's quota):
     #   ZEN_EGRESS_EXPECT_PREFIX="owin10-mobile=117.95.231.0/24,..."
     zen_egress_proxies: dict[str, str] = field(default_factory=dict)
+    # Buckets that must only absorb overflow, never normal traffic. A weak
+    # uplink (measured 2026-10-29: the ESP32-C3 bucket needs ~15s to push a
+    # 20KB prompt body, so its first byte routinely misses ZEN_TTFB_S=60 and
+    # the request burns a full minute before failing over) must not take an
+    # equal share of round-robin picks: with 4 buckets that turned every
+    # fourth interactive turn into a 60s stall.
+    #   ZEN_EGRESS_LAST_RESORT="esp32-bucket"
+    zen_egress_last_resort: frozenset[str] = frozenset()
     zen_egress_expect_prefix: dict[str, str] = field(default_factory=dict)
     # Shared secret for the agents' /healthz + /rotate endpoints (basic auth).
     zen_egress_secret: str = ""
@@ -621,6 +629,9 @@ def load_settings() -> Settings:
         ),
         zen_project_id=os.environ.get("OPENCODE_ZEN_PROJECT_ID", "").strip(),
         zen_egress_proxies=_parse_kv(os.environ.get("ZEN_EGRESS_PROXIES", "")),
+        zen_egress_last_resort=frozenset(
+            _csv(os.environ.get("ZEN_EGRESS_LAST_RESORT", ""))
+        ),
         zen_egress_expect_prefix=_parse_kv(
             os.environ.get("ZEN_EGRESS_EXPECT_PREFIX", "")
         ),

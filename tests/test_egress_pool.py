@@ -166,6 +166,44 @@ async def test_acquire_skips_unhealthy_but_uses_cordoned_as_last_resort() -> Non
 
 
 @pytest.mark.asyncio
+async def test_last_resort_bucket_only_absorbs_overflow() -> None:
+    """A weak uplink must not take an equal share of the round robin.
+
+    Measured 2026-10-29: the ESP32-C3 bucket needs ~15s to push a 20KB prompt
+    body, so its first byte misses ZEN_TTFB_S=60 on a busy turn and the client
+    waits the full minute before the gateway fails over. With it in the normal
+    rotation every fourth turn paid that minute, which is exactly the "很卡"
+    the operator reported after the 4th bucket joined.
+    """
+
+    pool = make_pool("fast1", "fast2", "slow", last_resort=frozenset({"slow"}))
+    mark_healthy(pool)
+    seen = []
+    for _ in range(8):
+        lease = await pool.acquire()
+        seen.append(lease.name)
+        await pool.release(lease, ok=True)
+    assert "slow" not in seen
+    assert set(seen) == {"fast1", "fast2"}
+
+    # Every normal bucket gone -> the last-resort one serves instead of 502.
+    for state in pool._states[:2]:
+        state.healthy = False
+    lease = await pool.acquire()
+    assert lease.name == "slow"
+
+
+@pytest.mark.asyncio
+async def test_last_resort_unknown_name_is_ignored() -> None:
+    """A retired bucket name must not make the whole pool last-resort."""
+
+    pool = make_pool("a", "b", last_resort=frozenset({"retired"}))
+    mark_healthy(pool)
+    seen = {(await pool.acquire()).name for _ in range(2)}
+    assert seen == {"a", "b"}
+
+
+@pytest.mark.asyncio
 async def test_release_ok_resets_failures() -> None:
     pool = make_pool("a")
     state = pool._states[0]
