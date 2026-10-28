@@ -30,16 +30,36 @@ zen-gw 桶池 ──CONNECT──> gateway-adapter :10005 ──反向隧道─�
 
 ## 部署（网关侧适配器）
 
+**不要**把脚本 `cp` 到 `/opt/zen-gw/src/` 根下：那是 `git archive` 的部署快照，
+每次 redeploy 整个清空，脚本随之消失、unit 抖动重启（2026-10-28 现场日志刷满
+`can't open file '/opt/zen-gw/src/esp32_bucket_adapter.py'`）。让 unit 直接跑仓库
+树里的路径：
+
 ```bash
-# ECS 上
-cp gateway-adapter/esp32_bucket_adapter.py /opt/zen-gw/src/
-cp deploy/egress-adapter-esp32.service /etc/systemd/system/
-echo 'ESP32_CTRL_SECRET=<与固件一致>' > /opt/zen-gw/src/esp32-adapter.env && chmod 600 /opt/zen-gw/src/esp32-adapter.env
-systemctl daemon-reload && systemctl enable --now egress-adapter-esp32
+# ECS 上（仓库已解包到 /opt/zen-gw/src）
+cp egress-agent-esp32/deploy/esp32-bucket-adapter.service /etc/systemd/system/
+printf 'ESP32_CTRL_SECRET=%s\n' '<与固件 CTRL_SECRET 一致>' > /etc/esp32-bucket-adapter.env
+chmod 600 /etc/esp32-bucket-adapter.env    # 放 /etc，不要放会清空的部署树
+systemctl daemon-reload && systemctl enable --now esp32-bucket-adapter
 ```
 
 接入桶池（zen-gw `.env`）：`ZEN_EGRESS_PROXIES` 追加
-`esp32=http://127.0.0.1:10005`。
+`esp32-bucket=http://172.18.0.1:10005`（容器内经 docker bridge 网关访问宿主）。
+
+`/healthz` 的 `egress_ip` 由控制通道的源地址实测（`egress_ip_source=control-peer`），
+即 ESP32 所在 MiFi 的公网出口 IP；不再是早期写死的 `1.1.1.1` 占位。
+
+### 隧道存活的两道 20s 门（2026-10-28 修正）
+
+排查「同 IP 下 opencode desktop 正常、经网关全 502」时定位到两个独立的 20s：
+
+| 位置 | 常量 | 症状 |
+|---|---|---|
+| 固件 `main.cpp` | `TUNNEL_IDLE_MS`（曾 20000，现 180000） | CONNECT 200 + TLS 握手成功后，**整 20.000s** 断链。慢请求（首字节 >20s）无一生还 |
+| 适配器 | `ev.wait(20)` 建链等待 | ESP32 到目标 TCP 连不上/慢于 20s 时回 502 |
+
+第一道是主因：网关自己的首字节期限是 `ZEN_TTFB_S=60`，上游 TTFB p95 实测 21.3s，
+20s 的空闲上限必然误杀。修固件后需重新烧录（`pio run -t upload`，USB COM5）。
 
 ## 固件烧录
 

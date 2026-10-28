@@ -70,6 +70,22 @@ def handle_conn(conn, addr, first):
                         try: conn.sendall(b"PONG\n")
                         except: break
                     else:
+                        # ESP32 对建链失败回的是 `ERR <id> <reason>`
+                        # （target-connect / data-connect / busy / bad-port…）。
+                        # 以前它只被塞进 ctl_replies，从不与 pending 关联，于是
+                        # 一次「目标不可达」也要白等 20s，日志还只能写"未在 20s
+                        # 内回报 TREADY"——把已知原因说成未知。现在立刻结束等待。
+                        if line.startswith("ERR "):
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                with lock:
+                                    pe = pending.get(parts[1])
+                                    if pe is not None:
+                                        pe["err"] = (
+                                            parts[2] if len(parts) > 2 else "unspecified"
+                                        )
+                                if pe is not None:
+                                    pe["ready"].set()
                         with ctl_lock:
                             ctl_replies.append(line)
                             if len(ctl_replies) > 50:
@@ -222,8 +238,12 @@ def http_handler(client):
         ev.wait(20)
         p = pending.pop(cid, None)
         if not p or not p.get("ok") or not p.get("tunnel"):
-            log(f"[tun {cid}] 建链失败 {target}: ESP32 未在 20s 内回报 TREADY"
-                f"（目标不可达/并发满/数据通道连不上）")
+            err = (p or {}).get("err")
+            detail = (
+                f"ESP32 建链失败: {err}" if err
+                else "ESP32 未在 20s 内回报 TREADY（目标不可达/并发满/数据通道连不上）"
+            )
+            log(f"[tun {cid}] {target}: {detail}")
             client.sendall(b"HTTP/1.1 502 Tunnel Failed\r\nConnection: close\r\n\r\n")
             client.close()
             with lock: stats["active"] = max(0, stats["active"]-1)

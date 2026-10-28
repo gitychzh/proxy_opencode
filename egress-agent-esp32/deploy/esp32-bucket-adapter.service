@@ -1,0 +1,25 @@
+[Unit]
+Description=ESP32 bucket adapter (CONNECT proxy -> ESP32 reverse tunnel)
+Documentation=file:///opt/zen-gw/src/egress-agent-esp32/PROTOCOL.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 直接跑仓库树里的脚本，**不要**先 cp 到 /opt/zen-gw/src/ 根下。
+# 那个位置属于 `git archive` 的部署快照，每次 redeploy 都会整个清空，脚本
+# 随之消失、unit 进入 Restart 抖动循环——2026-10-28 现场就是这样：旧 unit
+# 指向 /opt/zen-gw/src/esp32_bucket_adapter.py，日志里刷满
+# "can't open file ... No such file or directory"。
+ExecStart=/usr/bin/python3 -u /opt/zen-gw/src/egress-agent-esp32/gateway-adapter/esp32_bucket_adapter.py
+# 控制通道 HELLO 鉴权（协议契约 v4）：必须与固件 `CTRL_SECRET` 常量一致。
+# 值不入仓库，放 /etc/ 而不是部署树（后者会被 redeploy 清空）。缺失或为空
+# 则退回 v3 免鉴权，公网 9999 会允许任何人冒充 ESP32 抢占桶槽。
+EnvironmentFile=-/etc/esp32-bucket-adapter.env
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/esp32-bucket-adapter.log
+StandardError=append:/var/log/esp32-bucket-adapter.log
+
+[Install]
+WantedBy=multi-user.target
