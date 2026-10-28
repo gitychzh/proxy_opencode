@@ -15,8 +15,9 @@ Authority: AGENTS.md 硬约束 1 (body 门). Regression tests live in
 
 from __future__ import annotations
 
+import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _ASSETS = Path(__file__).resolve().parent / "assets"
@@ -73,12 +74,29 @@ def default_prompt() -> str:
 def prompt_date() -> str:
     """Today's date in the client's ``Date.prototype.toDateString()`` shape.
 
-    The genuine client renders local time; the upstream compares against the
-    inference service's own day, so UTC is the safe choice for a gateway that
-    has no user timezone.
+    The client renders **local** time and the gate is strict about the value
+    when the prompt carries the API-bridge note: measured live 2026-10-29
+    03:15 CST, the same body with ``Wed Oct 28 2026`` (the UTC day) came back
+    ``429 FreeUsageLimitError`` three times out of three, while
+    ``Thu Oct 29 2026`` (the CST day) passed three out of three. Removing the
+    bridge note made both dates pass — so the mismatch is what tips the gate,
+    not the note.
+
+    The upstream's own day boundary is CST (its quota window resets at 08:00
+    CST), so the gateway renders the date at the same offset instead of UTC.
+    ``ZEN_PROMPT_UTC_OFFSET_H`` overrides the offset for non-default
+    deployments; no tzdata dependency (python:3.12-slim ships none).
     """
 
-    return datetime.now(timezone.utc).strftime("%a %b %d %Y")
+    offset_h = 8.0
+    raw = os.environ.get("ZEN_PROMPT_UTC_OFFSET_H", "").strip()
+    if raw:
+        try:
+            offset_h = float(raw)
+        except ValueError:
+            offset_h = 8.0
+    tz = timezone(timedelta(hours=offset_h))
+    return datetime.now(tz).strftime("%a %b %d %Y")
 
 
 def render_prompt(model: str) -> str:

@@ -127,15 +127,15 @@ class Settings:
     #   "none"            — no system message injected at all; also fails
     zen_marker_mode: str = "full"
     # Which builtin tool schemas to inject for the free-tier gate.
-    # Live ablation 2026-09-30: the gate requires >= 2 tools whose NAMES are
-    # opencode builtin names and ignores their schema content entirely.
-    #   "minimal"   (default) — two synthesized ~30-token schemas (~60 prompt
-    #                           tokens total; was ~1,970 with the captured set)
-    #   "captured2"           — the {bash, read} subset of the captured asset
-    #                           (~2k tokens; intermediate fallback)
-    #   "all"                 — the full captured 11-tool schema list
-    #                           (~6k tokens; legacy, per-bucket fallback)
-    zen_tools_mode: str = "minimal"
+    # Re-measured live 2026-10-29 against opencode 1.19.5: the gate now wants
+    # the CURRENT CLI's complete builtin tool set (12 names) and rejects any
+    # strict subset with the quota-shaped 429. Extra tools are tolerated, so
+    # the client's own tools are appended after the builtins.
+    #   "full"      (default) — all 12 captured builtins + the client's tools
+    #   "all"                 — same as full (kept for older env files)
+    #   "captured2"           — the old {bash, read} subset: fails the gate
+    #   "minimal"             — synthesized names: fails the gate
+    zen_tools_mode: str = "full"
     # --- Model parameters, mirrored from the opencode client -----------------
     # Everything below is copied from the CLI's own source (see
     # model_profile.py). Changing these numbers silently makes the gateway
@@ -550,10 +550,10 @@ def load_settings() -> Settings:
             "ZEN_MARKER_MODE must be one of full|bridge|none, "
             f"got {zen_marker_mode!r}"
         )
-    zen_tools_mode = os.environ.get("ZEN_TOOLS_MODE", "minimal").strip().lower()
-    if zen_tools_mode not in ("minimal", "captured2", "all"):
+    zen_tools_mode = os.environ.get("ZEN_TOOLS_MODE", "full").strip().lower()
+    if zen_tools_mode not in ("full", "minimal", "captured2", "all"):
         raise ValueError(
-            "ZEN_TOOLS_MODE must be one of minimal|captured2|all, "
+            "ZEN_TOOLS_MODE must be one of full|minimal|captured2|all, "
             f"got {zen_tools_mode!r}"
         )
     zen_reasoning_policy = (

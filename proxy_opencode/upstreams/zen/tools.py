@@ -1,16 +1,24 @@
 """Free-tier tool-shape gate: injection of builtin tool schemas.
 
-The gate requires **>= 4 distinct tool names** that belong to opencode's
-builtin set, with ``stream: true``; schema and description contents are not
-inspected (live ablation 2026-10-24). One renamed/unknown name 403s even amid
-eleven real ones.
+Gate rules, re-measured live against opencode 1.19.5 (2026-10-29 03:00 CST,
+bun transport, one egress IP, one system prompt):
 
-``ZEN_TOOLS_MODE`` picks the injected set:
+* the request must carry the **complete** builtin tool set of the current CLI
+  (12 names as of 1.19.5). A strict subset fails with the quota-shaped
+  ``429 FreeUsageLimitError`` — measured: keep only ``bash`` → 429, keep the
+  old four-name subset → 429;
+* extra tools are tolerated: the twelve builtins **plus** a custom
+  ``run_shell_command`` → 200. That is what lets this gateway append the
+  client's own tools after the builtins;
+* ``tool_choice: auto`` is fine, ``max_tokens`` is not inspected (32, 4096 and
+  32000 all passed).
 
-* ``minimal`` (default) — four synthesized ~30-token schemas under builtin
-  names the client is not already using (~120 prompt tokens);
-* ``captured2`` — the ``{bash, read}`` subset of the captured asset;
-* ``all`` — the full captured 11-tool list (legacy).
+Consequence (the 2026-10-29 02:00 outage): the shipped asset was a 1.19.4
+capture whose builtin list had shrunk to four names — under the subset rule
+every request came back as a fake quota 429 on all four egress IPs, which
+looked exactly like an exhausted account. ``ZEN_TOOLS_MODE`` therefore
+defaults to ``full``; ``minimal``/``captured2`` stay only as diagnosed
+fallbacks.
 
 Authority: AGENTS.md 硬约束 1 (形状门).
 """
@@ -85,10 +93,11 @@ def merge_tools(
     client_names = tool_names(client_tools)
     injected: list[dict[str, Any]]
 
-    if mode == "all":
-        injected = [
-            t for t in builtins if not (tool_names([t]) & client_names)
-        ]
+    if mode in ("full", "all"):
+        # Every builtin name must be present; the gate treats a subset as a
+        # fake client. Client tools that shadow a builtin name are renamed by
+        # ``rename_collisions`` before this call.
+        injected = list(builtins)
     elif mode == "captured2":
         injected = [
             t for t in builtins
@@ -112,6 +121,53 @@ def merge_tools(
     return [*injected, *client_tools]
 
 
+def rename_collisions(
+    client_tools: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    builtins: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Rename client tools that shadow a builtin name, and their tool_calls.
+
+    The gate needs every builtin name present, so a client tool called
+    ``bash`` cannot simply win the slot: it becomes ``client_bash`` and every
+    historical ``tool_calls`` entry is rewritten to match, otherwise the model
+    would be handed a call to a name that no longer exists in ``tools``.
+    """
+
+    reserved = tool_names(builtins)
+    mapping: dict[str, str] = {}
+    out_tools: list[dict[str, Any]] = []
+    for tool in client_tools:
+        name = next(iter(tool_names([tool])), "")
+        if name and name in reserved:
+            new_name = f"client_{name}"
+            mapping[name] = new_name
+            tool = json.loads(json.dumps(tool))
+            if isinstance(tool.get("function"), dict):
+                tool["function"]["name"] = new_name
+            else:
+                tool["name"] = new_name
+        out_tools.append(tool)
+    if not mapping:
+        return out_tools, messages
+
+    out_msgs: list[dict[str, Any]] = []
+    for msg in messages:
+        calls = msg.get("tool_calls")
+        if isinstance(calls, list):
+            msg = dict(msg)
+            rewritten = []
+            for call in calls:
+                fn = call.get("function") if isinstance(call, dict) else None
+                if isinstance(fn, dict) and fn.get("name") in mapping:
+                    call = json.loads(json.dumps(call))
+                    call["function"]["name"] = mapping[fn["name"]]
+                rewritten.append(call)
+            msg["tool_calls"] = rewritten
+        out_msgs.append(msg)
+    return out_tools, out_msgs
+
+
 __all__ = [
     "INJECT_NAME_POOL",
     "MINIMAL_TOOL_NAMES",
@@ -119,5 +175,6 @@ __all__ = [
     "builtin_tools",
     "merge_tools",
     "minimal_schema",
+    "rename_collisions",
     "tool_names",
 ]

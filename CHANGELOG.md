@@ -3,6 +3,48 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.7.17] - 2026-10-29
+
+### Fixed — 真因：body 门，不是额度
+
+**更正 0.7.12–0.7.16 的结论**：那几版把 `429 FreeUsageLimitError` 当成账号级额度
+耗尽来治，是错的。用真实 CLI（opencode 1.19.5）在本机抓包重放做对照后，同 IP、
+同 bun 传输栈下：
+
+| 请求体 | 结果 |
+|---|---|
+| CLI 原始请求 | 200 ×3 |
+| 我方旧 body（1.19.4 的 10k prompt + 4 个内置工具） | 429 ×3 |
+| 我方 body 但只保留 1 个内置工具 / 1 个自造工具 | 429 |
+| 我方 body + 12 个内置工具 | 200 |
+| 12 个内置工具 + 1 个自定义工具 | 200 |
+| CLI 模板 + 桥接说明 + **UTC 日期（Oct 28）** | 429 ×3 |
+| 同一份 + **CST 日期（Oct 29）** | 200 ×3 |
+
+两个真因：
+
+- **资产过期**：`zen_builtin_tools.json` 是 1.19.4 时代被裁到 4 个名字的子集，
+  而 1.19.5 的门要求**当前客户端的完整 12 个内置工具**（子集即 429）；
+  `zen_prompt_default.txt` 同理过期（9960 → 9558 字符，且抓取时混入了抓包机
+  自己的 `Instructions from: ...CLAUDE.md`，已清掉）。
+  修法：`ZEN_TOOLS_MODE` 默认 `full`（12 个内置全注入 + 客户端工具追加在后），
+  客户端工具若与内置同名则重命名为 `client_<name>` 并同步改写历史
+  `tool_calls`（内置名字一个都不能少）。
+- **日期用了 UTC**：桥接说明在场时，UTC 日期会被判「不是本请求的实时渲染」而
+  返回同形 429。改为按上游日界（+8）渲染，`ZEN_PROMPT_UTC_OFFSET_H` 可覆盖。
+
+### Fixed — 公开别名没有映射到上游 id
+
+`_zen_model()` 只查 `ZEN_MODEL_MAP`，生产没配它，于是公开别名
+`deepseek-ai/deepseek-v4.1-flash` 剥前缀后变成**付费** id
+`deepseek-v4.1-flash` → `401 AuthError`（被 fallback 链掩盖成「主链不可用」）。
+现在第二顺位查 `PUBLIC_MODELS` 的第三段（别名 → 上游 id），别名发布即生效。
+
+### 保留
+
+0.7.12–0.7.16 的 `quota_blackout` / `ZEN_ROTATE_ON_HARD_429=false` 仍然保留：
+真正的额度耗尽时它们是对的，只是这次不是额度。
+
 ## [0.7.16] - 2026-10-29
 
 ### Changed

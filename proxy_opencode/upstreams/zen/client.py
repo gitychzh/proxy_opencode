@@ -509,15 +509,28 @@ class ZenDirectAdapter:
     def _zen_model(self, model: Any) -> str:
         """Rewrite a requested model id to the upstream bare id.
 
-        An exact ``ZEN_MODEL_MAP`` hit wins (public alias -> free ``-free``
-        id); otherwise the provider prefix is stripped exactly like opencode
-        does; empty falls back to the first configured zen model.
+        Resolution order:
+
+        1. an exact ``ZEN_MODEL_MAP`` hit (explicit override);
+        2. the ``PUBLIC_MODELS`` catalogue — its third field IS the upstream
+           id, so a deployment that only publishes an alias still maps
+           correctly. Without this step the prefix strip sent the alias's bare
+           name upstream: ``deepseek-ai/deepseek-v4.1-flash`` became the PAID
+           ``deepseek-v4.1-flash`` and came back ``401 AuthError`` (measured
+           2026-10-29), which the failover chain then masked as a dead primary;
+        3. the provider prefix stripped exactly like opencode does;
+        4. empty → the first configured zen model.
         """
 
         raw = str(model or "")
         mapped = self._settings.zen_model_map.get(raw)
         if mapped:
             return mapped
+        for entry in self._settings.public_models:
+            if str(entry.get("id") or "") == raw:
+                upstream = str(entry.get("upstream") or "")
+                if upstream:
+                    return upstream
         _provider, sep, model_id = raw.partition("/")
         return model_id if sep else (raw or self._default_model())
 

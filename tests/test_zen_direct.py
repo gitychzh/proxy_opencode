@@ -282,31 +282,35 @@ async def test_body_tools_mode_all_restores_full_builtin_list() -> None:
 
 
 @pytest.mark.asyncio
-async def test_body_minimal_injection_is_four_tiny_schemas() -> None:
-    """Live ablation 2026-10-24: the shape gate tightened to >= 4 distinct
-    builtin names; schemas stay un-inspected, so the mandatory fingerprint
-    still costs only ~120 prompt tokens with tiny descriptions."""
+async def test_body_injects_the_complete_builtin_tool_set() -> None:
+    """Live re-measurement 2026-10-29 against opencode 1.19.5: the gate wants
+    the CURRENT client's full builtin set and rejects a strict subset with the
+    quota-shaped 429 (only ``bash`` kept → 429; the old four-name subset →
+    429). Twelve names is therefore the floor, not a token-saving target."""
     adapter = ZenDirectAdapter(make_settings())
     body = adapter._build_body(
         {"model": "big-pickle", "messages": [{"role": "user", "content": "hi"}]},
         "big-pickle",
     )
     tools = body["tools"]
-    assert len(tools) == 4
-    names = {t["function"]["name"] for t in tools}
-    assert names == {"bash", "edit", "glob", "read"}
-    # tiny: the whole injected set must stay far under the captured ~7.9k chars
-    assert len(json.dumps(tools)) < 800
-    for t in tools:
-        assert t["function"]["parameters"] == {"type": "object", "properties": {}}
+    names = [t["function"]["name"] for t in tools]
+    assert len(names) == len(set(names)), "no duplicate tool names"
+    assert set(names) >= {
+        "bash", "edit", "glob", "grep", "question", "read",
+        "skill", "task", "todowrite", "webfetch", "websearch", "write",
+    }
+    assert body["tool_choice"] == "auto"
     await adapter.aclose()
 
 
 @pytest.mark.asyncio
-async def test_body_minimal_injection_avoids_client_claimed_names() -> None:
-    """Injecting a name the client already uses adds no distinct builtin name
-    (the gate counts names) so the pool skips it; the inject count must
-    still reach the four-name minimum."""
+async def test_body_client_names_never_shrink_the_builtin_set() -> None:
+    """The builtin set stays complete even when the client claims its names.
+
+    Under the 1.19.5 gate a missing builtin name is fatal, so a collision can
+    no longer be resolved by dropping the builtin: the client's copy is
+    renamed and the builtin keeps the slot.
+    """
     adapter = ZenDirectAdapter(make_settings())
     client_tools = [
         {"type": "function", "function": {"name": n, "parameters": {}}}
@@ -321,13 +325,14 @@ async def test_body_minimal_injection_avoids_client_claimed_names() -> None:
         "big-pickle",
     )
     names = [t["function"]["name"] for t in body["tools"]]
-    # client tools kept verbatim, plus four injected names that do not collide
-    # (pool order: bash*skip, edit, glob, read*skip, todowrite, skill)
-    assert names.count("bash") == 1
-    assert names.count("read") == 1
-    asserted = {n for n in names if n in ("edit", "glob", "todowrite", "skill", "task", "list")}
-    assert asserted == {"edit", "glob", "todowrite", "skill"}
-    assert len(names) == 6
+    assert names.count("bash") == 1 and names.count("read") == 1
+    assert "client_bash" in names and "client_read" in names
+    # every builtin still present, plus the two renamed client tools
+    assert set(names) >= {
+        "bash", "edit", "glob", "grep", "question", "read",
+        "skill", "task", "todowrite", "webfetch", "websearch", "write",
+    }
+    assert len(names) == 14
     await adapter.aclose()
 
 
@@ -404,7 +409,7 @@ async def test_body_merges_client_tools_after_builtins() -> None:
 
 
 @pytest.mark.asyncio
-async def test_body_client_tool_wins_name_collision() -> None:
+async def test_body_client_tool_with_builtin_name_is_renamed() -> None:
     adapter = ZenDirectAdapter(make_settings())
     custom = [
         {
@@ -420,9 +425,15 @@ async def test_body_client_tool_wins_name_collision() -> None:
         {"model": "big-pickle", "messages": [{"role": "user", "content": "x"}], "tools": custom},
         "big-pickle",
     )
-    bash_defs = [t for t in body["tools"] if t["function"]["name"] == "bash"]
-    assert len(bash_defs) == 1
-    assert bash_defs[0]["function"]["description"] == "client-side bash"
+    # The gate needs the builtin name present, so the CLIENT tool yields:
+    # it is renamed to client_bash and keeps its own schema.
+    names = [t["function"]["name"] for t in body["tools"]]
+    assert names.count("bash") == 1
+    assert "client_bash" in names
+    builtin = next(t for t in body["tools"] if t["function"]["name"] == "bash")
+    assert builtin["function"]["description"] != "client-side bash"
+    renamed = next(t for t in body["tools"] if t["function"]["name"] == "client_bash")
+    assert renamed["function"]["description"] == "client-side bash"
     await adapter.aclose()
 
 

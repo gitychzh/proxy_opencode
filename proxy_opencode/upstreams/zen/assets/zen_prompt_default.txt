@@ -97,11 +97,11 @@ assistant: Clients are marked as failed in the `connectToServer` function in src
 You are powered by the model named big-pickle. The exact model ID is opencode/big-pickle
 Here is some useful information about the environment you are running in:
 <env>
-  Working directory: C:\tmp\opencode\capwork3
+  Working directory: C:\Users\Owin10\ocprobe
   Workspace root folder: /
   Is directory a git repo: no
   Platform: win32
-  Today's date: Sun Oct 25 2026
+  Today's date: Thu Oct 29 2026
 </env>
 Skills provide specialized instructions and workflows for specific tasks.
 Use the skill tool to load a skill when a task matches its description.

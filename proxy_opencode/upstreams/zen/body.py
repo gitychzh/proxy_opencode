@@ -12,7 +12,7 @@ from typing import Any
 
 from ...errors import InvalidRequest
 from .prompt import BRIDGE_NOTE, BRIDGE_NOTE_STANDALONE, render_prompt
-from .tools import merge_tools
+from .tools import merge_tools, rename_collisions
 
 # Only OpenAI-core per-message fields are forwarded; the upstream rejects any
 # extra key.
@@ -93,6 +93,7 @@ def build_body(
         elif marker_mode == "bridge":
             messages = _inject_bridge(messages)
         # "none": leave the client's messages untouched
+        client_tools, messages = rename_collisions(client_tools, messages, builtins)
         body["tools"] = merge_tools(client_tools, mode=tools_mode, builtins=builtins)
         if "tool_choice" not in body and body["tools"]:
             body["tool_choice"] = "auto"
