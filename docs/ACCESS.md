@@ -9,11 +9,11 @@
 
 | 用途 | 地址 | 认证 |
 |---|---|---|
-| 客户端（唯一可用入口） | `https://115.29.231.25:10002/v1` | `Authorization: Bearer <key>`；需先信任自签 CA |
+| 客户端（唯一入口） | `http://115.29.231.25:10002/v1` | `Authorization: Bearer <key>`；明文直连，**无需证书** |
 | 健康检查 | `GET /healthz` | 无（含 `fallback` 块） |
 | 模型目录 | `GET /v1/models` | 公开别名，严格 OpenAI 形状 |
 | 被反代裸 ID（排障） | `GET /v1/models_cus?key=<KEY>` | Bearer 或 `?key=` |
-| 桶状态 / 手动换 IP | `http://127.0.0.1:10010/admin/egresses[/{name}/rotate]` | 管理员 key，仅 loopback/Tailscale |
+| 桶状态 / 手动换 IP | `http://127.0.0.1:10002/admin/egresses[/{name}/rotate]` | 管理员 key，**公网可达**（明文入口的代价） |
 | 设备侧 agent | `<tailscale-ip>:10001`（owin10 第二上行 `:10002`） | CONNECT/rotate 用 Basic |
 
 > **域名入口不可用（2026-10-25 实测）**：`llm.223722.xyz` 已解析到 Cloudflare，

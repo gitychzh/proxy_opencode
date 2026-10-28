@@ -10,11 +10,14 @@
 ## 1. 现状（0.7.x 单栈）
 
 ```
-客户端 → https://115.29.231.25:10002/v1   (IP 直连，自签 CA；唯一可用入口)
-      → caddy:10002 → 127.0.0.1:10010 → 容器 zen-gw:10002
+客户端 → http://115.29.231.25:10002/v1    (明文直连 + API key；唯一入口)
+      → 容器 zen-gw:10002（直接监听公网，无 caddy、无证书）
       → egress 池按桶 CONNECT 到设备 agent（bun 承担上游 TLS/H2 一跳）
       → opencode.ai/zen/v1
 ```
+
+> 2026-10-28 变更：取消 caddy TLS 中转，容器直接发布 `10002`。理由——客户端
+> 装证书的代价大于收益（用户明确否决）；域名链路实测 23–68s，不可用。
 
 > 域名入口 `llm.223722.xyz` 当前**不可用**（2026-10-25 实测 404：cloudflared
 > 只剩 `http_status:404` 兜底规则，无 hostname ingress）。见 ARCHITECTURE §10。
@@ -28,8 +31,8 @@
 `/opt/zen-gw/src` = **仓库 HEAD 的 `git archive` 快照**，不再是手工维护的
 「deploy 快照」。2026-10-28 已彻底重建：旧快照里的 `proxy_opencode.bak-2026*`、
 `*.egg-info`、`.pytest_cache`/`.mypy_cache`/`.ruff_cache`、`runtime-logs`、
-`.e2e_tmp`、`src-backup-*.tgz` 全部清除（2.8M，只有源码）。宿主
-`127.0.0.1:10010 → 容器 10002`，caddy `:10002` 反代 10010。`/data` 属主必须
+`.e2e_tmp`、`src-backup-*.tgz` 全部清除（2.8M，只有源码）。宿主 `10002 → 容器 10002`（明文直连；2026-10-28 前是 caddy `:10002` 反代
+loopback `10010`）。`/data` 属主必须
 可写（uid 10002），否则 eventlog 静默禁用。
 
 **重建流程**（改代码后照抄，端口/密钥/别名全程不动）：
@@ -95,7 +98,7 @@ IP 域 cordon 并接受轮换结果，前缀不符只记 `prefix_mismatch` 事�
 `proxy-ms.service`），机制见 `ARCHITECTURE.md` §7。
 
 - 容器经 `172.17.0.1:10003` 访问，**不要带 `/v1`**（适配器自己拼路径）。
-- 状态：`curl -s http://127.0.0.1:10010/healthz` 看 `fallback.engaged` /
+- 状态：`curl -s http://127.0.0.1:10002/healthz` 看 `fallback.engaged` /
   `hold_remaining_s`；`docker logs zen-gw --since 1h 2>&1 | grep FALLBACK`。
 - **事故级留痕（2026-10-27 起）**：首次跳闸 = ERROR
   `PRODUCTION INCIDENT - FALLBACK ENGAGED`，重复跳闸 = INFO `FALLBACK
@@ -141,8 +144,8 @@ docker logs zen-gw --since 30m 2>&1 | grep -E "chat completion|stream stalled|fa
 docker compose -f /opt/zen-gw/src/deploy/ecs/compose.yml up -d --build   # 重建
 
 # 桶状态 / 手动换 IP（管理员 key，仅 Tailscale/loopback）
-curl -s http://127.0.0.1:10010/admin/egresses -H "Authorization: Bearer <key>"
-curl -X POST http://127.0.0.1:10010/admin/egresses/<桶名>/rotate -H "Authorization: Bearer <key>"
+curl -s http://127.0.0.1:10002/admin/egresses -H "Authorization: Bearer <key>"
+curl -X POST http://127.0.0.1:10002/admin/egresses/<桶名>/rotate -H "Authorization: Bearer <key>"
 
 # 结构化事件（换 IP 全时间线含前后 IP、cordon、IP 变化）
 tail -f /opt/zen-gw/src/deploy/ecs/data/egress_events.jsonl
@@ -188,7 +191,7 @@ IP 解决。**不得仅凭 429 触发换 IP**（2026-10-25 曾因此单日换 IP
 ### 4.2 看桶
 
 ```bash
-curl -s http://127.0.0.1:10010/admin/egresses -H "Authorization: Bearer <key>" | python3 -m json.tool
+curl -s http://127.0.0.1:10002/admin/egresses -H "Authorization: Bearer <key>" | python3 -m json.tool
 # healthy / cordoned / cordon_reason / egress_ip / counters.last_rotation_*
 docker logs zen-gw 2>&1 | grep -E "bun upstream attempt|answering 503|FALLBACK"
 ```

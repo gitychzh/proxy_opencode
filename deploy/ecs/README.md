@@ -8,9 +8,9 @@
 | 文件 | 用途 |
 |---|---|
 | `Dockerfile` | 网关镜像（`python:3.12-slim` + 内置 bun + `pip install .`） |
-| `compose.yml` | 容器编排：发布到宿主 `127.0.0.1:10010`，只读根文件系统 + `/data` 卷 |
+| `compose.yml` | 容器编排：直接发布到宿主 `10002`（公网明文，API key 鉴权），只读根文件系统 + `/data` 卷 |
 | `env.example` | 环境变量模板；复制为 `.env` 填真实值（`.env` 已 gitignore） |
-| `Caddyfile.snippet` | 客户端入口 `:10002`（IP 自签 + 域名 LE 两方案）→ 反代 `127.0.0.1:10010` |
+| `Caddyfile.snippet` | **历史遗留**：TLS 入口方案（IP 自签 + 域名 LE）。2026-10-28 起不再使用，客户端直连 10002 |
 
 ## 构建与运行
 
@@ -29,8 +29,8 @@ docker.io 拉不到 `python:3.12-slim`，先配 `/etc/docker/daemon.json` 的
 ## 验证
 
 ```bash
-curl -s http://127.0.0.1:10010/healthz | python3 -m json.tool
-curl -s http://127.0.0.1:10010/admin/egresses \
+curl -s http://127.0.0.1:10002/healthz | python3 -m json.tool
+curl -s http://127.0.0.1:10002/admin/egresses \
   -H "Authorization: Bearer <key>" | python3 -m json.tool
 # 每桶应 healthy=true，egress_ip 落在其 expect_prefix 内
 ```
@@ -39,7 +39,7 @@ curl -s http://127.0.0.1:10010/admin/egresses \
 硬 429，共用同一编排）：
 
 ```bash
-curl -s -X POST http://127.0.0.1:10010/admin/egresses/owin10-mobile/rotate \
+curl -s -X POST http://127.0.0.1:10002/admin/egresses/owin10-mobile/rotate \
   -H "Authorization: Bearer <key>"
 # 返回 {"started": true}；成败看 counters.last_rotation_*。
 # 光猫约 80s 恢复 + 30-40s PPPoE 回拨。
@@ -61,30 +61,35 @@ docker compose exec zen-gw tail -f /data/egress_events.jsonl
 
 ## 被反代模型浏览（`/v1/models_cus`）
 
-唯一展示上游裸 ID 的端点，浏览器可直接打开（IP 入口需先信任自签 CA / 或用域名
-入口）：
+唯一展示上游裸 ID 的端点，浏览器可直接打开（明文入口，无需证书）：
 
 ```
-https://115.29.231.25:10002/v1/models_cus?key=<网关或管理员KEY>
+http://115.29.231.25:10002/v1/models_cus?key=<网关或管理员KEY>
 ```
 
 鉴权接受 `?key=` 或 Bearer。**不要**给该端点再造普通名字的别名（会被扫描 agent
 捕获）。裸 ID 仅排障可见：聊天接口一律 404，客户端用公开别名；标准 `/v1/models`
 永远只列公开别名（严格 OpenAI 形状）。
 
-## 入口（caddy）
+## 入口
+
+**当前（2026-10-28 起）**：容器直接绑定公网 `10002`，明文 HTTP + API key。
+没有 caddy、没有证书，客户端零安装。安全组放行入站 TCP 10002 即可。
+
+**历史方案（已下线，保留以备恢复）**：caddy 监听 `:10002` 做 TLS，反代
+`127.0.0.1:10010`，容器只绑 loopback。配置见 `Caddyfile.snippet`；恢复步骤：
 
 ```bash
 sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%F-%H%M)
 # 1) 把 Caddyfile.snippet 追加进 /etc/caddy/Caddyfile
 # 2) sudo caddy validate --config /etc/caddy/Caddyfile
 # 3) sudo systemctl reload caddy        # 失败则 restart 回滚
-# 4) 阿里云安全组放行入站 TCP 10002
+# 4) compose.yml 的 ports 改回 "127.0.0.1:10010:10002"，docker compose up -d
 ```
 
-TLS 两方案：
+TLS 两方案（历史）：
 
-1. **IP + 自签 CA（默认）**：复用 `/etc/caddy/certs/gw.crt` / `gw.key`（hermes 已
+1. **IP + 自签 CA**：复用 `/etc/caddy/certs/gw.crt` / `gw.key`（hermes 已
    pin 该 CA，`ssl_ca_cert` 不变）。
 2. **域名 + LE 真证书（客户零安装）**：`llm.223722.xyz` 的 A 记录**灰云**（仅
    DNS，不走 CF 代理——CF 海外绕行实测慢 10 倍）直指 ECS IP，caddy 用 Cloudflare
@@ -95,5 +100,4 @@ TLS 两方案：
 
 ```bash
 cd deploy/ecs && docker compose down     # 容器退出
-# 删除 Caddyfile 里追加的 :10002 site 块并 systemctl reload caddy
 ```

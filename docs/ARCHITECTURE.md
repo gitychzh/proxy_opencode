@@ -11,12 +11,12 @@
 
 ```
 hermes / codex / 任意 OpenAI 兼容客户端
-   │ https://115.29.231.25:10002/v1   (IP + 自签 CA；唯一可用入口)
+   │ http://115.29.231.25:10002/v1    (明文 + API key；唯一入口，2026-10-28 起)
    │ https://llm.223722.xyz:443/v1    (域名入口；2026-10-25 实测 404，
    │                                   见 §10「域名入口现状」)
    ▼
 ECS ┌───────────────────────────────────────────────────────────┐
-    │ caddy :10002 (TLS) ──▶ 127.0.0.1:10010                     │
+    │ docker zen-gw  :10002 （直接监听公网，无 caddy、无证书）      │
     │ docker zen-gw（本 repo 唯一部署点）                         │
     │  ├ routes/     chat / models / responses / anthropic /admin │
     │  ├ upstreams/  zen_direct、bun 传输、failover（备用链路）    │
@@ -30,7 +30,8 @@ ECS ┌────────────────────────�
       └─────────────┴───────────────┴──────────────┴──▶ opencode.ai/zen/v1
 ```
 
-四跳：客户端 → caddy(TLS) → 容器 → 设备 agent 的 CONNECT 隧道 → Zen。
+四跳：客户端 → 容器:10002 → 设备 agent 的 CONNECT 隧道 → Zen。明文入口
+（2026-10-28 起）把 caddy/TLS 那一跳去掉：客户端只需 API key，不装证书。
 出口 IP 是各设备自己的公网 IP，也就是免费层计量的维度。上游 TLS/HTTP2 那一跳
 由 `zen_bun/forward.ts` 一次性子进程承担（传输栈门），每次上游试探以当前租得桶
 的 agent 作 HTTPS 代理出站（Basic 凭据即时拼装，不落日志/spec）；池选择、
@@ -42,8 +43,8 @@ cordon、换 IP、failover 语义与传输无关。
 |---|---|---|
 | **10001** | 设备侧 egress-agent | CONNECT + `/healthz` + `/rotate` 同端口（owin10-mobile / cc9） |
 | **10002（设备）** | egress-agent 第二实例 | 同设备第二上行（owin10-telecom） |
-| **10002（ECS）** | caddy | 客户端入口，反代 `127.0.0.1:10010` |
-| **10010** | 容器宿主映射 | 运维入口（`/admin/*`、`/healthz`），仅 loopback |
+| **10002（ECS）** | 容器直接发布 | 客户端入口，明文 HTTP + API key（2026-10-28 起；此前是 caddy TLS 反代 `127.0.0.1:10010`） |
+| **10010** | 容器宿主映射 | `since-retired`（2026-10-28）：旧 loopback 运维入口，随 caddy 链路一并下线 |
 | 10003 | proxy_ms（ECS 宿主） | 备用链路网关，见 §7 |
 | 20001 / 20002 | proxy_nv（ECS 宿主，caddy `:20002`） | 与本栈无关，不动 |
 | 9443 / 7892 / 8793 等 | 旧栈 | 2026-10-17 已清退；设备侧 8791 旧网关不可达闲置 |
