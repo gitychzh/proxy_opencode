@@ -82,6 +82,28 @@ curl -s -H "X-Admin-Key: $K" http://127.0.0.1:10002/edge/status   # 看 primary.
 **验收**：`curl -s http://127.0.0.1:10002/healthz` 必须同时有 `role: edge`、
 `primary.alive: true`、`fallback.configured: true`；三个缺一就说明 edge 的 env 没接对。
 
+> **⚠️ 只重建网关时不要 `docker build -t zen-gw:0.8` 后再 `up -d`**
+>
+> compose 里两个服务都引用 `zen-gw:0.8`。把该 tag 指向新镜像后再 `up -d`，
+> edge 会**一起被重建**（2026-10-29 实测：`Container zen-gw-edge Recreate`）——
+> 它的 10002 端口会短暂不可用，等于把"改网关不影响用户"的收益丢掉。
+>
+> 只想换网关本体时（edge 代码没改），用 compose 的 `--no-deps`：
+>
+> ```bash
+> docker build -f deploy/ecs/Dockerfile -t zen-gw:0.8 -t zen-gw:<ver> .
+> cd deploy/ecs && docker compose up -d --no-build --no-deps zen-gw
+> ```
+>
+> 两条都改了才需要整体 `up -d`（此时那几十秒的入口空窗由备用链之外的
+> DNS/TCP 层承担，无法避免）。
+
+**重建期间的可用性**：`zen-gw` 停着的时候，edge 会按探针失败直接改投
+`172.17.0.1:10003`。2026-10-29 实测：`docker rm -f zen-gw` 之后立刻发请求，
+客户端拿到 `200`，响应头 `x-edge-route: fallback` +
+`x-edge-fallback-reason: ConnectError: ... name resolution`。这就是 0.8.0 拆分
+入口的目的，**重建时不需要停 edge，也不需要通知用户**。
+
 
 `/opt/zen-gw/src` = **仓库 HEAD 的 `git archive` 快照**，不再是手工维护的
 「deploy 快照」。2026-10-28 已彻底重建：旧快照里的 `proxy_opencode.bak-2026*`、
@@ -297,8 +319,54 @@ docker logs zen-gw 2>&1 | grep -E "bun upstream attempt|answering 503|FALLBACK"
 - 不要用真实用户密钥做批量探测；不要把请求正文、prompt、key 写入日志。
 - 桶出口上**成功（200）**的活体调用会消耗该 IP 当日额度——实验少而精、
   clone-first；429/403/401/传输失败不烧额度。
+- **上下文边界探测极贵**：顶到 26 万 token 的 200 响应一次就是几十万 prompt
+  tokens（≈一个桶的日额度）。2026-10-29 的一轮扫描直接把 mobile 桶打到
+  `free_quota_exhausted`，后续全部 429。要测就一次到位、别重复取样；
+  需要重复取样时先算清楚预算。
 - `httpx`/`httpcore` 的 INFO 日志会打印带凭据的 URL，`setup_logging` 已压到
   WARNING，不得回退。
+
+### 4.5 上游版本漂移（每天都要能回答的问题）
+
+免费层的形状门跟着 opencode CLI 的 release 走。**CLI 一发新版，门就可能开始回
+配额形状的 429**，而指标上看起来只是"额度用完了"——2026-10-29 那次事故就是
+1.19.5 的门被喂了 1.19.4 的工具集。
+
+```bash
+python scripts/sync_opencode.py           # 只报告；exit 3 = 漂移
+python scripts/sync_opencode.py --write    # 刷新它能刷的部分（目前只有 prompt）
+```
+
+判据与自动化边界（别指望它全自动）：
+
+| 项 | 来源 | 可自动化？ |
+|---|---|---|
+| CLI 版本 | npm `opencode-ai` 的 `latest` | ✅ 精确 |
+| prompt 模板 | GitHub `session/prompt/default.txt` | ✅ 纯文本、可字节比对 |
+| 内置工具**名字** | GitHub `tool/builtins.ts` 的模块清单 | ⚠️ 仅作提示（模块名 ≠ 线上名，且注册的比实际发的多） |
+| 内置工具 **schema** | Effect `Schema`（TS） | ❌ 无法静态转换，必须真实 CLI 抓包 |
+
+抓包姿势（`scripts_local/capture_server.py`，本机已验证）：
+
+```bash
+python scripts_local/capture_server.py 8899 captured.json      # 1
+mkdir ~/ocprobe && cd ~/ocprobe
+cat > opencode.json <<'EOF'
+{"provider":{"opencode":{"options":{"baseURL":"http://127.0.0.1:8899/v1"}}}}
+EOF
+XDG_DATA_HOME=$PWD/xdg opencode run "reply with the single word OK" \
+  --model opencode/big-pickle                                   # 2
+```
+
+第二条必须带 `XDG_DATA_HOME`：否则会用默认数据目录里的旧 DB，报
+`Database is not empty and has no session table`。
+
+> 1.19.5 抓包事实：`builtins.ts` 装了 12 个模块，实际只发 **11 个**工具名
+> （`question`、`apply-patch` 注册但不提供给模型）。我方资产保留 12 个是超集
+> ——门接受超集、拒绝子集，所以无需删。
+>
+> `.github/workflows/drift.yml` 每天 09:17 CST 跑一次；漂移即 CI fail。
+> 它需要 `GITHUB_TOKEN`（匿名 API 只有 60 次/小时，共享 runner 秒光）。
 
 ## 5. 事故编年（压缩，详情见 CHANGELOG）
 
