@@ -17,8 +17,10 @@ from proxy_opencode.insights import (
     parse_event_records,
     parse_log_lines,
     percentile,
+    record_epoch,
     render_markdown,
     summarize,
+    window_events,
 )
 
 
@@ -84,6 +86,113 @@ def test_parse_log_lines_handles_text_and_json_formats():
 
 def test_parse_log_lines_ignores_noise():
     assert parse_log_lines("plain line with no pairs\n\n") == []
+
+
+def test_record_epoch_accepts_every_shipped_timestamp_shape():
+    """The ledger writes isoformat UTC, the text formatter writes a comma
+    milliseconds run, and both must land on the same absolute clock."""
+    reference = 1793124505.0  # 2026-10-27T18:08:25Z
+    for ts in (
+        "2026-10-27T18:08:25+00:00",
+        "2026-10-27T18:08:25.000+00:00",
+        "2026-10-27T18:08:25Z",
+        "2026-10-27 18:08:25",
+        "2026-10-27 18:08:25,000",
+    ):
+        assert record_epoch({"ts": ts}) == reference, ts
+    # Nothing timestamped at all must be None, not a silent zero.
+    assert record_epoch({}) is None
+    assert record_epoch({"ts": "not-a-time"}) is None
+
+
+# ---------------------------------------------------------------- windowing
+
+
+def test_window_events_drops_ledger_history_older_than_the_log_window():
+    """A 12-day ledger tail read against a 24h log dump must not be counted
+    as one window: the mismatch invented a `fallback_backup_broken` critical
+    off a failure 30 hours old while proxy_ms was healthy (2026-10-28)."""
+    events = [
+        {"ts": "2026-10-20T00:00:00+00:00", "event": "fallback_failed"},
+        {"ts": "2026-10-27T12:00:00+00:00", "event": "fallback_engaged"},
+    ]
+    logs = [_chat(200, 1000.0, ts="2026-10-27T18:00:00+00:00")]
+    kept, info = window_events(events, logs, window_hours=24.0)
+
+    assert [r["event"] for r in kept] == ["fallback_engaged"]
+    assert info["kept"] == 1 and info["dropped"] == 1
+    assert info["anchor"] == "2026-10-27T18:00:00+00:00"
+
+
+def test_window_events_anchors_on_the_newest_record_not_the_wall_clock():
+    """Replaying a saved window must reproduce the numbers, so the anchor is
+    the newest record — a wall-clock anchor would slide on every re-render."""
+    events = [{"ts": "2026-01-01T00:00:00+00:00", "event": "cordon"}]
+    logs = [_chat(200, 1000.0, ts="2026-01-02T00:00:00+00:00")]
+
+    kept, info = window_events(events, logs, window_hours=24.0)
+    assert kept == events  # exactly 24h back is inside the window
+    assert info["dropped"] == 0
+
+
+def test_window_events_keeps_undated_records_and_counts_them():
+    events = [{"event": "cordon"}, {"epoch": 1}]
+    logs = [_chat(200, 1000.0, ts="2026-10-27T18:00:00+00:00")]
+    kept, info = window_events(events, logs, window_hours=24.0)
+
+    assert len(kept) == 2, "an undated record cannot be attributed, not dropped"
+    assert info["undated"] == 2
+
+
+def test_window_events_zero_hours_disables_the_cut():
+    events = [{"ts": "2000-01-01T00:00:00+00:00", "event": "cordon"}]
+    logs = [_chat(200, 1000.0, ts="2026-10-27T18:00:00+00:00")]
+    kept, info = window_events(events, logs, window_hours=0)
+    assert len(kept) == 1 and info["dropped"] == 0
+
+
+def test_summarize_reports_the_window_it_used():
+    events = [
+        {"ts": "2026-10-20T00:00:00+00:00", "event": "fallback_failed"},
+        {"ts": "2026-10-27T12:00:00+00:00", "event": "fallback_engaged"},
+    ]
+    logs = [_chat(200, 1000.0, ts="2026-10-27T18:00:00+00:00")]
+    s = summarize(events, logs)
+
+    assert s["events"]["fallback_failed"] == 0, "the stale failure is out of window"
+    assert s["events"]["fallback_incidents"] == 1
+    assert s["events"]["total"] == 1
+    assert s["events_window"]["dropped"] == 1
+    assert s["events_window"]["hours"] == 24.0
+
+
+def test_stale_ledger_failure_alone_no_longer_raises_a_critical():
+    """The production shape of the false critical: a `fallback_failed` from
+    30 hours ago, a healthy 24h log. Anchored at 18:00Z, anything before
+    2026-10-26T18:00Z is out of window."""
+    events_text = (
+        json.dumps({"ts": "2026-10-25T18:42:49+00:00", "event": "fallback_failed"})
+        + "\n"
+    )
+    log_text = (
+        json.dumps(_chat(200, 1000.0, ts="2026-10-27T18:00:00+00:00", request_id="r1"))
+        + "\n"
+        + json.dumps(
+            _streamed("completed", request_id="r1", ts="2026-10-27T18:00:01+00:00")
+        )
+        + "\n"
+    )
+    summary, findings = analyze(events_text, log_text)
+    assert [f["key"] for f in findings if f["severity"] == "critical"] == []
+
+    # The same failure inside the window is still a critical, with its window.
+    fresh = (
+        json.dumps({"ts": "2026-10-27T17:00:00+00:00", "event": "fallback_failed"})
+        + "\n"
+    )
+    _, fresh_findings = analyze(fresh, log_text)
+    critical = [f for f in fresh_findings if f["severity"] == "critical"]
+    assert critical and critical[0]["evidence"]["window_hours"] == 24.0
 
 
 # --------------------------------------------------------------- statistics
@@ -228,6 +337,58 @@ def test_diagnose_flags_tight_ttfb_deadline():
     logs = [_streamed("completed", ttfb_ms=50_000.0)]
     findings = diagnose(summarize([], logs), ttfb_deadline_s=60.0)
     assert "ttfb_deadline_tight" in _keys(findings)
+
+
+def test_diagnose_deadline_rule_sees_the_pre_first_byte_phase():
+    """A synthesized stream (buffered upstream, replayed as SSE) reports a
+    sub-millisecond ttfb_ms, so the header-deadline rule could never fire on
+    this workload. The phase split carries the real wait instead: measured
+    2026-10-28 production had ttfb_ms=0.3 with 63.8s before the first byte,
+    i.e. the deadline risk was invisible."""
+    logs = [
+        _chat(200, 63_897.0, request_id="r1"),
+        _streamed("completed", request_id="r1", ttfb_ms=0.3, duration_ms=57.0),
+    ]
+    summary = summarize([], logs)
+    assert summary["streams"]["ttfb_ms"]["p95"] == 0.3
+    assert summary["requests"]["pre_first_byte_ms"]["p95"] == 63_840.0
+
+    findings = diagnose(summary, ttfb_deadline_s=60.0)
+    item = next(f for f in findings if f["key"] == "ttfb_deadline_tight")
+    assert item["evidence"]["head_p95_ms"] == 63_840.0
+    assert item["evidence"]["ttfb_p95_ms"] == 0.3
+
+
+def test_diagnose_deadline_rule_stays_quiet_on_fast_turns():
+    logs = [
+        _chat(200, 3000.0, request_id="r1"),
+        _streamed("completed", request_id="r1", ttfb_ms=900.0, duration_ms=2000.0),
+    ]
+    findings = diagnose(summarize([], logs), ttfb_deadline_s=60.0)
+    assert "ttfb_deadline_tight" not in _keys(findings)
+
+
+def test_diagnose_separates_a_bucket_eating_the_deadline_from_a_tight_deadline():
+    """63.8s pre-first-byte is healthy when an in-request bucket retry paid
+    the 60s deadline and the next bucket answered in 3.9s: the bound worked,
+    the bucket did not. The action must then be "look at that bucket", never
+    "raise ZEN_TTFB_S" (which would park every turn on the dead bucket)."""
+    logs = [
+        {"msg": "egress failover: upstream transport on one bucket, "
+                "retrying on another (2 attempt(s) left)"},
+        _chat(200, 63_897.0, request_id="r1"),
+        _streamed("completed", request_id="r1", ttfb_ms=0.3, duration_ms=57.0),
+    ]
+    summary = summarize([], logs)
+    assert summary["egress"]["intra_request_failovers"] == 1
+
+    findings = diagnose(summary, ttfb_deadline_s=60.0)
+    keys = _keys(findings)
+    assert "head_deadline_absorbed" in keys
+    assert "ttfb_deadline_tight" not in keys
+    item = next(f for f in findings if f["key"] == "head_deadline_absorbed")
+    assert item["severity"] == "info"
+    assert "不要" in item["action"] and "ZEN_TTFB_S" in item["action"]
 
 
 def test_diagnose_flags_rotation_not_landing():

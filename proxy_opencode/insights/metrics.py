@@ -11,12 +11,21 @@ sees one of the two fields missing.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from .. import __version__
+from .parse import record_epoch
 
 # Stream end outcomes that mean "the client got a clean, complete answer".
 CLEAN_STREAM_REASONS = frozenset({"completed"})
+
+# Default alignment window for the ledger, matching the documented log dump
+# (``docker logs zen-gw --since 24h``). The two sources are read with
+# different scopes — the ledger is a whole-file ``tail`` — so the events side
+# must be cut to the log's window or the report compares a multi-day history
+# against one day of traffic.
+EVENTS_WINDOW_HOURS = 24.0
 
 
 def percentile(values: Sequence[float], q: float) -> float | None:
@@ -55,6 +64,67 @@ def _num(value: Any) -> float | None:
 def _event_name(record: Mapping[str, Any]) -> str:
     name = record.get("event")
     return str(name) if isinstance(name, str) else ""
+
+
+def _iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat(timespec="seconds")
+
+
+def _newest_epoch(records: Sequence[Mapping[str, Any]]) -> float | None:
+    newest: float | None = None
+    for record in records:
+        epoch = record_epoch(record)
+        if epoch is not None and (newest is None or epoch > newest):
+            newest = epoch
+    return newest
+
+
+def window_events(
+    events: Sequence[Mapping[str, Any]],
+    logs: Sequence[Mapping[str, Any]],
+    *,
+    window_hours: float = EVENTS_WINDOW_HOURS,
+) -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
+    """Cut the ledger to the same window the logs were dumped with.
+
+    The anchor is the newest timestamp *on either side*, not the wall clock:
+    a replay of a saved window must yield the same numbers as the live run
+    (determinism is the whole point of this module), and the wall clock would
+    silently slide every time the report is re-rendered.
+
+    Records without a parseable ``ts`` are kept and counted separately: they
+    cannot be attributed to a window, and silently dropping them would hide
+    a ledger whose timestamps stopped being written.
+    """
+
+    anchor = _newest_epoch(logs)
+    if anchor is None:
+        anchor = _newest_epoch(events)
+    undated = sum(1 for record in events if record_epoch(record) is None)
+    if anchor is None or window_hours <= 0:
+        return list(events), {
+            "hours": float(window_hours),
+            "anchor": None if anchor is None else _iso(anchor),
+            "kept": len(events),
+            "dropped": 0,
+            "undated": undated,
+        }
+    cutoff = anchor - float(window_hours) * 3600.0
+    kept: list[Mapping[str, Any]] = []
+    dropped = 0
+    for record in events:
+        epoch = record_epoch(record)
+        if epoch is None or epoch >= cutoff:
+            kept.append(record)
+        else:
+            dropped += 1
+    return kept, {
+        "hours": float(window_hours),
+        "anchor": _iso(anchor),
+        "kept": len(kept),
+        "dropped": dropped,
+        "undated": undated,
+    }
 
 
 def _summarize_events(
@@ -113,6 +183,8 @@ def _summarize_events(
 def summarize(
     events: Sequence[Mapping[str, Any]],
     logs: Sequence[Mapping[str, Any]],
+    *,
+    window_hours: float = EVENTS_WINDOW_HOURS,
 ) -> dict[str, Any]:
     """Fold raw records into the metric block the diagnosis reads.
 
@@ -121,7 +193,8 @@ def summarize(
     attributable and must not be reported).
     """
 
-    events_block, _ = _summarize_events(events)
+    windowed, window_info = window_events(events, logs, window_hours=window_hours)
+    events_block, _ = _summarize_events(windowed)
 
     # The phase split needs two DIFFERENT log lines of the same turn: the
     # request record carries the total latency, the stream record carries the
@@ -143,9 +216,16 @@ def summarize(
     per_bucket: dict[str, int] = {}
     fallback_served = 0
     fallback_served_by_model: dict[str, int] = {}
+    egress_failovers = 0
 
     for record in logs:
         message = str(record.get("msg") or record.get("message") or "")
+        if message.startswith("egress failover"):
+            # An in-request bucket retry: the turn survived because a second
+            # bucket answered. The phase split then contains a *whole* header
+            # deadline plus the retry, which is the healthy shape — not
+            # evidence that the deadline is too tight.
+            egress_failovers += 1
         if message == "chat completion" or (
             "status" in record and "latency_ms" in record and "event" not in record
         ):
@@ -205,6 +285,7 @@ def summarize(
     return {
         "version": __version__,
         "events": events_block,
+        "events_window": window_info,
         "requests": {
             "total": total,
             "ok": ok,
@@ -246,7 +327,14 @@ def summarize(
             ),
         },
         "per_bucket": dict(sorted(per_bucket.items())),
+        "egress": {"intra_request_failovers": egress_failovers},
     }
 
 
-__all__ = ["CLEAN_STREAM_REASONS", "percentile", "summarize"]
+__all__ = [
+    "CLEAN_STREAM_REASONS",
+    "EVENTS_WINDOW_HOURS",
+    "percentile",
+    "summarize",
+    "window_events",
+]

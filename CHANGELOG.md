@@ -3,6 +3,38 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.7.6] - 2026-10-28
+
+### Fixed
+
+- **自我优化报告把 12 天账本和 24 小时日志并成一张表，凭空造出 critical** —
+  每日巡检报 `[严重] 兜底链自身失败：主链与 proxy_ms 同时不可用`
+  （`{"fallback_failed": 125, "incidents": 129}`），退出码 1，按纪律要先修
+  proxy_ms。实测证伪：`proxy_ms /healthz` 回 200、`version 3.0.1`、
+  `uptime 25572s`、7 个 key；24 小时窗口内 `fallback_failed` 为 **0**，
+  最后一条失败在 `2026-10-26T18:42Z`（30 小时前）。根因：账本是整文件读取
+  （`tail -c 2000000` 带回 10-16 起的 8631 条），日志是 `--since 24h` 导出的
+  255 条，`summarize()` 对两侧不做对齐，于是 12 天历史被当成当前状态。
+  修法：`summarize(..., window_hours=)` 以**两侧最新时间戳**为锚把账本裁到窗口内
+  （默认 24h，新增 `--events-window-hours`，0 = 不裁），无 `ts` 的记录保留并单独
+  计数；锚点取数据不取墙钟，同一输入重放必得同一结论。报告「事件账本」行现在
+  打印窗口/锚点/丢弃条数（本次运行：`kept 603 / dropped 8028`）。证据：
+  `test_window_events_drops_ledger_history_older_than_the_log_window`、
+  `test_stale_ledger_failure_alone_no_longer_raises_a_critical`。
+- **TTFB 期限规则读错了相位，既报不出真风险又给错动作** — `ttfb_ms` 在本栈
+  量的是中继把**已到手**的首块交给路由的瞬间（实测 0.2–0.3ms），不是上游首字节；
+  上游整包缓冲后重放成 SSE 的轮次里它恒为亚毫秒，于是「首块 p95 > 0.8 ×
+  `ZEN_TTFB_S`」这条规则在真实负载上**永远不可能触发**（实测首字节前 p95 已达
+  63839.8ms，规则沉默）。现在取 `max(ttfb_p95, 首字节前 p95)`——每条流记录只填
+  其中一侧，取大才是「客户端见到第一个字节前的最坏耗时」。
+- **同一个 63.8s 曾会被建议「调大 ZEN_TTFB_S」，那是反向操作** — 实测
+  `17:41:30` 首桶 `owin10-mobile` 发出尝试、`17:42:31`（恰好 60s 后）
+  `TtfbTimeout` 换桶、`17:42:34` 由 `owin10-telecom` 200 收尾：期限正常工作，
+  是那个桶吃满了它。调大只会让死桶每轮多占 60s+。因此按「窗口内是否有请求内
+  换桶」分流：有 → 新增 `head_deadline_absorbed`（info，动作＝查那个桶，
+  **不要**调大期限）；无 → 仍报 `ttfb_deadline_tight`（warning）。证据：
+  `test_diagnose_separates_a_bucket_eating_the_deadline_from_a_tight_deadline`。
+
 ## [0.7.5] - 2026-10-28
 
 ### Fixed

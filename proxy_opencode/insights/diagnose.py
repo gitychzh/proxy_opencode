@@ -56,6 +56,7 @@ def diagnose(
     """Turn the metric block into ordered, actionable findings."""
 
     events = summary.get("events") or {}
+    window: dict[str, Any] = dict(summary.get("events_window") or {})
     requests = summary.get("requests") or {}
     streams = summary.get("streams") or {}
     fallback = summary.get("fallback") or {}
@@ -73,7 +74,9 @@ def diagnose(
     pre_byte_p95 = (requests.get("pre_first_byte_ms") or {}).get("p95")
 
     # 1. The safety net itself is broken — this outranks everything else:
-    #    without proxy_ms the loop loses the property it depends on.
+    #    without proxy_ms the loop loses the property it depends on. The
+    #    evidence carries the ledger window so a reader can tell "the backup
+    #    is down NOW" from "the backup was down during the window".
     if failed:
         findings.append(
             _finding(
@@ -84,6 +87,8 @@ def diagnose(
                 "期间任何主链故障都会直达客户端。",
                 fallback_failed=failed,
                 incidents=incidents,
+                window_hours=window.get("hours"),
+                window_anchor=window.get("anchor"),
             )
         )
 
@@ -148,23 +153,57 @@ def diagnose(
             )
         )
 
-    # 6. Header deadline too tight for the observed p95.
+    # 6. Header deadline too tight for the observed p95. The first client
+    #    byte is bounded by the SAME deadline whether the answer streamed
+    #    from upstream (measured by ``ttfb_ms``) or was buffered upstream and
+    #    replayed as SSE (measured by the phase split — a synthesized stream
+    #    reports a sub-millisecond ttfb because the replay has nothing to
+    #    wait for, which used to make this rule unable to fire at all). Take
+    #    the larger of the two phases: each stream record feeds only one of
+    #    them, so the max is the honest "worst case before the client saw a
+    #    byte".
+    heads = [v for v in (ttfb_p95, pre_byte_p95) if isinstance(v, (int, float))]
+    head_p95 = max(float(v) for v in heads) if heads else None
+    failovers = int((summary.get("egress") or {}).get("intra_request_failovers") or 0)
     if (
-        isinstance(ttfb_p95, (int, float))
+        head_p95 is not None
         and ttfb_deadline_s > 0
-        and float(ttfb_p95) > ttfb_deadline_s * TTFB_DEADLINE_SHARE_WARN * 1000
+        and head_p95 > ttfb_deadline_s * TTFB_DEADLINE_SHARE_WARN * 1000
     ):
-        findings.append(
-            _finding(
-                "warning",
-                "ttfb_deadline_tight",
-                "首块时延逼近 TTFB 期限，正常慢请求会被误判超时",
-                f"把 ZEN_TTFB_S 从 {ttfb_deadline_s:g}s 上调，或先查最慢桶；"
-                "调大前确认它不是黑holed 跳的遮羞布。",
-                ttfb_p95_ms=ttfb_p95,
-                deadline_ms=ttfb_deadline_s * 1000,
+        if failovers:
+            # Measured 2026-10-28: 17:41:30 attempt on bucket #1, 17:42:31
+            # TtfbTimeout exactly 60s later, retried on bucket #2, answered at
+            # 17:42:34 — pre-first-byte 63.8s. The deadline did its job; the
+            # bucket ate it. Raising ZEN_TTFB_S would park every turn on that
+            # bucket 60+s longer, so the action must NOT be "raise the bound".
+            findings.append(
+                _finding(
+                    "info",
+                    "head_deadline_absorbed",
+                    "首块耗时吃满 TTFB 期限后由换桶救回：期限在起作用，慢的是桶",
+                    "查吃满期限的那个桶（agent 探针、隧道、ONT），"
+                    "**不要**调大 ZEN_TTFB_S：调大只会让死桶多占更久。",
+                    head_p95_ms=head_p95,
+                    deadline_ms=ttfb_deadline_s * 1000,
+                    intra_request_failovers=failovers,
+                )
             )
-        )
+        else:
+            findings.append(
+                _finding(
+                    "warning",
+                    "ttfb_deadline_tight",
+                    "首块时延逼近 TTFB 期限，正常慢请求会被误判超时",
+                    f"把 ZEN_TTFB_S 从 {ttfb_deadline_s:g}s 上调，或先查最慢桶；"
+                    "调大前确认它不是黑洞跳的遮羞布：先看证据里 ttfb_p95 与"
+                    "pre_first_byte_p95 哪个占主导——前者是上游响应头，后者是"
+                    "桶租约等待加握手。",
+                    ttfb_p95_ms=ttfb_p95,
+                    pre_first_byte_p95_ms=pre_byte_p95,
+                    head_p95_ms=head_p95,
+                    deadline_ms=ttfb_deadline_s * 1000,
+                )
+            )
     if isinstance(pre_byte_p95, (int, float)) and float(pre_byte_p95) > 20000:
         findings.append(
             _finding(

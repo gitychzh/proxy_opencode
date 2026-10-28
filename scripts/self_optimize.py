@@ -35,7 +35,11 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from proxy_opencode.insights import analyze, render_markdown  # noqa: E402
+from proxy_opencode.insights import (  # noqa: E402
+    EVENTS_WINDOW_HOURS,
+    analyze,
+    render_markdown,
+)
 
 EXIT_CRITICAL = 1
 EXIT_USAGE = 2
@@ -101,6 +105,14 @@ def main(argv: list[str] | None = None) -> int:
         help="expected proxy_ms model (e.g. ZhipuAI/GLM-5.3-Flash) for drift checks.",
     )
     parser.add_argument(
+        "--events-window-hours",
+        type=float,
+        default=EVENTS_WINDOW_HOURS,
+        help="cut ledger events to this many hours back from the newest "
+        "timestamp on either side, so the events side matches a log dumped "
+        f"with '--since <n>h' (default {EVENTS_WINDOW_HOURS:g}; 0 = keep all).",
+    )
+    parser.add_argument(
         "--out", default="", help="write the markdown report here instead of stdout."
     )
     parser.add_argument(
@@ -121,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
         log_text,
         ttfb_deadline_s=args.ttfb_s,
         fallback_model_hint=args.fallback_model,
+        events_window_hours=args.events_window_hours,
     )
 
     if args.json:

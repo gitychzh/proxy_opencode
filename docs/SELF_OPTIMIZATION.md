@@ -47,6 +47,16 @@
 | 流记录 | `routes/_pipeline.relay_stream` / `StreamRelay` | `request_id`、`chunks`、`ttfb_ms`、`duration_ms`、`reason` | 同上 |
 | 快照 | `GET /admin/egresses`（管理鉴权） | `healthy`、`cordon_reason`、`inflight`、`egress_ip`、`counters` | 需 `ADMIN_API_KEYS` |
 
+**两侧窗口必须对齐**：账本是整文件读取（`tail -c 2000000` 会带回数天到十几天的
+历史），日志是用 `--since 24h` 导出的，两者默认**不是**同一窗口。0.7.6 之前
+`summarize()` 直接计数全部账本记录，于是把 12 天的历史与 24 小时的日志并成一张表，
+制造出已经结束的 critical（2026-10-28 实测：`fallback_backup_broken` 由 30 小时前的
+`fallback_failed` 触发，而当时 proxy_ms `/healthz` 正回 200、uptime 7 小时）。
+现在 `summarize()` 以「两侧最新时间戳」为锚点，把账本裁到 `--events-window-hours`
+（默认 24，与 `--since 24h` 对齐）；无 `ts` 的记录不丢弃、单独计数（无法归属不等于
+没有发生）。锚点取数据而非墙钟，同一份输入重放必得同一结论。报告的「事件账本」
+行会打印窗口、锚点与丢弃条数。
+
 **字段白名单是硬门**：`logsetup.FIELDS` 是 `extra` 进入日志的唯一通道，未列入的字段
 被两个 formatter 静默丢弃。0.7.1 补入了 `fallback*` / `blocked_s` / `bytes` /
 `timeout_s`——在此之前每个兜底轮次在日志里看起来与主链完全一样。新增 `extra` 字段
@@ -74,7 +84,8 @@
 | `stream_cut_high` | `cut_ratio > 20%` | warning | 查 body 门（prompt 的日期/模型名/工作区是否本请求现场渲染）与 `max_tokens` |
 | `stream_stalled_high` | `stalled_ratio > 5%` | warning | 查桶 probe/连接超时；未排除传输前不要把 429 当配额 |
 | `stream_undetermined_high` | 无收尾记录占比 > 10% | warning | 查容器重启/OOM 与日志`--since` 窗口对齐 |
-| `ttfb_deadline_tight` | 首块 p95 > 0.8 × `ZEN_TTFB_S` | warning | 调 `ZEN_TTFB_S` 或先查最慢桶（别拿调大期限遮住黑holed 跳） |
+| `ttfb_deadline_tight` | 首块 p95（`ttfb_ms` 与「首字节前」取大）> 0.8 × `ZEN_TTFB_S`，且窗口内**没有**请求内换桶 | warning | 调 `ZEN_TTFB_S` 或先查最慢桶（别拿调大期限遮住黑洞跳） |
+| `head_deadline_absorbed` | 同上比例，但窗口内有请求内 `egress failover` | info | **不要**调大 `ZEN_TTFB_S`（只会让死桶多占更久）；查吃满期限的那个桶 |
 | `pre_byte_slow` | 首字节前耗时 p95 > 20s | info | 对比 `ZEN_FALLBACK_PRIMARY_TIMEOUT_S`；这段看门狗看不见 |
 | `rotation_not_landing` | 有 IP 相关 cordon 且 `rotation_failed > 0` | warning | 核对 ONT 配置/prefix 与 agent `/rotate` |
 | `quota_burn_no_rotation` | 有 `free_quota_exhausted` 但无成功换 IP | info | 确认 `ZEN_EGRESS_ROTATION` 已配（阈值可在烧穿前主动换） |
@@ -84,6 +95,12 @@
 **相位口诀的落地**：`latency_ms`（请求记录）− `duration_ms`（流记录）≈ 首字节前耗时。
 两条记录**不同行**，必须按 `request_id` 配对——`insights.summarize()` 先建
 `request_id → latency_ms` 索引再配对，单行相减会永远缺一个字段。
+
+`ttfb_ms` 在本栈里结构性地接近 0（实测 0.2–0.3ms，而同一轮 `latency_ms` 3098ms、
+`duration_ms` 340ms）：它量的是中继把**已经到手的**首块交给路由的瞬间，不是上游
+首字节。因此判期限只能取 `max(ttfb_p95, 首字节前 p95)`——每条流记录只填其中一侧
+（真流式填 `ttfb`，上游整包缓冲后重放成 SSE 的填「首字节前」），取大才是「客户端
+见到第一个字节前的最坏耗时」。
 
 ## 5. 兜底链：闭环不中断的保证（I1）
 

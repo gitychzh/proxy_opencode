@@ -16,15 +16,46 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Mapping
 
 _KV_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(\S+)")
 # Text formatter head: "<date> <time> <LEVEL> <logger> <message><extras>".
 _TEXT_HEAD_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}[ T][\d:.,]+ +[A-Z]+ +(\S+) +(.*)$"
+    r"^(?P<ts>\d{4}-\d{2}-\d{2}[ T][\d:.,]+) +[A-Z]+ +(?P<logger>\S+) +(?P<rest>.*)$"
 )
 # Where the trailing key=value run starts; everything before it is the message.
 _KV_START_RE = re.compile(r"\s+[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def record_epoch(record: Mapping[str, Any]) -> float | None:
+    """Absolute epoch seconds of a record's ``ts``; None when undated.
+
+    Needed because the two sources are *not* windowed the same way: the
+    ledger is read as a whole file (``tail -c`` keeps days of history) while
+    the log is dumped with ``--since 24h``. Counting ledger events without
+    aligning them to the log's window mixes a 12-day history with a 24-hour
+    log and invents incidents that are already over (measured 2026-10-28:
+    ``fallback_backup_broken`` was raised off a failure 30 hours old while
+    proxy_ms was answering ``/healthz`` with 200).
+
+    The gateway writes UTC (container has no ``/etc/timezone``), so a naive
+    timestamp is UTC; the text formatter's comma milliseconds are accepted.
+    """
+
+    raw = record.get("ts")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip().replace("Z", "+00:00").replace(",", ".")
+    if "T" not in text:
+        text = text.replace(" ", "T", 1)
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.timestamp()
 
 
 def parse_event_records(text: str) -> list[dict[str, Any]]:
@@ -93,8 +124,12 @@ def parse_log_lines(text: str) -> list[dict[str, Any]]:
             # The message text is what classifies a line as a request record or
             # a stream record, so it must survive parsing: without it the
             # default (text) log format yields unattributable key/value soup.
-            extras["logger"] = head.group(1)
-            extras["msg"] = _KV_START_RE.split(head.group(2), maxsplit=1)[0].strip()
+            # The head timestamp is kept for the same reason — it is the only
+            # clock a text-formatted log carries, and the events window is
+            # anchored on the newest log record.
+            extras["ts"] = head.group("ts")
+            extras["logger"] = head.group("logger")
+            extras["msg"] = _KV_START_RE.split(head.group("rest"), maxsplit=1)[0].strip()
         for key, value in _KV_RE.findall(line):
             extras[key] = _coerce(value)
         if extras:
@@ -102,4 +137,4 @@ def parse_log_lines(text: str) -> list[dict[str, Any]]:
     return out
 
 
-__all__ = ["parse_event_records", "parse_log_lines"]
+__all__ = ["parse_event_records", "parse_log_lines", "record_epoch"]

@@ -30,8 +30,8 @@ from __future__ import annotations
 from typing import Any
 
 from .diagnose import diagnose
-from .metrics import percentile, summarize
-from .parse import parse_event_records, parse_log_lines
+from .metrics import EVENTS_WINDOW_HOURS, percentile, summarize, window_events
+from .parse import parse_event_records, parse_log_lines, record_epoch
 from .render import render_markdown
 
 
@@ -41,10 +41,20 @@ def analyze(
     *,
     ttfb_deadline_s: float = 60.0,
     fallback_model_hint: str = "",
+    events_window_hours: float = EVENTS_WINDOW_HOURS,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One-shot pipeline: raw text in, (summary, findings) out."""
+    """One-shot pipeline: raw text in, (summary, findings) out.
 
-    summary = summarize(parse_event_records(event_text), parse_log_lines(log_text))
+    ``events_window_hours`` cuts the ledger to the log's window; pass 0 to
+    count every ledger record (only meaningful when both sides were already
+    dumped over the same period).
+    """
+
+    summary = summarize(
+        parse_event_records(event_text),
+        parse_log_lines(log_text),
+        window_hours=events_window_hours,
+    )
     findings = diagnose(
         summary,
         ttfb_deadline_s=ttfb_deadline_s,
@@ -54,11 +64,14 @@ def analyze(
 
 
 __all__ = [
+    "EVENTS_WINDOW_HOURS",
     "analyze",
     "diagnose",
     "parse_event_records",
     "parse_log_lines",
     "percentile",
+    "record_epoch",
     "render_markdown",
     "summarize",
+    "window_events",
 ]

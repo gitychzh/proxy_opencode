@@ -20,11 +20,25 @@ def render_markdown(
     fallback = summary.get("fallback") or {}
     lines: list[str] = [f"# {title}", ""]
     lines.append(f"- 网关版本：`{summary.get('version')}`")
+    window = summary.get("events_window") or {}
+    window_note = ""
+    window_hours = 0.0
+    raw_hours = window.get("hours")
+    if isinstance(raw_hours, (int, float)):
+        window_hours = float(raw_hours)
+    if window_hours > 0:
+        window_note = (
+            f"（窗口 {window_hours:g}h，锚点 {window.get('anchor')}；"
+            f"窗口外丢弃 {int(window.get('dropped') or 0)} 条"
+        )
+        if int(window.get("undated") or 0):
+            window_note += f"，无时间戳 {int(window.get('undated') or 0)} 条"
+        window_note += "）"
     lines.append(
         f"- 事件账本：{int(events.get('total') or 0)} 条"
         f"（兜底触发 {int(events.get('fallback_incidents') or 0)} / "
         f"恢复 {int(events.get('fallback_recovered') or 0)} / "
-        f"兜底失败 {int(events.get('fallback_failed') or 0)}）"
+        f"兜底失败 {int(events.get('fallback_failed') or 0)}）{window_note}"
     )
     lines.append(
         f"- 请求：{int(requests.get('total') or 0)} 条，成功 {int(requests.get('ok') or 0)}"
