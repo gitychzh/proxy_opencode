@@ -4,7 +4,7 @@
 > 拓扑/端口见 [`ARCHITECTURE.md`](ARCHITECTURE.md)，运维命令见
 > [`OPERATIONS.md`](OPERATIONS.md)，事件字段规格见
 > [`EGRESS_OBSERVABILITY.md`](EGRESS_OBSERVABILITY.md)。
-> 实现：`proxy_opencode/insights.py`（纯函数，受测试/ruff/mypy 门禁）+
+> 实现：`proxy_opencode/insights/`（`parse`/`metrics`/`diagnose`/`render` 四个纯函数模块，受测试/ruff/mypy 门禁）+
 > `scripts/self_optimize.py`（CLI）。
 
 ## 1. 目标与三条不变量
@@ -30,7 +30,7 @@
            │ cordon/rotation/fallback/window_rollover/ip     │ chat completion    │ 快照            │
            └────────────────────────────────────────────────┴────────────────────┴─────────────┘
                                                                │
-③ 分析层   scripts/self_optimize.py ──▶ proxy_opencode/insights.py
+③ 分析层   scripts/self_optimize.py ──▶ proxy_opencode/insights/
            parse → summarize（指标）→ diagnose（规则）→ render（报告）
                                                                │
 ④ 执行层   T0 自动应用（env/配置/文档）  T1 自动改码+过门禁  T2 只报告待人决策
@@ -75,7 +75,7 @@
 ## 4. 指标与诊断规则
 
 `summarize()` 产出指标块，`diagnose()` 按**严重度 → 代价从低到高**排序输出
-`{severity, key, title, evidence, action}`。规则表（阈值是 `insights.py` 模块常量）：
+`{severity, key, title, evidence, action}`。规则表（阈值是 `insights/diagnose.py` 模块常量）：
 
 | key | 触发条件 | 严重度 | 动作方向 |
 |---|---|---|---|
@@ -91,6 +91,12 @@
 | `quota_burn_no_rotation` | 有 `free_quota_exhausted` 但无成功换 IP | info | 确认 `ZEN_EGRESS_ROTATION` 已配（阈值可在烧穿前主动换） |
 | `no_events` / `no_traffic` | 账本 0 条 / 请求 0 条 | info | 开启事件账本 / 先跑一轮真实流量 |
 | `fallback_model_drift` | 兜底实际模型 ≠ `--fallback-model` | info | 核对 `ZEN_FALLBACK_DEFAULT_MODEL` / `ZEN_FALLBACK_MODEL_MAP` |
+| `egress_probe_flapping` | 单桶 `probe_failed` 跃迁 ≥ 12/窗口 | warning | 设备侧上行/隧道（`agent not ready`、`ConnectTimeout`），**不要**放宽探针容忍度掩盖它 |
+| `quota_cordons_high` | `free_quota_exhausted` cordon ≥ 10/窗口 | info | 先做三变量消融，再评估 `ZEN_EGRESS_ROTATION` 阈值；**不得**仅凭 429 下调 |
+
+`probe_failed` 的计数口径是**健康→不健康的状态跃迁**（`egress/pool.py` 每次跃迁只写
+一行，持续宕机不重复记），所以高计数＝反复抖动、长期宕机只留 1 条：这条区分是
+`egress_probe_flapping` 能成立的前提，改日志口径前必须先改这条规则。
 
 **相位口诀的落地**：`latency_ms`（请求记录）− `duration_ms`（流记录）≈ 首字节前耗时。
 两条记录**不同行**，必须按 `request_id` 配对——`insights.summarize()` 先建
@@ -157,7 +163,7 @@ ZEN_FALLBACK_FIRST_CHUNK_TIMEOUT_S=30
 | 级别 | 范围 | 谁做 | 门禁 |
 |---|---|---|---|
 | **T0 自动应用** | `.env` 调参（`ZEN_TTFB_S`、`STREAM_STALL_S`、`ZEN_EGRESS_ROTATION`、`ZEN_FALLBACK_*`）、日志字段白名单、文档 | WorkBuddy 直接改 + 重启容器 | 改后必须跑一轮真实流量验证 |
-| **T1 改码** | `insights.py` 规则、转换器、路由、测试 | WorkBuddy 改 + 跑全部门禁 | `pytest tests/` + `ruff check proxy_opencode tests scripts` + `mypy proxy_opencode`（+ egress-agent 侧三项） |
+| **T1 改码** | `insights/` 规则、转换器、路由、测试 | WorkBuddy 改 + 跑全部门禁 | `pytest tests/` + `ruff check proxy_opencode tests scripts` + `mypy proxy_opencode`（+ egress-agent 侧三项） |
 | **T2 只报告** | 协议常量（session 编码、UA、prompt 资产）、熔断语义、出口池判据、任何会改变对外契约的项 | 只写报告，等人决策 | 需 §7 的完整流量验证 |
 
 判据：**能靠一次容器重启回滚的进 T0；需要改代码才能回滚的进 T1；改错会让上游
@@ -243,7 +249,7 @@ WantedBy=timers.target
 | 账本未开 | 报告只有 `no_events` | 设 `ZEN_EGRESS_EVENT_LOG`，确认 `/data` 对 uid 10002 可写（否则 eventlog 静默禁用） |
 | 日志窗口错位 | `stream_undetermined_high` 升高 | `docker logs --since` 与事件窗口对齐；eventlog 5MB 轮转，`tail -c` 取尾部 |
 | 兜底链自身挂了 | `fallback_backup_broken`（critical） | 修 proxy_ms 余额/可达性；期间主链故障直达客户端 |
-| 报告"全绿"但实际有故障 | 规则没覆盖 | 补规则进 `insights.py` + `tests/test_insights.py`（纯函数，可用合成样本证伪） |
+| 报告"全绿"但实际有故障 | 规则没覆盖 | 补规则进 `insights/diagnose.py` + `tests/test_insights.py`（纯函数，可用合成样本证伪） |
 | 把 429 一律当配额 | 换 IP 风暴（实测单日 32/20/13 次） | `primary_unstable` 的 action 强制归因顺序；`rotation_not_landing` 显式提示换 IP 只对真实配额有效 |
 | 优化动作引入回归 | 门禁红 | 门禁四条任一红即回滚；T2 项永不由闭环自动改 |
 

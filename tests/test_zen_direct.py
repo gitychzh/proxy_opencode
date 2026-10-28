@@ -563,6 +563,96 @@ async def test_chat_non_stream_aggregates_sse_and_error_relay() -> None:
     await adapter.aclose()
 
 
+class _StallingResponse:
+    """Upstream that sent headers, one SSE line, then went silent."""
+
+    status_code = 200
+    headers = httpx.Headers({"content-type": "text/event-stream"})
+
+    async def aiter_lines(self):
+        yield 'data: {"id":"z","choices":[{"delta":{"content":"par"}}]}'
+        await asyncio.sleep(3600)
+
+    async def aiter_bytes(self):
+        async for line in self.aiter_lines():
+            yield line.encode()
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_aggregate_stall_raises_a_retryable_connection_error() -> None:
+    """A silent body must be a bucket verdict, not a hang.
+
+    Measured 2026-10-27 18:01Z / 18:05Z (ECS, ``stream:false`` clients): the
+    bun hop returned response **headers** — so ``forward.ts``'s TTFB timer,
+    which only covers headers, never fired — and then delivered no body line.
+    Nothing bounded the aggregation, so the request sat on that bucket until
+    ``ZEN_FALLBACK_PRIMARY_TIMEOUT_S`` (90s) cancelled it; two clients waited
+    96.5s / 97.9s and were then answered by the backup model, while a healthy
+    bucket was available the whole time. ``STREAM_STALL_S`` is the bound, and
+    the error has to be a ``ConnectionError`` so the failover loop retries.
+    """
+
+    with pytest.raises(zen_direct.StreamStalled) as excinfo:
+        await zen_direct.aggregate_sse(
+            _StallingResponse(), "big-pickle", stall_s=0.05  # type: ignore[arg-type]
+        )
+    assert isinstance(excinfo.value, ConnectionError)
+    assert "stalled" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_non_stream_stall_blocks_the_bucket_and_retries_elsewhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stall guard must reach the real non-stream chat path, then fail over.
+
+    Asserts the wiring rather than re-testing the retry loop: the stub records
+    the ``stall_s`` the adapter passed (it has to be ``STREAM_STALL_S``, not
+    the disabled ``0``) and the lease release kind.
+    """
+
+    from proxy_opencode.upstreams.zen import client as zen_client
+
+    seen: list[float] = []
+    real = zen_client.aggregate_sse
+
+    async def _stub(resp: Any, model: str, *, stall_s: float = 0.0) -> Any:
+        seen.append(stall_s)
+        if len(seen) == 1:
+            raise zen_direct.StreamStalled(
+                "zen request failed: aggregate stalled, no body line for 7s"
+            )
+        return await real(resp, model)
+
+    monkeypatch.setattr(zen_client, "aggregate_sse", _stub)
+    client_a, client_b = _leased_client(), _leased_client()
+    pool = _RollingStubPool({"bucket-a": client_a, "bucket-b": client_b})
+    adapter = ZenDirectAdapter(
+        make_settings(stream_stall_s=7.0), pool=pool  # type: ignore[arg-type]
+    )
+    with respx.mock:
+        respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+            status_code=200,
+            headers={"content-type": "text/event-stream"},
+            content=_SSE_OK,
+        )
+        result = await adapter.chat(
+            {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+        )
+    assert seen == [7.0, 7.0]
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert pool.releases == [
+        ("bucket-a", False, "stream_stalled"),
+        ("bucket-b", True, ""),
+    ]
+    await client_a.aclose()
+    await client_b.aclose()
+    await adapter.aclose()
+
+
 @respx.mock
 @pytest.mark.asyncio
 async def test_chat_stream_returns_relay() -> None:

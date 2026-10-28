@@ -13,12 +13,55 @@ are load-bearing:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 from ..openai_http import ResponseLike
+
+
+class StreamStalled(ConnectionError):
+    """No body line arrived within the stall window (``STREAM_STALL_S``).
+
+    Subclasses ``ConnectionError`` on purpose: the bucket-failover loop in
+    ``ZenDirectAdapter.chat`` already treats that as "this bucket is dead,
+    replay the same body on the next one" — which is the correct recovery
+    here, because a non-streaming client has received **nothing** yet. The
+    streaming path cannot do that (bytes already left the wire), so
+    ``StreamRelay`` synthesises a terminator instead; the two paths must not
+    be conflated.
+    """
+
+
+async def _lines_with_stall(
+    resp: ResponseLike, stall_s: float
+) -> AsyncIterator[str]:
+    """Iterate upstream lines, converting a silent gap into ``StreamStalled``."""
+
+    iterator = resp.aiter_lines()
+    while True:
+        try:
+            if stall_s > 0:
+                line = await asyncio.wait_for(iterator.__anext__(), timeout=stall_s)
+            else:
+                line = await iterator.__anext__()
+        except StopAsyncIteration:
+            return
+        except TimeoutError as exc:
+            # Measured 2026-10-27 18:01Z / 18:05Z: the bun hop delivered
+            # response HEADERS (so ``forward.ts``'s TTFB timer never fired)
+            # and then went silent for the whole 90s primary budget; the
+            # client got an answer 96s/98s later from the backup model with
+            # no attempt to use a healthy bucket. Nothing bounded this path
+            # but ``ZEN_FALLBACK_PRIMARY_TIMEOUT_S``.
+            raise StreamStalled(
+                "zen request failed: aggregate stalled, no body line for "
+                f"{stall_s:g}s"
+            ) from exc
+        yield line
 
 
 def merge_tool_call_delta(
@@ -45,8 +88,16 @@ def merge_tool_call_delta(
             slot["function"]["arguments"] += fn["arguments"]
 
 
-async def aggregate_sse(resp: ResponseLike, model: str) -> dict[str, Any]:
-    """Aggregate one upstream SSE stream into a non-stream completion JSON."""
+async def aggregate_sse(
+    resp: ResponseLike, model: str, *, stall_s: float = 0.0
+) -> dict[str, Any]:
+    """Aggregate one upstream SSE stream into a non-stream completion JSON.
+
+    ``stall_s`` bounds the wait for the *next body line*; ``0`` disables the
+    guard. Callers on the live path pass ``STREAM_STALL_S`` so the
+    non-streaming route has the same watchdog discipline as the streaming
+    one instead of hanging until the outer primary deadline.
+    """
 
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
@@ -56,7 +107,7 @@ async def aggregate_sse(resp: ResponseLike, model: str) -> dict[str, Any]:
     completion_id = ""
     created = int(time.time())
 
-    async for line in resp.aiter_lines():
+    async for line in _lines_with_stall(resp, stall_s):
         line = line.strip()
         if not line.startswith("data:"):
             continue
@@ -120,4 +171,4 @@ async def aggregate_sse(resp: ResponseLike, model: str) -> dict[str, Any]:
     }
 
 
-__all__ = ["aggregate_sse", "merge_tool_call_delta"]
+__all__ = ["StreamStalled", "aggregate_sse", "merge_tool_call_delta"]

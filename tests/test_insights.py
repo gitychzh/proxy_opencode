@@ -313,6 +313,52 @@ def test_diagnose_flags_unstable_primary_with_attribution_order():
     assert "传输栈" in item["action"] and "IP 配额" in item["action"]
 
 
+def test_diagnose_flags_probe_flapping_per_bucket():
+    """One device's two legs flipping all day is a device problem, not a
+    gateway one — and it must be visible in the report, not only in the raw
+    log. Measured 2026-10-28: 56 / 48 transitions on the two ports of
+    100.109.109.108 while the other buckets sat at 6 / 3."""
+    events = [
+        _event(event="probe_failed", egress="owin10-telecom", reason="agent not ready")
+        for _ in range(56)
+    ] + [
+        _event(event="probe_failed", egress="owin10-mobile", reason="agent not ready")
+        for _ in range(48)
+    ] + [
+        _event(event="probe_failed", egress="cc9", reason="ConnectTimeout")
+        for _ in range(6)
+    ]
+    findings = diagnose(summarize(events, [_chat(200, 1000.0)]))
+    item = next(f for f in findings if f["key"] == "egress_probe_flapping")
+    assert item["severity"] == "warning"
+    assert item["evidence"]["worst_egress"] == "owin10-telecom"
+    assert item["evidence"]["worst_failures"] == 56
+    assert item["evidence"]["probe_failed_by_egress"]["cc9"] == 6
+    # The action must not invite an IP rotation: this is not a 429 at all.
+    assert "设备侧" in item["action"] and "ZEN_EGRESS_PROXIES" in item["action"]
+
+
+def test_diagnose_stays_quiet_on_a_single_probe_transition():
+    """A genuinely dead bucket logs ONE transition (pool.py logs per state
+    change), so it must not be reported as flapping."""
+    events = [_event(event="probe_failed", egress="cc9", reason="ConnectTimeout")]
+    findings = diagnose(summarize(events, [_chat(200, 1000.0)]))
+    assert "egress_probe_flapping" not in _keys(findings)
+
+
+def test_diagnose_flags_quota_cordon_rate_without_touching_rotation():
+    events = [
+        _event(event="cordon", egress="cc9", cordon_reason="free_quota_exhausted")
+        for _ in range(12)
+    ] + [_event(event="rotation_succeeded", egress="cc9", ip_to="1.2.3.4")]
+    findings = diagnose(summarize(events, [_chat(200, 1000.0)]))
+    item = next(f for f in findings if f["key"] == "quota_cordons_high")
+    assert item["severity"] == "info"
+    assert item["evidence"]["quota_cordons"] == 12
+    # Red line: the action may never say "lower the rotation threshold now".
+    assert "不得仅凭 429 下调阈值" in item["action"]
+
+
 def test_diagnose_flags_high_cut_and_stall_ratios():
     logs = [_streamed("cut") for _ in range(8)] + [_streamed("completed") for _ in range(2)]
     findings = diagnose(summarize([], logs))

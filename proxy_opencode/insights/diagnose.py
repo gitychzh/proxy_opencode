@@ -29,6 +29,14 @@ FALLBACK_INCIDENTS_WARN = 3
 TTFB_DEADLINE_SHARE_WARN = 0.8
 # Default header deadline when the caller does not pass the live setting.
 DEFAULT_TTFB_DEADLINE_S = 60.0
+# Probe healthy->unhealthy transitions per bucket per window above which the
+# bucket is flapping rather than merely down (a sustained outage logs one).
+# Anchored on the 2026-10-28 24h reading: 56 / 48 on the two legs of one
+# device, 6 / 3 on the healthy boxes.
+PROBE_FAILURES_WARN = 12
+# Daily-quota cordons per window above which the per-IP capacity ceiling (and
+# therefore the rotation threshold) needs a fresh measurement.
+QUOTA_CORDONS_INFO = 10
 
 # Cordon reasons that are a verdict about the egress IP itself (re-issuing the
 # address clears them) — the only ones a rotation can cure.
@@ -284,6 +292,58 @@ def diagnose(
                 )
             )
 
+    # 11. Probe flapping. Counted per healthy->unhealthy *transition*, so a
+    #     high count means "this bucket keeps coming back and dropping again"
+    #     while a bucket that died for 12h logs exactly one row. Measured
+    #     2026-10-28 (24h window, 50 requests): owin10-telecom 56,
+    #     owin10-mobile 48, cc9 6, esp32-bucket 3 — the two high ones are the
+    #     two legs of ONE device (100.109.109.108:10001/10002), so the churn
+    #     is device-side and the gateway's only lever is capacity planning.
+    probe_by_egress = {
+        str(k): int(v) for k, v in (events.get("probe_failed_by_egress") or {}).items()
+    }
+    worst_egress, worst_failures = max(
+        probe_by_egress.items(), key=lambda kv: kv[1], default=("", 0)
+    )
+    hours = float(window.get("hours") or 0.0)
+    if worst_failures >= PROBE_FAILURES_WARN:
+        findings.append(
+            _finding(
+                "warning",
+                "egress_probe_flapping",
+                "出口探针反复抖动：桶在健康/不健康之间来回切换",
+                "这是设备侧上行/隧道（agent not ready、ConnectTimeout），"
+                "不是网关缺陷：查那台设备的网络与 agent 进程。"
+                "**不要**为抖动调大探针容忍度来掩盖它——只在确认某桶长期"
+                "不可用时才动 ZEN_EGRESS_PROXIES。",
+                probe_failed_by_egress=probe_by_egress,
+                worst_egress=worst_egress,
+                worst_failures=worst_failures,
+                per_hour=round(worst_failures / hours, 2) if hours > 0 else None,
+                recovered_total=int(events.get("egress_recovered") or 0),
+                window_hours=hours or None,
+            )
+        )
+
+    # 12. Daily-quota cordons. This is the capacity ceiling the rotation
+    #     threshold has to be judged against: report the observed burn rate
+    #     instead of letting an operator guess whether *-500 is sane.
+    quota_cordons = int(cordon_reasons.get("free_quota_exhausted") or 0)
+    if quota_cordons >= QUOTA_CORDONS_INFO:
+        findings.append(
+            _finding(
+                "info",
+                "quota_cordons_high",
+                "日配额 cordon 次数偏高：单 IP 可用请求数远低于轮换阈值",
+                "按 429 归因红线，先把传输栈/body 新鲜度/session 三变量消融排除，"
+                "再评估 ZEN_EGRESS_ROTATION 阈值是否高于单 IP 实际可服务请求数；"
+                "在此之前不得仅凭 429 下调阈值。",
+                quota_cordons=quota_cordons,
+                rotations_ok=int(events.get("rotations_ok") or 0),
+                window_hours=hours or None,
+            )
+        )
+
     order = {"critical": 0, "warning": 1, "info": 2}
     findings.sort(key=lambda f: order.get(str(f["severity"]), 3))
     return findings
@@ -294,6 +354,8 @@ __all__ = [
     "DEFAULT_TTFB_DEADLINE_S",
     "FALLBACK_INCIDENTS_WARN",
     "IP_SCOPED_REASONS",
+    "PROBE_FAILURES_WARN",
+    "QUOTA_CORDONS_INFO",
     "STALL_RATIO_WARN",
     "TTFB_DEADLINE_SHARE_WARN",
     "UNDETERMINED_RATIO_WARN",

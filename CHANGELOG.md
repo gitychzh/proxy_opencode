@@ -3,6 +3,47 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.7.7] - 2026-10-28
+
+### Fixed
+
+- **非流式请求没有卡顿看门狗，一个静默桶吃掉整个 90s 主链预算** — 生产实测
+  两条 `stream:false` 请求 `latency_ms=96475.4` / `97941.8`，都带
+  `fallback=proxy_ms`、`fallback_reason=primary timeout`。时间轴对齐到毫秒：
+  `18:01:41` 在 `cc9` 发出 bun 尝试 → `18:03:11` 兜底触发，正好 90s，等于
+  `ZEN_FALLBACK_PRIMARY_TIMEOUT_S`；`18:05:40` → `18:07:10` 同理。中间**没有**
+  任何 `egress failover` 行，说明既没有换桶、也没有 TTFB 超时：上游把响应
+  **响应头**发回来了（所以 `forward.ts` 的 `ZEN_BUN_TTFB_MS` 只管头，永不触发），
+  随后正文一个字节都没有。根因在 `_consume_ok`：`stream=true` 走
+  `StreamRelay`（有 `STREAM_STALL_S` 看门狗），`stream=false` 走
+  `aggregate_sse()`，那条通路**没有任何字节期限**，只被外层 90s 兜底期限
+  兜住。于是客户端等 96s 后由一个**不同模型**（GLM-5.3-Flash）回答，而当时
+  池里还有健康桶可用。修法：`aggregate_sse(..., stall_s=)` 按
+  `STREAM_STALL_S` 约束「下一行正文」的等待，超时抛
+  `StreamStalled(ConnectionError)`；换桶循环据此重试另一个桶（非流式客户端的
+  wire 上还没有任何字节，重试对客户端不可见）。流式通路保持原语义不变：那里
+  字节已经发出去了，只能合成终止符，不能重试。租约释放用独立的
+  `kind=stream_stalled`（与 `aggregate_error` 分开，前者是死隧道、后者是坏
+  响应体）。证据：`test_aggregate_stall_raises_a_retryable_connection_error`、
+  `test_non_stream_stall_blocks_the_bucket_and_retries_elsewhere`。
+
+### Added
+
+- **报告能看见「桶在抖」了**（`egress_probe_flapping`，warning）——24 小时窗口内
+  `probe_failed` 113 条，但诊断规则一条都没报，只能靠人工 grep。计数口径是
+  **健康→不健康的状态跃迁**（`pool.py` 每次跃迁只记一行），所以高计数＝反复
+  抖动、持续宕机只留 1 条，二者不会混。实测：`owin10-telecom` 56、
+  `owin10-mobile` 48（这两个是同一台设备 `100.109.109.108` 的两个端口，同向
+  抖动＝设备侧问题）、`cc9` 6、`esp32-bucket` 3。动作明确指向设备/隧道，并写明
+  **不要**为抖动放宽探针容忍度。证据：
+  `test_diagnose_flags_probe_flapping_per_bucket`、
+  `test_diagnose_stays_quiet_on_a_single_probe_transition`。
+- **日配额 cordon 速率进报告**（`quota_cordons_high`，info）——同一窗口 17 次
+  `free_quota_exhausted` / 16 次成功换 IP，这个数字是判断
+  `ZEN_EGRESS_ROTATION` 阈值（现为 `*-500`）是否合理的唯一依据。动作栏照抄
+  429 归因红线：先做传输栈/body 新鲜度/session 三变量消融，**不得**仅凭 429
+  下调阈值。证据：`test_diagnose_flags_quota_cordon_rate_without_touching_rotation`。
+
 ## [0.7.6] - 2026-10-28
 
 ### Fixed

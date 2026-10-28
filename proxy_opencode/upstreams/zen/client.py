@@ -35,7 +35,7 @@ from ...egress.pool import EgressPool, Lease
 from ...model_profile import profile as model_profile
 from ..openai_http import ResponseLike, StreamRelay, _raw_relay_body
 from ..zen_bun_transport import BunTransport, BunTransportError
-from .aggregate import aggregate_sse
+from .aggregate import StreamStalled, aggregate_sse
 from .body import build_body
 from .errors import egress_unavailable_result, is_free_tier_rejection
 from .policy import Applied, apply_request_policy
@@ -175,9 +175,13 @@ class ZenDirectAdapter:
                 # _exchange already released the lease as a transport failure
                 # (it wraps httpx transport errors in a plain ConnectionError).
                 attempts -= 1
+                # A stalled aggregate is a bucket verdict, not a generic
+                # transport fault: keep the two kinds apart so the daily
+                # report can tell a silent tunnel from a broken socket.
+                kind = "stream_stalled" if isinstance(exc, StreamStalled) else "transport"
                 if attempts <= 0:
                     raise _transport_error(exc) from exc
-                _log_failover(kind="transport", remaining=attempts, detail=str(exc)[:120])
+                _log_failover(kind=kind, remaining=attempts, detail=str(exc)[:120])
                 lease = await self._pool.acquire()
                 continue
             except BaseException:
@@ -327,7 +331,15 @@ class ZenDirectAdapter:
         if stream:
             return self._stream_relay(resp, float(self._settings.stream_stall_s), lease)
         try:
-            result = await aggregate_sse(resp, model)
+            result = await aggregate_sse(
+                resp, model, stall_s=float(self._settings.stream_stall_s)
+            )
+        except StreamStalled:
+            # Released as its own kind: "aggregate_error" would fold a dead
+            # tunnel into the same bucket-accounting line as a malformed
+            # upstream body, and the two need different follow-up.
+            await self._release(lease, ok=False, kind="stream_stalled")
+            raise
         except Exception:
             await self._release(lease, ok=False, kind="aggregate_error")
             raise

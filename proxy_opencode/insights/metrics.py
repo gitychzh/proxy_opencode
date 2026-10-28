@@ -134,6 +134,7 @@ def _summarize_events(
     cordon_reasons: dict[str, int] = {}
     fallback_reasons: dict[str, int] = {}
     fallback_models: dict[str, int] = {}
+    probe_by_egress: dict[str, int] = {}
     rotation_ok = 0
     rotation_failed = 0
     ips: dict[str, set[str]] = {}
@@ -143,7 +144,14 @@ def _summarize_events(
         if not name:
             continue
         events_by_name[name] = events_by_name.get(name, 0) + 1
-        if name == "cordon":
+        if name == "probe_failed":
+            # One row per healthy->unhealthy *transition* (pool.py logs a
+            # single line per transition, not per failed probe). A high count
+            # therefore means flapping, while a sustained outage shows as 1.
+            egress = record.get("egress")
+            if isinstance(egress, str) and egress:
+                probe_by_egress[egress] = probe_by_egress.get(egress, 0) + 1
+        elif name == "cordon":
             reason = str(record.get("cordon_reason") or "unknown")
             core = reason.split(" (", 1)[0].strip() or "unknown"
             cordon_reasons[core] = cordon_reasons.get(core, 0) + 1
@@ -173,6 +181,10 @@ def _summarize_events(
             sorted(fallback_reasons.items(), key=lambda kv: -kv[1])
         ),
         "fallback_models": dict(fallback_models),
+        "probe_failed_by_egress": dict(
+            sorted(probe_by_egress.items(), key=lambda kv: (-kv[1], kv[0]))
+        ),
+        "egress_recovered": events_by_name.get("egress_recovered", 0),
         "rotations_ok": rotation_ok,
         "rotations_failed": rotation_failed,
         "observed_ips": {k: sorted(v) for k, v in sorted(ips.items())},

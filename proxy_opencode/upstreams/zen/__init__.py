@@ -17,7 +17,7 @@ Modules and their responsibility:
 ``prompt``    system-prompt asset and per-request rendering
 ``tools``     builtin tool-schema injection (shape gate)
 ``body``      request composition
-``aggregate`` SSE -> single completion JSON
+``aggregate`` SSE -> single completion JSON (stall-guarded)
 ``errors``    free-tier 403 rewrite
 ``client``    adapter orchestration (failover, transport, lease release)
 
@@ -26,6 +26,7 @@ Protocol authority: AGENTS.md 硬约束 1.
 
 from __future__ import annotations
 
+from .aggregate import StreamStalled, aggregate_sse
 from .body import build_body, clean_messages
 from .client import ZenDirectAdapter
 from .errors import is_free_tier_rejection
@@ -43,7 +44,9 @@ _prompt_date = prompt_date
 _retry_after_seconds = retry_after_seconds
 
 __all__ = [
+    "StreamStalled",
     "ZenDirectAdapter",
+    "aggregate_sse",
     "build_body",
     "build_headers",
     "builtin_tools",
