@@ -3,6 +3,17 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.7.16] - 2026-10-29
+
+### Changed
+
+- **硬配额 429 第一个桶就定论，不再扫兄弟桶** — 既然额度是账号级，收到
+  `Retry-After > 3600s` 的 429 后另外两个桶注定同样结果：实测首请求 11.8s
+  （3 次上游试探）→ 现在 1 次试探即停，省下 2 个 RTT。软 429（短
+  Retry-After）行为不变，仍逐个桶 failover。证据：
+  `test_final_429_retry_after_becomes_the_blackout_deadline`（断言
+  `call_count == 1`）。
+
 ## [0.7.15] - 2026-10-29
 
 ### Fixed

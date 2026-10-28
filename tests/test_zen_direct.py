@@ -1667,11 +1667,12 @@ async def test_chat_stops_retrying_once_a_429_tips_the_pool_into_blackout() -> N
 @respx.mock
 @pytest.mark.asyncio
 async def test_final_429_retry_after_becomes_the_blackout_deadline() -> None:
-    """With 3 attempts for 4 buckets the pool never looks fully benched.
+    """The 429's Retry-After alone settles it — no sibling sweep needed.
 
-    The last 429 still carries the definitive evidence — Retry-After beyond the
-    throttle boundary — so the fallback chain gets the reset deadline instead
-    of the flat hold, on the very first request of an exhausted day.
+    With 3 attempts for 4 buckets the pool never looks fully benched, so the
+    pool-state test cannot fire; the response evidence (Retry-After past the
+    throttle boundary) can, and it also lets the first request stop early
+    instead of paying an upstream RTT per bucket.
     """
 
     class _NeverBlackoutPool(_StubPool):
@@ -1695,6 +1696,7 @@ async def test_final_429_retry_after_becomes_the_blackout_deadline() -> None:
         {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
     )
 
-    assert route.call_count == 3, "attempt budget still caps the walk"
+    # The very first quota verdict is enough: siblings share the account.
+    assert route.call_count == 1
     assert result["__status__"] == 429
     assert result["__quota_blackout_s__"] == 20893.0

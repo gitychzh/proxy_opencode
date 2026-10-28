@@ -232,6 +232,19 @@ class ZenDirectAdapter:
                 # blackout here so the *first* request of an exhausted day
                 # also stops early and the fallback chain gets the reset
                 # deadline instead of a flat hold.
+                # Response evidence first: a 429 whose Retry-After sits past
+                # the throttle boundary is an account-wide allowance verdict
+                # (verified 2026-10-29 against a freshly rebooted IP), so the
+                # sibling buckets would answer identically — trying them only
+                # adds an upstream RTT each (3 attempts measured 11.8s on the
+                # first request of an exhausted day).
+                hinted = result.get("__quota_blackout_s__")
+                if isinstance(hinted, (int, float)) and hinted > 0:
+                    logger.warning(
+                        "quota verdict on the first 429; stopping retries",
+                        extra={"blackout_s": round(float(hinted), 1)},
+                    )
+                    return quota_exhausted_result(float(hinted))
                 blackout = float(blackout_probe()) if callable(blackout_probe) else 0.0
                 if blackout > 0:
                     logger.warning(
@@ -240,9 +253,6 @@ class ZenDirectAdapter:
                     )
                     return quota_exhausted_result(blackout)
                 if attempts <= 0:
-                    hinted = result.get("__quota_blackout_s__")
-                    if isinstance(hinted, (int, float)) and hinted > 0:
-                        return quota_exhausted_result(float(hinted))
                     return result
                 _log_failover(kind="http_429", remaining=attempts)
                 lease = await _acquire()
