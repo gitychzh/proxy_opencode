@@ -201,6 +201,25 @@ class EgressCounters:
             and (ts - rec.last_rotation_epoch) < self._hard_min_interval
         ):
             return False
+        # A hard 429 proves the IP's allowance is gone; the counter records how
+        # much of its budget went unused before that happened. That gap IS the
+        # calibration error, and it is the only way to learn the real allowance
+        # without probing it: 2026-10-28 the buckets burned out at ~2.5M
+        # estimated prompt tokens while the budget was set to 8M, so the
+        # proactive trigger never fired once in a whole day and every rotation
+        # was a reactive hard-429 rescue.
+        budget = self._token_budgets.get(name, 0)
+        if budget > 0 and rec.tokens < budget:
+            logger.error(
+                "per-IP quota exhausted well below the token budget: "
+                "the budget is mis-calibrated (lower it to ~70% of the measured value)",
+                extra={
+                    "egress": name,
+                    "tokens": rec.tokens,
+                    "token_budget": budget,
+                    "count": rec.count,
+                },
+            )
         return True
 
     def should_rotate_on_free_tier(

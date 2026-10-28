@@ -23,7 +23,16 @@ static const char* CTRL_SECRET = "esp32-p1-7f3a9c";
 #define LED_PIN 8
 #define MAX_TUNNELS 4
 #define TUNNEL_STACK 8192
-#define TUNNEL_IDLE_MS 20000UL
+// 隧道空闲上限。**曾经是 20000（20 秒），这是一个把整条桶打死的常量**：
+// pump() 只要 20 秒两个方向都没有字节就主动断开，而大模型的「思考」阶段
+// 恰恰允许很久没有首字节——网关自己的首字节期限是 ZEN_TTFB_S=60，实测
+// 池内上游 TTFB p95 就有 21.3s。于是经 ESP32 的每个慢请求都在第 20.000 秒
+// 被自己人掐断，网关只看到 transport 错误，三连之后就把这个桶 cordon 掉。
+// 2026-10-28 实测（ECS→适配器→ESP32→httpbingo，CONNECT 200 + TLS1.3 握手
+// 完成之后）：delay/10 与 delay/25 双双在 20.000s / 20.001s 归零。
+// 现取 180s：远高于网关 60s 的首字节/静默期限，正常的慢推理不会被误杀；
+// 真正的死隧道由 pump 的 `a.connected() && b.connected()` 立刻收尾，不靠它。
+#define TUNNEL_IDLE_MS 180000UL
 #define HEARTBEAT_MS 20000UL
 #define TUNNEL_BUF 1024
 
@@ -296,7 +305,7 @@ void setup() {
   delay(300);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);
-  logf("\n=== esp32_p1 proxy bucket v3 ===");
+  logf("\n=== esp32_p1 proxy bucket v4 (idle=180s) ===");
   logf("[boot] 堆=%u 芯片=%s rev=%d", (unsigned)ESP.getFreeHeap(),
        ESP.getChipModel(), ESP.getChipRevision());
 
