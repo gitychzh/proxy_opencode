@@ -3,6 +3,64 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.8.1] - 2026-10-29
+
+### Changed — 四个出口桶按「四个账号」语义重做故障处理
+
+之前一个桶被上游判额度耗尽，会把整条 fallback 链按住到重置窗口（实测
+`hold_s=15211`，4.2 小时），期间所有用户都在备用模型上跑，即使另外三个桶
+完全健康。现在：
+
+- 单桶故障 → **只影响本次请求**（由备用链回答），`hold_s=0`；
+- 下一个请求 → 回到出口池的轮询，自然落到下一个健康桶；
+- 只有**全池**都被判额度时，才盖上 blackout 截止时间（此时确实无处可转，
+  与其每 2 分钟重试一次死池，不如把备用链按住到重置）。
+
+`ZEN_FALLBACK_REQUEST_SCOPED`（默认 `true`）保留旧的「一次故障锁整链」行为，
+供对照实验使用。请求级语义下 `fallback_engaged` 事件的 `hold_s` 为 `0`、
+`request_scoped` 为 `true`，日志口径可与旧行为区分。
+
+### Fixed — 工具改名是单向的，响应侧从不还原
+
+形状门要求 `tools` 里必须含全部内置工具名，所以客户端自带的同名工具会被改名
+成 `client_<name>`（`bash` → `client_bash`）。请求侧改了，响应侧却没有反向
+映射：模型回 `client_bash` 时，客户端收到一个自己从未声明过的工具名 ——
+要么丢弃，要么当陌生工具执行。现在改名同时登记反向表（请求级 contextvar），
+流式（chat SSE、responses SSE）与非流式（chat JSON、upstream error body）
+四条路径都按表还原。
+
+### Changed — 上下文上限按实测的**保证值**收敛，并记录异构后端事实
+
+实测（2026-10-29，两次独立扫描）：
+
+- `models.dev` / 快照说的 `{context 200000, input 160000}` **偏小**：258,906
+  prompt tokens 正常返回 200；
+- 所有拒绝文案统一引用 `262139`，且绑定规则是 `prompt + max_tokens ≤ 262139`
+  （实测 261,792 + 1,024 = 262,816 → 400，超出 677）；
+- 越过 262,139 后结果**不确定**，因为上游是异构后端池。同一 payload 重复：
+  268k 档 2/6 通过、300k 档 4/6 通过（真 prompt 303,265）、315k 档 0/6；
+  响应 id 可见三类后端（`chatcmpl-…`、`mai-api-…`、纯 hex）。
+
+因此 guard 保留 262,139 这个唯一**保证**窗口（不是乐观的 303k）：
+宣称 303k 会让三分之二的请求打到小窗口后端后失败。本地拦截不烧配额。
+
+### Changed — 客户端指纹追到 1.19.5，新增上游漂移自动检测
+
+- `DEFAULT_ZEN_CLIENT_VERSION` 从 `1.19.4` 改为 `1.19.5`（真实 CLI 抓包确认
+  UA `opencode/1.19.5 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4`）。
+  资产早已是 1.19.5，常量却停在 1.19.4 —— 正是这类漂移没有检测手段。
+- 新增 `scripts/sync_opencode.py`：比对 npm `opencode-ai` 的 `latest`、官方
+  prompt 模板（`session/prompt/default.txt`，纯文本无插值，与本地资产可直接
+  字节比对）、以及 `tool/builtins.ts` 的模块清单。**能自动化的只有版本号和
+  prompt 模板**；工具 schema 是 TS 的 Effect `Schema`，没有可靠的 JSON Schema
+  静态转换，必须用真实 CLI 抓包重取 —— 脚本对此明确报「需要重新抓包」而不是
+  假装修好。
+- 新增 `.github/workflows/drift.yml`：每日 09:17 CST 跑一次，漂移即 fail。
+
+> 抓包另证：1.19.5 的 `builtins.ts` 装了 12 个模块，但实际只发 **11 个**工具名
+> （`question` 与 `apply-patch` 注册但不提供给模型）。我方资产保留 12 个属于
+> 超集，形状门接受超集、拒绝子集，故无需改动。
+
 ## [0.8.0] - 2026-10-29
 
 ### Changed — 入口与网关拆成两个容器（框架重构）

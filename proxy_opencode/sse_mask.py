@@ -38,23 +38,49 @@ def _scrub_leaked_name(line: bytes) -> bytes:
     return _LEAKY_NAME_BARE.sub(b'"name": ""', line)
 
 
-def rewrite_sse_line(line: bytes, public_model: str) -> bytes:
-    """Rewrite the model / leaked-name fields of one SSE data line."""
+def rewrite_sse_line(
+    line: bytes,
+    public_model: str,
+    patterns: list[tuple[re.Pattern[bytes], bytes]] | None = None,
+) -> bytes:
+    """Rewrite the model / leaked-name / renamed-tool fields of one SSE line."""
     if not line.startswith(b"data:"):
         return line
     if b'"model"' in line:
-        line = _MODEL_FIELD.sub(
-            rb"\g<1>" + public_model.encode("utf-8") + rb"\g<2>", line
-        )
+        line = _MODEL_FIELD.sub(rb"\g<1>" + public_model.encode("utf-8") + rb"\g<2>", line)
     if b'"name"' in line:
+        for pat, repl in patterns or ():
+            if pat.search(line):
+                line = pat.sub(repl, line)
         line = _scrub_leaked_name(line)
     return line
 
 
+def _restore_patterns(mapping: dict[str, str]) -> list[tuple[re.Pattern[bytes], bytes]]:
+    """Byte patterns matching ``"name": "client_<x>"`` for each renamed tool.
+
+    Only the ``name`` field is touched: the value is what the body gate
+    rewrote, so this is the exact inverse and cannot collide with ordinary
+    content (which would have to contain this literal JSON fragment).
+    """
+
+    out: list[tuple[re.Pattern[bytes], bytes]] = []
+    for new, orig in mapping.items():
+        pat = re.compile(rb'("name"\s*:\s*")' + re.escape(new.encode("utf-8")) + rb'(")')
+        out.append((pat, rb"\g<1>" + orig.encode("utf-8") + rb"\g<2>"))
+    return out
+
+
 async def mask_model_field(
-    chunks: AsyncIterator[bytes], public_model: str
+    chunks: AsyncIterator[bytes],
+    public_model: str,
+    restore: dict[str, str] | None = None,
 ) -> AsyncIterator[bytes]:
     """Wrap an SSE byte stream, masking the model field of every data line.
+
+    ``restore`` is this request's tool-rename reverse map (see
+    ``tools.rename_collisions``); when present, every streamed tool-call name
+    is put back to the name the client actually declared.
 
     The wrapped stream is closed deterministically on teardown (client
     disconnect closes this generator, which raises ``GeneratorExit`` at the
@@ -62,6 +88,9 @@ async def mask_model_field(
     in 0.7.x, the egress-pool lease it holds — would only be released when
     the garbage collector got to it.
     """
+
+    patterns = _restore_patterns(restore or {})
+
     buffer = b""
     try:
         async for chunk in chunks:
@@ -70,9 +99,9 @@ async def mask_model_field(
             buffer += chunk
             while b"\n" in buffer:
                 line, buffer = buffer.split(b"\n", 1)
-                yield rewrite_sse_line(line, public_model) + b"\n"
+                yield rewrite_sse_line(line, public_model, patterns) + b"\n"
         if buffer:
-            yield rewrite_sse_line(buffer, public_model)
+            yield rewrite_sse_line(buffer, public_model, patterns)
     finally:
         aclose = getattr(chunks, "aclose", None)
         if aclose is not None:
@@ -82,11 +111,16 @@ async def mask_model_field(
                 pass
 
 
-def mask_json_model(body: dict[str, Any], public_model: str) -> dict[str, Any]:
+def mask_json_model(
+    body: dict[str, Any],
+    public_model: str,
+    restore: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Rewrite the model field of a non-streaming JSON response in place.
 
     Also drops a leaked `message.name` (same signature as the SSE leak) so
-    the upstream model identity never reaches the client in either shape.
+    the upstream model identity never reaches the client in either shape, and
+    restores any renamed tool-call names to the ones the client declared.
     """
     if not isinstance(body, dict):
         return body
@@ -100,4 +134,9 @@ def mask_json_model(body: dict[str, Any], public_model: str) -> dict[str, Any]:
         name = message.get("name")
         if isinstance(name, str) and " " in name:
             message.pop("name", None)
+        if restore:
+            for call in message.get("tool_calls") or []:
+                fn = call.get("function") if isinstance(call, dict) else None
+                if isinstance(fn, dict) and fn.get("name") in restore:
+                    fn["name"] = restore[fn["name"]]
     return body

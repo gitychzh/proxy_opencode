@@ -29,6 +29,7 @@ from ..registry import ModelRegistry
 from ..sse_mask import mask_json_model
 from ..upstreams.openai_http import StreamRelay
 from ..upstreams.opencode_serve import ServeCompletion, completion_to_chat_response
+from ..upstreams.zen.tools import restore_map
 from ._pipeline import (
     dispatch,
     is_error_relay,
@@ -82,7 +83,9 @@ def make_router(
         extra_headers, note = begin(call)
 
         if isinstance(result, StreamRelay):
-            chunks = stream_responses_events(result.chunks(), call.public_model)
+            chunks = stream_responses_events(
+                result.chunks(), call.public_model, restore_map()
+            )
             if note:
                 chunks = with_fallback_note(chunks, note)
             return streaming(
@@ -100,7 +103,9 @@ def make_router(
             # must not smuggle the upstream model identity to the client.
             content = result["content"]
             if registry.enabled and isinstance(content, dict):
-                content = mask_json_model(content, call.public_model)
+                content = mask_json_model(
+                    content, call.public_model, restore_map()
+                )
             return JSONResponse(
                 status_code=status, content=content, headers=extra_headers
             )

@@ -23,11 +23,16 @@ Design:
     *before* any byte reaches the client (0 = off). Once the first chunk is
     out the turn is committed: a mid-stream failure is the stream
     watchdog's business, never a silent retry that would duplicate output.
-  * Circuit breaker: once tripped, every request goes straight to the
-    secondary for ``ZEN_FALLBACK_HOLD_S`` (default 120s); the first request
-    after the window probes the primary again (half-open). The breaker only
-    closes after ``ZEN_FALLBACK_RECOVER_AFTER`` consecutive primary
-    successes.
+  * Failure scope (owner decision 2026-10-29): the egress buckets are treated
+    as independent accounts, so **one bucket failing costs one request**. That
+    request is answered by the backup chain, the pool cordons the failing
+    bucket, and the next request resumes normal round-robin on a sibling
+    bucket (``ZEN_FALLBACK_REQUEST_SCOPED``, default true). The circuit
+    breaker is then reserved for a genuine pool-wide verdict — a quota
+    blackout deadline from every account at once — and holds the backup for
+    ``ZEN_FALLBACK_HOLD_S`` (or the blackout deadline, capped at one day),
+    half-open probing afterwards and closing after
+    ``ZEN_FALLBACK_RECOVER_AFTER`` consecutive primary successes.
   * Prominent notifications (red-line compliant: no content, no keys):
       - the FIRST trip of an outage is a production incident: ERROR
         "PRODUCTION INCIDENT - FALLBACK ENGAGED" (cannot be filtered away
@@ -235,6 +240,12 @@ class FailoverAdapter:
         self._recover_after = max(1, int(settings.zen_fallback_recover_after))
         self._primary_streak = 0
         self._last_trip_at = 0.0
+        # Request-scoped failover (default on): a single bucket failure is
+        # answered by the backup for that request only; the hold breaker is
+        # reserved for a pool-wide quota blackout (owner 2026-10-29).
+        self._request_scoped = bool(
+            getattr(settings, "zen_fallback_request_scoped", True)
+        )
         # 0 disables the corresponding guard.
         self._primary_timeout_s = max(
             0.0, float(settings.zen_fallback_primary_timeout_s)
@@ -253,6 +264,7 @@ class FailoverAdapter:
             "secondary": self._secondary_name,
             "model": str(self._default_model or ""),
             "hold_remaining_s": round(remaining, 1) if remaining > 0 else 0,
+            "scope": "request" if self._request_scoped else "hold",
         }
 
     # ------------------------------------------------------------- proxy
@@ -372,7 +384,16 @@ class FailoverAdapter:
             # Cap so a bogus Retry-After cannot pin the chain to the backup
             # for days; the free tier's window is at most a day.
             hold_s = max(hold_s, min(float(blackout_s), _QUOTA_HOLD_CAP_S))
-        self._fallback_until = time.monotonic() + hold_s
+        # Request-scoped failover (owner decision 2026-10-29, buckets are four
+        # independent accounts): the failure of ONE bucket must not park the
+        # client on the backup. Only a pool-wide verdict — every account out
+        # of quota, reported as a blackout deadline — is worth a hold; a
+        # single-account fault is answered from the backup for THIS request
+        # and the next request goes back to the pool's round-robin (which
+        # already skips the cordoned bucket).
+        hold_open = blackout_s is not None or not self._request_scoped
+        if hold_open:
+            self._fallback_until = time.monotonic() + hold_s
         self._primary_streak = 0
         # Distinguish the first trip of an outage from the re-trips that a
         # flapping primary produces: the former is an incident (WARNING), the
@@ -391,7 +412,7 @@ class FailoverAdapter:
                 reason,
                 hold_s,
             )
-        else:
+        elif hold_open:
             # Production-incident grade: the primary chain just died and
             # clients are being served by a different model. ERROR so the
             # line survives even INFO-filtered log collection, and a greppable
@@ -405,13 +426,30 @@ class FailoverAdapter:
                 FALLBACK_NAME,
                 hold_s,
             )
+        else:
+            # One bucket, one request: the pool cordons that account and the
+            # next request is already scheduled for a sibling. WARNING, not
+            # incident — this is routine failover, not an outage.
+            logger.warning(
+                "FALLBACK SERVED: bucket of primary upstream %s failed (%s); "
+                "this request is answered by backup gateway %s, the next one "
+                "resumes pool rotation",
+                self.name,
+                reason,
+                FALLBACK_NAME,
+            )
         EVENTS.emit(
             "fallback_engaged",
-            severity="continuation" if re_trip else "incident",
+            severity=(
+                "continuation"
+                if re_trip
+                else ("incident" if hold_open else "request")
+            ),
             primary=self.name,
             reason=reason[:120],
-            hold_s=hold_s,
+            hold_s=hold_s if hold_open else 0.0,
             quota_blackout=blackout_s is not None,
+            request_scoped=not hold_open,
             secondary=self._secondary_name,
             model=self._map_model(str(payload.get("model") or "")),
             re_trip=re_trip,

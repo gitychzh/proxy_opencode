@@ -56,11 +56,12 @@ def _default_public_models() -> list[dict[str, str]]:
     """
     return _parse_public_models(",".join(DEFAULT_PUBLIC_MODELS))
 
-# Client fingerprint constants observed in a genuine opencode 1.18.32 capture
-# (mitm, 2026-09). Kept as defaults so the zen-direct adapter speaks the same
-# protocol; overridable for forward-compatibility when opencode releases
-# newer client/runtime versions.
-DEFAULT_ZEN_CLIENT_VERSION = "1.19.4"
+# Client fingerprint constants, re-captured from a genuine opencode 1.19.5 CLI
+# (local capture server, 2026-10-29 04:49; UA observed verbatim:
+# ``opencode/1.19.5 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4``).
+# The value is not gate-sensitive per AGENTS.md, but keeping it behind reality
+# is what makes the drift check (`scripts/sync_opencode.py`) meaningful.
+DEFAULT_ZEN_CLIENT_VERSION = "1.19.5"
 DEFAULT_ZEN_BUN_VERSION = "1.4.4"
 
 
@@ -349,6 +350,18 @@ class Settings:
     # (the first success still gets served by the primary) while requiring
     # evidence of sustained recovery before announcing it.
     zen_fallback_recover_after: int = 2
+    # Request-scoped failover (owner decision 2026-10-29): the egress buckets
+    # are four independent accounts. One account failing must cost exactly one
+    # request — that request is served by the backup chain, the failing bucket
+    # is cordoned by the pool, and the *next* request resumes normal
+    # round-robin on the following bucket. A flat breaker hold (the old
+    # behaviour) parked the whole client on the backup for minutes after a
+    # single bucket hiccup.
+    #
+    # Set false to restore the hold-window breaker (only sensible when the
+    # primary is a single upstream, not a pool).
+    #   ZEN_FALLBACK_REQUEST_SCOPED=true
+    zen_fallback_request_scoped: bool = True
     # Per-request deadline for the primary attempt (seconds, 0 = off). When
     # it expires the backup serves the turn instead, so a blackholed egress
     # hop costs `ZEN_FALLBACK_PRIMARY_TIMEOUT_S`, not the full
@@ -668,6 +681,9 @@ def load_settings() -> Settings:
         zen_fallback_hold_s=float(os.environ.get("ZEN_FALLBACK_HOLD_S", "120")),
         zen_fallback_recover_after=max(
             1, int(os.environ.get("ZEN_FALLBACK_RECOVER_AFTER", "2"))
+        ),
+        zen_fallback_request_scoped=_env_bool(
+            "ZEN_FALLBACK_REQUEST_SCOPED", True
         ),
         zen_fallback_primary_timeout_s=max(
             0.0, float(os.environ.get("ZEN_FALLBACK_PRIMARY_TIMEOUT_S", "90"))

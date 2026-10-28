@@ -20,6 +20,7 @@ from ..upstreams.opencode_serve import ServeCompletion
 from ..upstreams.opencode_serve import (
     completion_to_chat_response as _serve_response,
 )
+from ..upstreams.zen.tools import restore_map
 from ._pipeline import (
     dispatch,
     is_error_relay,
@@ -74,7 +75,9 @@ def make_router(
             if note:
                 chunks_iter = with_fallback_note(chunks_iter, note)
             if registry.enabled:
-                chunks_iter = mask_model_field(chunks_iter, call.public_model)
+                chunks_iter = mask_model_field(
+                    chunks_iter, call.public_model, restore_map()
+                )
             return streaming(
                 chunks_iter,
                 result.usage_holder,
@@ -90,13 +93,15 @@ def make_router(
             # body: a 4xx/5xx payload can still name the upstream model.
             content = result["content"]
             if registry.enabled and isinstance(content, dict):
-                content = mask_json_model(content, call.public_model)
+                content = mask_json_model(
+                    content, call.public_model, restore_map()
+                )
             return JSONResponse(
                 status_code=status, content=content, headers=extra_headers
             )
         if isinstance(result, dict):  # openai passthrough non-stream JSON
             if registry.enabled:
-                mask_json_model(result, call.public_model)
+                mask_json_model(result, call.public_model, restore_map())
             return json_response(
                 result, call, logger, extra_headers=extra_headers
             )

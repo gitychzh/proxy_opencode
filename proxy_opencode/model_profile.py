@@ -127,20 +127,27 @@ _PROFILES: dict[str, ModelProfile] = {
     # Verified live 2026-10-27: reasoning supported with no effort options —
     # the CLI exposes no thinking-strength switch for it, so neither do we.
     #
-    # LIMITS RE-MEASURED LIVE 2026-10-29 — the shipped catalogue is stale:
-    # models.dev/snapshot.txt says {context 200000, input 160000}, but the
-    # upstream itself answers with its own ceiling when pushed past it:
-    #   "Input token count (294840) exceeds the model's maximum context
-    #    length of (262139), no tokens left for generation"
-    # Measured by sweeping prompts through a canary with the local guard
-    # disabled (each row = upstream-reported prompt_tokens):
-    #   57,240 → 200   92,440 → 200   104,760 → 200  118,840 → 200
-    #   132,040 → 200  149,640 → 200  162,840 → 200  198,040 → 200
-    #   203,320 → 200  233,240 → 200  294,840 → 400 (262,139)
-    # So the provider grants a 262,139-token window, and the binding rule is
-    # prompt + max_tokens ≤ 262,139 ("no tokens left for generation").
-    # `input` is set 1,139 below the window so the guard can never leave a
-    # prompt that the 1,024-token output floor would push back over it.
+    # LIMITS RE-MEASURED LIVE 2026-10-29 (twice) — the shipped catalogue is
+    # stale, and the upstream is a *heterogeneous* backend pool:
+    #   * models.dev / snapshot.txt say {context 200000, input 160000}. Both
+    #     numbers are too small: queries at 258,906 prompt tokens answer 200.
+    #   * Every rejection cites one ceiling:
+    #       "Input token count (N) exceeds the model's maximum context length
+    #        of (262139), no tokens left for generation"
+    #     and the binding rule is prompt + max_tokens ≤ 262,139 — measured at
+    #     261,792 input + 1,024 completion = 262,816 → 400 (over by 677).
+    #   * Above that ceiling the outcome is nondeterministic, because the pool
+    #     mixes backends with different windows. Same payload, repeated:
+    #       268,000-target → 2/6 accepted (prompt 263,703 / 271,665)
+    #       300,000-target → 4/6 accepted (prompt 303,265!)
+    #       315,000-target → 0/6 accepted
+    #     Response ids confirm three distinct backends (`chatcmpl-…`,
+    #     `mai-api-…`, bare hex).
+    # So 262,139 is the only *guaranteed* window; anything above it is a
+    # lottery on which backend the request lands. The guard keeps the floor
+    # (with `input` 1,139 below it, so the 1,024-token output floor can never
+    # push a passing prompt back over) rather than advertising the optimistic
+    # 303k and failing two requests out of three.
     "big-pickle": ModelProfile(
         id="big-pickle",
         limits=Limits(context=262_139, input=261_000, output=32_000),
@@ -156,16 +163,12 @@ _PROFILES: dict[str, ModelProfile] = {
     "deepseek-v4.1-flash-free": ModelProfile(
         id="deepseek-v4.1-flash-free",
         limits=Limits(context=200_000, output=32_000),
-        capabilities=Capabilities(
-            reasoning=True, efforts=("low", "high", "max"), attachment=False
-        ),
+        capabilities=Capabilities(reasoning=True, efforts=("low", "high", "max"), attachment=False),
     ),
     "glm-5.3-flash-free": ModelProfile(
         id="glm-5.3-flash-free",
         limits=Limits(context=200_000, output=32_000),
-        capabilities=Capabilities(
-            reasoning=True, efforts=("low", "high", "max"), attachment=False
-        ),
+        capabilities=Capabilities(reasoning=True, efforts=("low", "high", "max"), attachment=False),
     ),
     "muse-spark-1.3-contributor-free": ModelProfile(
         id="muse-spark-1.3-contributor-free",
@@ -307,9 +310,7 @@ def output_budget(limits: Limits, estimated_input: int = 0) -> int:
     )
     if limits.context <= 0:
         return requested
-    room = limits.context - estimated_input - math.ceil(
-        estimated_input * (1 + ESTIMATE_ERROR)
-    )
+    room = limits.context - estimated_input - math.ceil(estimated_input * (1 + ESTIMATE_ERROR))
     return min(requested, max(OUTPUT_TOKEN_MIN, room))
 
 

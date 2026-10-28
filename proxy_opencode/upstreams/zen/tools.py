@@ -25,6 +25,7 @@ Authority: AGENTS.md 硬约束 1 (形状门).
 
 from __future__ import annotations
 
+import contextvars
 import json
 from pathlib import Path
 from typing import Any
@@ -132,6 +133,11 @@ def rename_collisions(
     ``bash`` cannot simply win the slot: it becomes ``client_bash`` and every
     historical ``tool_calls`` entry is rewritten to match, otherwise the model
     would be handed a call to a name that no longer exists in ``tools``.
+
+    The rename is symmetric: the reverse map is stashed in a request-scoped
+    contextvar so the response side can restore the client's own names. Without
+    that half, a model replying ``client_bash`` hands the client a tool name it
+    never declared — the call is dropped (or, worse, executed as a stranger).
     """
 
     reserved = tool_names(builtins)
@@ -151,6 +157,8 @@ def rename_collisions(
     if not mapping:
         return out_tools, messages
 
+    _RESTORE.set({v: k for k, v in mapping.items()})
+
     out_msgs: list[dict[str, Any]] = []
     for msg in messages:
         calls = msg.get("tool_calls")
@@ -168,6 +176,17 @@ def rename_collisions(
     return out_tools, out_msgs
 
 
+_RESTORE: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
+    "proxy_opencode_tool_restore", default={}
+)
+
+
+def restore_map() -> dict[str, str]:
+    """Reverse of this request's tool renames (``client_bash`` -> ``bash``)."""
+
+    return _RESTORE.get()
+
+
 __all__ = [
     "INJECT_NAME_POOL",
     "MINIMAL_TOOL_NAMES",
@@ -176,5 +195,6 @@ __all__ = [
     "merge_tools",
     "minimal_schema",
     "rename_collisions",
+    "restore_map",
     "tool_names",
 ]

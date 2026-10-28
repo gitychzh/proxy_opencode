@@ -1,0 +1,32 @@
+name: Upstream drift
+
+# The free-tier body gate is validated against a specific opencode CLI release.
+# When the CLI ships a new version the gate starts answering the quota-shaped
+# 429 with no other warning — that is the 2026-10-29 outage. This runs daily so
+# the drift is known before users hit it, and fails loudly with an issue-worthy
+# log instead of a silent green build.
+
+on:
+  schedule:
+    - cron: "17 1 * * *"  # 01:17 UTC = 09:17 CST
+  workflow_dispatch:
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12.13"
+          cache: pip
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Check opencode CLI drift
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/sync_opencode.py

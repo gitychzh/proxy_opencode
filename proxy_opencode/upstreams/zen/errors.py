@@ -54,17 +54,15 @@ def egress_unavailable_result() -> dict[str, Any]:
 
 
 def quota_exhausted_result(blackout_s: float) -> dict[str, Any]:
-    """Shape "the whole pool is out of quota" without touching the upstream.
+    """Shape "every account in the pool is out of quota" without an upstream call.
 
-    Measured 2026-10-29 02:00 CST: all four egress IPs AND the ECS's own IP
-    answered ``FreeUsageLimitError`` at the same time, and a brand-new ESP32
-    egress IP (``111.55.72.119`` -> ``111.55.74.1``, MiFi reboot) was rejected
-    too. The free tier's daily allowance is therefore **account-scoped**, not
-    per-IP: a fresh IP buys no quota, only a fresh rate-limit bucket. Once
-    every egress is benched on a quota verdict, spending an upstream round
-    trip per bucket per request buys nothing — it only delays the fallback
-    chain by one upstream RTT each (measured 7.25s for a 16-token answer that
-    the backup could have served immediately).
+    Bucket model (owner decision 2026-10-29): the four egress buckets are
+    treated as four independent accounts. One account running dry only costs
+    that bucket — this *request* fails over to the backup chain and the next
+    request resumes round-robin on a sibling bucket. Only when **all** buckets
+    carry a quota verdict is there nothing left to rotate to; then a blackout
+    deadline is worth stamping so the caller can hold the backup for the
+    documented reset window instead of re-probing a dead pool every request.
     """
 
     return {

@@ -67,7 +67,41 @@ async def test_transport_failure_engages_backup() -> None:
 
     assert result == {"id": "ok", "model": "ms-model"}
     assert len(primary.calls) == 1 and len(secondary.calls) == 1
+    # Request-scoped (owner 2026-10-29): one dead bucket costs one request,
+    # the next request returns to the pool rotation.
+    status = adapter.fallback_status()
+    assert status["engaged"] is False
+    assert status["scope"] == "request"
+    assert adapter._last_trip_at > 0.0, "the failure is still ledgered"
+
+
+async def test_single_account_failure_costs_only_one_request() -> None:
+    """One dead account -> this request on the backup, the next on the pool."""
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary)
+    primary.outcomes = [relay(429), {"id": "primary-ok"}]
+    secondary.outcomes = [{"id": "via-ms"}]
+
+    assert await adapter.chat({"model": "m"}) == {"id": "via-ms"}
+    assert await adapter.chat({"model": "m"}) == {"id": "primary-ok"}
+    assert len(primary.calls) == 2
+    assert len(secondary.calls) == 1
+
+
+async def test_request_scope_can_be_disabled_for_single_upstream() -> None:
+    """Hold-mode breaker is still available (one upstream, not a pool)."""
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(
+        primary, zen_fallback_request_scoped=False
+    )
+    primary.outcomes = [relay(429)]
+    secondary.outcomes = [{"id": "via-ms"}]
+    await adapter.chat({"model": "m"})
+
     assert adapter.fallback_status()["engaged"] is True
+    assert adapter.fallback_status()["scope"] == "hold"
 
 
 async def test_quota_429_and_5xx_and_503_gate_engage_backup() -> None:
@@ -78,7 +112,7 @@ async def test_quota_429_and_5xx_and_503_gate_engage_backup() -> None:
         primary.outcomes = [relay(status)]
         result = await adapter.chat({"model": "m1"})
         assert result == {"id": "ok"}
-        assert adapter.fallback_status()["engaged"] is True
+        assert len(secondary.calls) == 1
 
 
 async def test_request_level_4xx_relays_untouched() -> None:
@@ -95,7 +129,11 @@ async def test_request_level_4xx_relays_untouched() -> None:
 
 async def test_hold_window_skips_primary_then_half_open_recovers() -> None:
     primary = FakeAdapter()
-    adapter, secondary = make_adapter(primary, zen_fallback_hold_s=3600.0)
+    adapter, secondary = make_adapter(
+        primary,
+        zen_fallback_hold_s=3600.0,
+        zen_fallback_request_scoped=False
+    )
     primary.outcomes = [relay(429)]
     secondary.outcomes = [{"id": "via-ms-1"}]
     await adapter.chat({"model": "m"})
@@ -118,7 +156,11 @@ async def test_hold_window_skips_primary_then_half_open_recovers() -> None:
 
 async def test_half_open_probe_failure_re_arms_breaker() -> None:
     primary = FakeAdapter()
-    adapter, secondary = make_adapter(primary, zen_fallback_hold_s=3600.0)
+    adapter, secondary = make_adapter(
+        primary,
+        zen_fallback_hold_s=3600.0,
+        zen_fallback_request_scoped=False
+    )
     primary.outcomes = [relay(429)]
     secondary.outcomes = [{"id": "via-ms"}]
     await adapter.chat({"model": "m"})
@@ -218,7 +260,10 @@ async def test_backup_error_body_is_not_echoed_to_client() -> None:
     """
 
     primary = FakeAdapter()
-    adapter, secondary = make_adapter(primary)
+    adapter, secondary = make_adapter(
+        primary,
+        zen_fallback_request_scoped=False
+    )
     primary.outcomes = [relay(429)]
     secondary.outcomes = [
         relay(
@@ -248,8 +293,9 @@ async def test_backup_unreachable_raises_loudly() -> None:
 
     with pytest.raises(ConnectionError, match="both unreachable"):
         await adapter.chat({"model": "m"})
-    # Breaker stays armed for the hold window regardless.
-    assert adapter.fallback_status()["engaged"] is True
+    # Request-scoped: the next request still tries the primary pool. Holding
+    # the breaker here would park a healthy pool behind a dead backup.
+    assert adapter.fallback_status()["engaged"] is False
 
 
 async def test_list_models_degrades_to_secondary() -> None:
@@ -298,7 +344,10 @@ async def test_recovery_needs_consecutive_successes(caplog) -> None:  # type: ig
 
     primary = FakeAdapter()
     adapter, secondary = make_adapter(
-        primary, zen_fallback_hold_s=3600.0, zen_fallback_recover_after=2
+        primary,
+        zen_fallback_hold_s=3600.0,
+        zen_fallback_recover_after=2,
+        zen_fallback_request_scoped=False,
     )
     primary.outcomes = [relay(429)]
     secondary.outcomes = [{"id": "via-ms"}]
@@ -322,7 +371,10 @@ async def test_failure_resets_the_recovery_streak() -> None:
 
     primary = FakeAdapter()
     adapter, secondary = make_adapter(
-        primary, zen_fallback_hold_s=3600.0, zen_fallback_recover_after=2
+        primary,
+        zen_fallback_hold_s=3600.0,
+        zen_fallback_recover_after=2,
+        zen_fallback_request_scoped=False,
     )
     primary.outcomes = [relay(429)]
     secondary.outcomes = [{"id": "via-ms"}]
@@ -344,7 +396,11 @@ async def test_re_trip_is_logged_as_continuation(caplog) -> None:  # type: ignor
     import time
 
     primary = FakeAdapter()
-    adapter, secondary = make_adapter(primary, zen_fallback_hold_s=3600.0)
+    adapter, secondary = make_adapter(
+        primary,
+        zen_fallback_hold_s=3600.0,
+        zen_fallback_request_scoped=False
+    )
     primary.outcomes = [relay(429)]
     secondary.outcomes = [{"id": "via-ms"}]
     await adapter.chat({"model": "m"})
@@ -369,7 +425,7 @@ async def test_gate_403_and_upstream_408_engage_backup() -> None:
 
     for status in (403, 408):
         primary = FakeAdapter()
-        adapter, secondary = make_adapter(primary)
+        adapter, secondary = make_adapter(primary, zen_fallback_request_scoped=False)
         secondary.outcomes = [{"id": "ok"}]
         primary.outcomes = [relay(status)]
         assert await adapter.chat({"model": "m1"}) == {"id": "ok"}
@@ -379,7 +435,7 @@ async def test_gate_403_and_upstream_408_engage_backup() -> None:
 async def test_client_fault_401_422_never_switches() -> None:
     for status in (401, 422):
         primary = FakeAdapter()
-        adapter, secondary = make_adapter(primary)
+        adapter, secondary = make_adapter(primary, zen_fallback_request_scoped=False)
         primary.outcomes = [relay(status)]
         assert await adapter.chat({"model": "m1"}) == relay(status)
         assert secondary.calls == []
@@ -396,7 +452,11 @@ async def test_primary_deadline_fails_over() -> None:
             return {"id": "never"}
 
     primary = HangingPrimary()
-    adapter, secondary = make_adapter(primary, zen_fallback_primary_timeout_s=0.05)
+    adapter, secondary = make_adapter(
+        primary,
+        zen_fallback_primary_timeout_s=0.05,
+        zen_fallback_request_scoped=False
+    )
     secondary.outcomes = [{"id": "via-ms"}]
 
     result = await adapter.chat({"model": "m"})
@@ -434,7 +494,9 @@ async def test_stalled_stream_prefetch_fails_over() -> None:
 
     primary = StreamingPrimary()
     adapter, secondary = make_adapter(
-        primary, zen_fallback_first_chunk_timeout_s=0.05
+        primary,
+        zen_fallback_first_chunk_timeout_s=0.05,
+        zen_fallback_request_scoped=False,
     )
     secondary.outcomes = [{"id": "via-ms"}]
 
@@ -469,7 +531,11 @@ async def test_prefetched_stream_replays_first_chunk_once() -> None:
             return StreamRelay(Response(), {})  # type: ignore[arg-type]
 
     primary = StreamingPrimary()
-    adapter, secondary = make_adapter(primary, zen_fallback_first_chunk_timeout_s=5)
+    adapter, secondary = make_adapter(
+        primary,
+        zen_fallback_first_chunk_timeout_s=5,
+        zen_fallback_request_scoped=False
+    )
     result = await adapter.chat({"model": "m", "stream": True})
 
     assert isinstance(result, StreamRelay)
@@ -511,7 +577,10 @@ async def test_primary_answer_leaves_no_marker() -> None:
     from proxy_opencode.upstreams.failover import fallback_headers, fallback_note
 
     primary = FakeAdapter()
-    adapter, secondary = make_adapter(primary)
+    adapter, secondary = make_adapter(
+        primary,
+        zen_fallback_request_scoped=False
+    )
     primary.outcomes = [{"id": "primary-ok"}]
 
     await adapter.chat({"model": "m"})
@@ -529,7 +598,10 @@ async def test_primary_answer_leaves_no_marker() -> None:
 
 async def test_first_trip_is_error_level_production_incident(caplog) -> None:  # type: ignore[no-untyped-def]
     primary = FakeAdapter()
-    adapter, secondary = make_adapter(primary)
+    adapter, secondary = make_adapter(
+        primary,
+        zen_fallback_request_scoped=False
+    )
     primary.outcomes = [relay(429)]
     secondary.outcomes = [{"id": "ok"}]
 
@@ -554,7 +626,9 @@ async def test_incident_severity_lands_on_jsonl_events(tmp_path) -> None:  # typ
     EVENTS.configure(str(path))
     try:
         primary = FakeAdapter()
-        adapter, secondary = make_adapter(primary)
+        adapter, secondary = make_adapter(
+            primary, zen_fallback_request_scoped=False
+        )
         primary.outcomes = [relay(429)]
         secondary.outcomes = [{"id": "ok"}]
         await adapter.chat({"model": "m"})
@@ -617,7 +691,11 @@ async def test_re_trip_keeps_continuation_severity(tmp_path) -> None:  # type: i
     EVENTS.configure(str(path))
     try:
         primary = FakeAdapter()
-        adapter, secondary = make_adapter(primary, zen_fallback_hold_s=3600.0)
+        adapter, secondary = make_adapter(
+            primary,
+            zen_fallback_hold_s=3600.0,
+            zen_fallback_request_scoped=False,
+        )
         primary.outcomes = [relay(429)]
         secondary.outcomes = [{"id": "via-ms"}]
         await adapter.chat({"model": "m"})

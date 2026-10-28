@@ -99,7 +99,7 @@ async def test_headers_reconstruct_captured_protocol() -> None:
     assert headers["Authorization"] == "Bearer public"
     assert headers["Content-Type"] == "application/json"
     assert headers["User-Agent"] == (
-        "opencode/1.19.4 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4"
+        "opencode/1.19.5 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4"
     )
     assert headers["x-opencode-client"] == "cli"
     # The genuine 1.19.4 client sends a 40-hex workspace hash here (never
@@ -1192,28 +1192,18 @@ _SSE_OK = (
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_chat_429_fails_over_to_next_bucket() -> None:
-    """A quota 429 must not surface to the client while another bucket lives.
+async def test_chat_429_ends_the_request_on_the_failing_account() -> None:
+    """Buckets are independent accounts: one quota verdict ends THIS request.
 
-    Measured 2026-10-17: the only remaining bucket drained its quota and
-    the error rode through verbatim. The lease is released and the same
-    body retried on the next bucket; client sees the aggregated 200.
+    Owner decision 2026-10-29: the four egress buckets are four accounts. A
+    verdict on one is not evidence about the others, and walking the siblings
+    costs one upstream RTT each. The request is answered by the fallback chain
+    instead, while the pool cordons the dead account so the next request lands
+    on a sibling.
     """
 
-    seq = {"n": 0}
-
-    def _upstream(_request: httpx.Request) -> httpx.Response:
-        if seq["n"] == 0:
-            seq["n"] += 1
-            return httpx.Response(
-                429, json={"error": {"message": "FreeUsageLimitError"}}
-            )
-        return httpx.Response(
-            200, headers={"content-type": "text/event-stream"}, content=_SSE_OK
-        )
-
-    respx.post("https://opencode.ai/zen/v1/chat/completions").mock(
-        side_effect=_upstream
+    route = respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=429, json={"error": {"message": "FreeUsageLimitError"}}
     )
     a, b = httpx.AsyncClient(), httpx.AsyncClient()
     pool = _RollingStubPool({"bucket-a": a, "bucket-b": b})
@@ -1221,11 +1211,12 @@ async def test_chat_429_fails_over_to_next_bucket() -> None:
     result = await adapter.chat(
         {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
     )
-    assert result["choices"][0]["message"]["content"] == "ok"
-    assert pool.releases == [
-        ("bucket-a", False, "http_429"),
-        ("bucket-b", True, ""),
-    ]
+    assert result["__status__"] == 429
+    # One attempt only: no sibling sweep, and no blackout deadline leaking to
+    # the failover wrapper (that would hold the backup for hours).
+    assert route.call_count == 1
+    assert "__quota_blackout_s__" not in result
+    assert pool.releases == [("bucket-a", False, "http_429")]
     await a.aclose()
     await b.aclose()
     await adapter.aclose()
@@ -1248,9 +1239,9 @@ async def test_chat_mints_fresh_session_per_upstream_attempt() -> None:
         sessions.append(request.headers["x-opencode-session"])
         if seq["n"] == 0:
             seq["n"] += 1
-            return httpx.Response(
-                429, json={"error": {"message": "FreeUsageLimitError"}}
-            )
+            # A 5xx (not 429): account-scoped quota verdicts end the request,
+            # while transport-class faults still walk to the next bucket.
+            return httpx.Response(502, json={"error": {"message": "bad gateway"}})
         return httpx.Response(
             200, headers={"content-type": "text/event-stream"}, content=_SSE_OK
         )
@@ -1274,10 +1265,15 @@ async def test_chat_mints_fresh_session_per_upstream_attempt() -> None:
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_chat_429_surfaces_after_failover_budget_is_exhausted() -> None:
-    """Every bucket 429ing must return the last upstream 429 (bounded)."""
+async def test_chat_429_surfaces_immediately_without_walking_the_pool() -> None:
+    """Every bucket 429ing used to cost one upstream RTT each.
 
-    respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+    Under the four-accounts model a quota verdict is terminal for the request:
+    the client-facing 429 is the *first* one, and the failover chain takes over
+    without a sibling sweep.
+    """
+
+    route = respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
         status_code=429, json={"error": {"message": "FreeUsageLimitError"}}
     )
     a, b = httpx.AsyncClient(), httpx.AsyncClient()
@@ -1287,10 +1283,8 @@ async def test_chat_429_surfaces_after_failover_budget_is_exhausted() -> None:
         {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
     )
     assert result["__status__"] == 429
-    assert pool.releases == [
-        ("bucket-a", False, "http_429"),
-        ("bucket-b", False, "http_429"),
-    ]
+    assert route.call_count == 1
+    assert pool.releases == [("bucket-a", False, "http_429")]
     await a.aclose()
     await b.aclose()
     await adapter.aclose()
@@ -1677,13 +1671,13 @@ async def test_chat_stops_retrying_once_a_429_tips_the_pool_into_blackout() -> N
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_final_429_retry_after_becomes_the_blackout_deadline() -> None:
-    """The 429's Retry-After alone settles it — no sibling sweep needed.
+async def test_retry_after_alone_is_not_a_pool_wide_blackout() -> None:
+    """A single account's Retry-After must not pin the backup for hours.
 
-    With 3 attempts for 4 buckets the pool never looks fully benched, so the
-    pool-state test cannot fire; the response evidence (Retry-After past the
-    throttle boundary) can, and it also lets the first request stop early
-    instead of paying an upstream RTT per bucket.
+    The deadline is only meaningful when the *pool* reports every account
+    benched. Stamping it from one response turned one dead account into a
+    chain-wide hold (2026-10-29), so the hint is stripped here and the
+    failover wrapper treats the fault as request-scoped.
     """
 
     class _NeverBlackoutPool(_StubPool):
@@ -1707,7 +1701,6 @@ async def test_final_429_retry_after_becomes_the_blackout_deadline() -> None:
         {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
     )
 
-    # The very first quota verdict is enough: siblings share the account.
     assert route.call_count == 1
     assert result["__status__"] == 429
-    assert result["__quota_blackout_s__"] == 20893.0
+    assert "__quota_blackout_s__" not in result

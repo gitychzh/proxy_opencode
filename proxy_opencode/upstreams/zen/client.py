@@ -226,37 +226,42 @@ class ZenDirectAdapter:
             status = result.get("__status__")
             if status == 429:
                 attempts -= 1
-                # The bucket that just answered 429 is already cordoned. If
-                # that left the whole pool benched on quota verdicts, the
-                # remaining attempts are guaranteed to fail too: report the
-                # blackout here so the *first* request of an exhausted day
-                # also stops early and the fallback chain gets the reset
-                # deadline instead of a flat hold.
-                # Response evidence first: a 429 whose Retry-After sits past
-                # the throttle boundary is an account-wide allowance verdict
-                # (verified 2026-10-29 against a freshly rebooted IP), so the
-                # sibling buckets would answer identically — trying them only
-                # adds an upstream RTT each (3 attempts measured 11.8s on the
-                # first request of an exhausted day).
-                hinted = result.get("__quota_blackout_s__")
-                if isinstance(hinted, (int, float)) and hinted > 0:
-                    logger.warning(
-                        "quota verdict on the first 429; stopping retries",
-                        extra={"blackout_s": round(float(hinted), 1)},
-                    )
-                    return quota_exhausted_result(float(hinted))
-                blackout = float(blackout_probe()) if callable(blackout_probe) else 0.0
+                # The bucket that just answered 429 is already cordoned.
+                # Buckets are independent accounts (owner decision
+                # 2026-10-29): one account's verdict ends THIS request's
+                # retries — the fallback chain answers it, and the next
+                # request resumes rotation on a sibling bucket (the cordon
+                # keeps this one out of the ring until its window resets).
+                # Walking the siblings would only add one upstream RTT each.
+                #
+                # The exception is a genuine pool-wide blackout: when every
+                # account is benched there is nothing to rotate to, and the
+                # backup should be held for the documented reset window
+                # instead of being re-probed on every request.
+                blackout = (
+                    float(blackout_probe()) if callable(blackout_probe) else 0.0
+                )
                 if blackout > 0:
                     logger.warning(
                         "egress pool in quota blackout after 429; stopping retries",
                         extra={"blackout_s": round(blackout, 1)},
                     )
                     return quota_exhausted_result(blackout)
-                if attempts <= 0:
-                    return result
-                _log_failover(kind="http_429", remaining=attempts)
-                lease = await _acquire()
-                continue
+                # A single-account hint must NOT become a blackout deadline:
+                # strip it so the failover wrapper treats this as a
+                # request-scoped failure instead of holding the backup.
+                hinted = result.pop("__quota_blackout_s__", None)
+                logger.warning(
+                    "quota verdict on one account; failing this request over "
+                    "to the backup chain",
+                    extra={
+                        "egress": lease.name,
+                        "retry_after_s": round(float(hinted), 1)
+                        if isinstance(hinted, (int, float))
+                        else None,
+                    },
+                )
+                return result
             if isinstance(status, int) and status >= 500:
                 attempts -= 1
                 if attempts <= 0:

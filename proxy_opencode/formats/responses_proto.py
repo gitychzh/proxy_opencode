@@ -65,9 +65,7 @@ def _input_items_to_messages(items: list[Any]) -> list[dict[str, Any]]:
                 # item without a usable id into a user message instead.
                 tcid = str(item.get("tool_call_id") or item.get("call_id") or "")
                 if tcid:
-                    messages.append(
-                        {"role": "tool", "tool_call_id": tcid, "content": text}
-                    )
+                    messages.append({"role": "tool", "tool_call_id": tcid, "content": text})
                 else:
                     fallback = f"[tool result] {text}" if text else "[tool result]"
                     messages.append({"role": "user", "content": fallback})
@@ -174,8 +172,12 @@ def _usage_block(usage: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _response_envelope(
-    response_id: str, created_at: int, model: str, output: list[dict[str, Any]],
-    status: str, usage: dict[str, Any] | None = None,
+    response_id: str,
+    created_at: int,
+    model: str,
+    output: list[dict[str, Any]],
+    status: str,
+    usage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     envelope: dict[str, Any] = {
         "id": response_id,
@@ -213,9 +215,7 @@ def _message_item(item_id: str, text: str) -> dict[str, Any]:
     }
 
 
-def chat_to_responses_body(
-    chat_resp: dict[str, Any], model: str
-) -> dict[str, Any]:
+def chat_to_responses_body(chat_resp: dict[str, Any], model: str) -> dict[str, Any]:
     message = (chat_resp.get("choices") or [{}])[0].get("message") or {}
     output: list[dict[str, Any]] = []
     if message.get("reasoning_content"):
@@ -315,9 +315,20 @@ def _sse_event(name: str, data: dict[str, Any]) -> bytes:
 
 
 async def stream_responses_events(
-    chunks: AsyncIterator[bytes], model: str
+    chunks: AsyncIterator[bytes],
+    model: str,
+    restore: dict[str, str] | None = None,
 ) -> AsyncIterator[bytes]:
-    """Convert OpenAI chat SSE chunks into Responses API SSE events."""
+    """Convert OpenAI chat SSE chunks into Responses API SSE events.
+
+    ``restore`` maps renamed tool names back to the names the client declared
+    (see ``zen.tools.rename_collisions``); the name is assembled from
+    fragments, so the substitution happens at emit time, not per fragment.
+    """
+
+    def _name(raw: str) -> str:
+        return (restore or {}).get(raw, raw)
+
     st = _StreamState()
 
     def event(name: str, payload: dict[str, Any]) -> bytes:
@@ -325,9 +336,7 @@ async def stream_responses_events(
         return _sse_event(name, payload)
 
     def envelope(status: str) -> dict[str, Any]:
-        return _response_envelope(
-            st.response_id, st.created_at, model, [], status
-        )
+        return _response_envelope(st.response_id, st.created_at, model, [], status)
 
     yield event("response.created", {"response": envelope("in_progress")})
     # The Responses wire event is `response.in_progress`: a bare `in_progress`
@@ -417,7 +426,7 @@ async def stream_responses_events(
                                 "type": "function_call",
                                 "id": slot["item_id"],
                                 "call_id": slot["id"],
-                                "name": slot["name"],
+                                "name": _name(slot["name"]),
                                 "arguments": "",
                                 "status": "in_progress",
                             },
@@ -482,7 +491,7 @@ async def stream_responses_events(
                     "type": "function_call",
                     "id": slot["item_id"],
                     "call_id": slot["id"],
-                    "name": slot["name"],
+                    "name": _name(slot["name"]),
                     "arguments": slot["arguments"],
                     "status": "completed",
                 },
