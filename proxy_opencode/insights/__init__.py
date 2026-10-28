@@ -42,18 +42,21 @@ def analyze(
     ttfb_deadline_s: float = 60.0,
     fallback_model_hint: str = "",
     events_window_hours: float = EVENTS_WINDOW_HOURS,
+    log_tz_offset_s: float = 0.0,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """One-shot pipeline: raw text in, (summary, findings) out.
 
     ``events_window_hours`` cuts the ledger to the log's window; pass 0 to
     count every ledger record (only meaningful when both sides were already
-    dumped over the same period).
+    dumped over the same period). ``log_tz_offset_s`` aligns a log producer
+    that stamps local wall time with the UTC-stamped ledger.
     """
 
     summary = summarize(
         parse_event_records(event_text),
         parse_log_lines(log_text),
         window_hours=events_window_hours,
+        log_tz_offset_s=log_tz_offset_s,
     )
     findings = diagnose(
         summary,

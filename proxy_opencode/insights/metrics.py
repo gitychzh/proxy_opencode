@@ -84,6 +84,7 @@ def window_events(
     logs: Sequence[Mapping[str, Any]],
     *,
     window_hours: float = EVENTS_WINDOW_HOURS,
+    log_tz_offset_s: float = 0.0,
 ) -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
     """Cut the ledger to the same window the logs were dumped with.
 
@@ -92,12 +93,22 @@ def window_events(
     (determinism is the whole point of this module), and the wall clock would
     silently slide every time the report is re-rendered.
 
+    ``log_tz_offset_s`` is the offset to subtract from the log side's parsed
+    epoch when the log producer stamps *local* wall time while the ledger
+    stamps UTC (measured 2026-10-28: the desktop text log is local, the
+    container ledger is UTC — the naive timestamp then lands ``off`` hours in
+    the future and a tight window cuts the whole ledger away). Pass the
+    producer's UTC offset (``--log-tz local`` on the CLI resolves it).
+
     Records without a parseable ``ts`` are kept and counted separately: they
     cannot be attributed to a window, and silently dropping them would hide
     a ledger whose timestamps stopped being written.
     """
 
-    anchor = _newest_epoch(logs)
+    log_anchor = _newest_epoch(logs)
+    if log_anchor is not None and log_tz_offset_s:
+        log_anchor -= float(log_tz_offset_s)
+    anchor = log_anchor
     if anchor is None:
         anchor = _newest_epoch(events)
     undated = sum(1 for record in events if record_epoch(record) is None)
@@ -197,6 +208,7 @@ def summarize(
     logs: Sequence[Mapping[str, Any]],
     *,
     window_hours: float = EVENTS_WINDOW_HOURS,
+    log_tz_offset_s: float = 0.0,
 ) -> dict[str, Any]:
     """Fold raw records into the metric block the diagnosis reads.
 
@@ -205,7 +217,9 @@ def summarize(
     attributable and must not be reported).
     """
 
-    windowed, window_info = window_events(events, logs, window_hours=window_hours)
+    windowed, window_info = window_events(
+        events, logs, window_hours=window_hours, log_tz_offset_s=log_tz_offset_s
+    )
     events_block, _ = _summarize_events(windowed)
 
     # The phase split needs two DIFFERENT log lines of the same turn: the

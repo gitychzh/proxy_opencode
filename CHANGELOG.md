@@ -3,6 +3,31 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.7.8] - 2026-10-28
+
+### Fixed
+
+- **诊断在「账本被窗口裁光」这一支上直接崩掉** — `diagnose.py` 第 264 行起用的是
+  `findings.append(_finding(...))["evidence"].update(...)`，而 `list.append` 返回
+  `None`，`["evidence"]` 于是抛 `TypeError: 'NoneType' object is not subscriptable`。
+  触发条件恰好是最需要报告的形态：整本账本落在窗口外。本轮实测复现——
+  `.venv\Scripts\python.exe scripts/self_optimize.py ... --events-window-hours 5`
+  在 53 条账本、7 条 `fallback_failed` 的情况下崩溃退出，报告一个字都没写出来。
+  修法：先构造 finding、更新 `evidence`、再 append。证据：
+  `test_all_events_dropped_emits_a_clock_skew_finding_instead_of_crashing`。
+- **5 小时窗口在本机实例上永远读不到账本：日志本地时间 vs 账本 UTC** — 本机
+  `LOG_FORMAT=text` 的日志行头是**本地时间**（`2026-10-28 12:17:22`，UTC+8），
+  事件账本写 UTC（`2026-10-28T04:17:22+00:00`）。`record_epoch()` 把无时区时间
+  按 UTC 解释，锚点因此超前 8 小时，`--events-window-hours 5` 把整本账本裁光，
+  报告只留一句误导性的「事件账本可能未开启」。实测：锚点
+  `2026-10-28T12:09:01+00:00`、丢弃 52 条、`fallback_failed` 全部消失；加
+  `--log-tz local` 后锚点回到 `2026-10-28T04:16:55+00:00`、保留 53 条，
+  7 条 `fallback_failed` 正常触发 critical。修法：`window_events()` /
+  `summarize()` / `analyze()` 增加 `log_tz_offset_s`，CLI 增加
+  `--log-tz {utc,local}`（`local` 从 `astimezone().utcoffset()` 取偏移）。
+  容器日志是 UTC，默认值保持 `utc`。证据：
+  `test_window_events_aligns_a_local_time_log_with_the_utc_ledger`。
+
 ## [0.7.7] - 2026-10-28
 
 ### Fixed

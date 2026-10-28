@@ -252,17 +252,47 @@ def diagnose(
             )
         )
 
-    # 9. Ledger off / no traffic: the loop cannot see anything.
+    # 9. Ledger off / no traffic: the loop cannot see anything. But "0 kept"
+    #    has two different causes with different actions: an actually-off
+    #    ledger (dropped == 0, nothing was ever read) versus a live ledger
+    #    whose every record the window cut away — which in production meant a
+    #    clock mismatch, not a disabled sink (measured 2026-10-28: the desktop
+    #    text log stamps LOCAL time while the ledger stamps UTC, so the
+    #    anchor sat 8h in the future and all 52 records were dropped while
+    #    the report still claimed "账本可能未开启", blinding the loop to
+    #    fallback incidents).
     if not int(events.get("total") or 0):
-        findings.append(
-            _finding(
+        dropped = int(window.get("dropped") or 0)
+        if dropped:
+            finding = _finding(
                 "info",
-                "no_events",
-                "没有读到任何出口事件：事件账本可能未开启",
-                "设置 ZEN_EGRESS_EVENT_LOG=/data/egress_events.jsonl 并确认 /data "
-                "对 uid 10002 可写；否则 cordon/换 IP/兜底全部无法归因。",
+                "no_events_in_window",
+                "账本有记录但全部落在窗口外：日志与账本的时钟/时区不一致",
+                "先调大 --events-window-hours 复核；若锚点仍把账本全部裁掉，"
+                "按生产者时钟差异处理——本机桌面日志为本地时间、账本为 UTC，"
+                "自我优化 CLI 应传 --log-tz local（容器 TZ=UTC 时 local==utc），"
+                "否则窗口对齐错位、兜底事件全部丢失。",
             )
-        )
+            finding["evidence"].update(
+                {
+                    "dropped": dropped,
+                    "kept": int(window.get("kept") or 0),
+                    "undated": int(window.get("undated") or 0),
+                    "anchor": window.get("anchor"),
+                    "ledger_records_outside_window": dropped,
+                }
+            )
+            findings.append(finding)
+        else:
+            findings.append(
+                _finding(
+                    "info",
+                    "no_events",
+                    "没有读到任何出口事件：事件账本可能未开启",
+                    "设置 ZEN_EGRESS_EVENT_LOG=/data/egress_events.jsonl 并确认 /data "
+                    "对 uid 10002 可写；否则 cordon/换 IP/兜底全部无法归因。",
+                )
+            )
     total_requests = int(requests.get("total") or 0)
     if not total_requests:
         findings.append(

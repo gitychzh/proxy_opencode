@@ -57,6 +57,14 @@
 没有发生）。锚点取数据而非墙钟，同一份输入重放必得同一结论。报告的「事件账本」
 行会打印窗口、锚点与丢弃条数。
 
+**两侧时钟也必须对齐**（0.7.8）：本机桌面实例的**文本日志打的是本地时间**（`LOG_FORMAT=text`
+由 uvicorn 默认 formatter 出头），而事件账本是 UTC。`record_epoch()` 把无时区的时间
+按 UTC 解释，于是本地 UTC+8 的日志会让锚点**超前 8 小时**：`--events-window-hours 5`
+把整本账本裁光、诊断报「账本可能未开启」，兜底故障全部看不见（2026-10-28 round 3
+实测：53 条账本被裁到 0，含 7 条 `fallback_failed`）。CLI 因此提供
+`--log-tz {utc,local}`：`local` 从本机 `astimezone().utcoffset()` 取偏移并从日志
+锚点中扣除。容器日志（`docker logs`）是 UTC，保持默认 `utc`。
+
 **字段白名单是硬门**：`logsetup.FIELDS` 是 `extra` 进入日志的唯一通道，未列入的字段
 被两个 formatter 静默丢弃。0.7.1 补入了 `fallback*` / `blocked_s` / `bytes` /
 `timeout_s`——在此之前每个兜底轮次在日志里看起来与主链完全一样。新增 `extra` 字段
@@ -199,6 +207,13 @@ docker run --rm --network host -v /opt/zen-gw/src:/src -v /data:/data \
 ssh -p 222 root@115.29.231.25 'tail -c 2000000 /data/egress_events.jsonl' > /tmp/events.jsonl
 ssh -p 222 root@115.29.231.25 'docker logs zen-gw --since 24h 2>&1' > /tmp/gw.log
 python scripts/self_optimize.py --events /tmp/events.jsonl --log /tmp/gw.log \
+  --fallback-model "ZhipuAI/GLM-5.3-Flash"
+
+# 本机桌面实例（日志是本地时间，账本是 UTC）——必须传 --log-tz local
+python scripts/self_optimize.py \
+  --events C:/ProgramData/proxy_opencode/egress_events.jsonl \
+  --log C:/ProgramData/proxy_opencode/gateway.log \
+  --events-window-hours 5 --log-tz local \
   --fallback-model "ZhipuAI/GLM-5.3-Flash"
 ```
 

@@ -151,6 +151,52 @@ def test_window_events_zero_hours_disables_the_cut():
     assert len(kept) == 1 and info["dropped"] == 0
 
 
+def test_window_events_aligns_a_local_time_log_with_the_utc_ledger():
+    """The desktop text log stamps local time while the ledger stamps UTC
+    (measured 2026-10-28: UTC+8 box, a 5h window anchored 8h in the future
+    and cut the entire ledger away)."""
+    events = [
+        {"ts": "2026-10-28T03:00:00+00:00", "event": "fallback_engaged"},
+        {"ts": "2026-10-27T20:00:00+00:00", "event": "fallback_engaged"},
+    ]
+    # Log head is naive local time = 2026-10-28 11:00 on a UTC+8 producer.
+    logs = [_chat(200, 1000.0, ts="2026-10-28T11:00:00")]
+
+    skewed, skewed_info = window_events(events, logs, window_hours=5.0)
+    assert skewed == [], "unanchored local time lands 8h ahead and cuts everything"
+    assert skewed_info["dropped"] == 2
+
+    kept, info = window_events(
+        events, logs, window_hours=5.0, log_tz_offset_s=8 * 3600.0
+    )
+    assert [r["event"] for r in kept] == ["fallback_engaged"]
+    assert info["kept"] == 1 and info["dropped"] == 1
+    assert info["anchor"] == "2026-10-28T03:00:00+00:00"
+
+
+def test_all_events_dropped_emits_a_clock_skew_finding_instead_of_crashing():
+    """Regression: the branch used to do `findings.append(f)["evidence"]...`,
+    and `list.append` returns None, so the diagnostic died with a TypeError
+    exactly when it had something urgent to say (2026-10-28 round 3)."""
+    events_text = (
+        json.dumps({"ts": "2026-10-28T03:00:00+00:00", "event": "fallback_engaged"})
+        + "\n"
+    )
+    log_text = (
+        json.dumps(_chat(200, 1000.0, ts="2026-10-28T11:00:00", request_id="r1"))
+        + "\n"
+    )
+    summary, findings = analyze(
+        events_text, log_text, events_window_hours=5.0
+    )
+
+    assert summary["events"]["total"] == 0
+    skewed = [f for f in findings if f["key"] == "no_events_in_window"]
+    assert skewed, "a fully-cut ledger must be reported, not silently dropped"
+    assert skewed[0]["evidence"]["dropped"] == 1
+    assert skewed[0]["evidence"]["ledger_records_outside_window"] == 1
+
+
 def test_summarize_reports_the_window_it_used():
     events = [
         {"ts": "2026-10-20T00:00:00+00:00", "event": "fallback_failed"},

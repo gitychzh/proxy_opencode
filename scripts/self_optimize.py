@@ -29,6 +29,7 @@ import argparse
 import json
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -113,6 +114,14 @@ def main(argv: list[str] | None = None) -> int:
         f"with '--since <n>h' (default {EVENTS_WINDOW_HOURS:g}; 0 = keep all).",
     )
     parser.add_argument(
+        "--log-tz",
+        choices=("utc", "local"),
+        default="utc",
+        help="clock the log side is stamped in; the ledger is always UTC. "
+        "Use 'local' when the log is a text-formatted desktop log (the "
+        "container's own logs are UTC, so utc==local there).",
+    )
+    parser.add_argument(
         "--out", default="", help="write the markdown report here instead of stdout."
     )
     parser.add_argument(
@@ -128,12 +137,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.log_cmd:
         log_text += _run(args.log_cmd)
 
+    log_tz_offset_s = 0.0
+    if args.log_tz == "local":
+        offset = datetime.now().astimezone().utcoffset()
+        log_tz_offset_s = offset.total_seconds() if offset is not None else 0.0
+
     summary, findings = analyze(
         event_text,
         log_text,
         ttfb_deadline_s=args.ttfb_s,
         fallback_model_hint=args.fallback_model,
         events_window_hours=args.events_window_hours,
+        log_tz_offset_s=log_tz_offset_s,
     )
 
     if args.json:
