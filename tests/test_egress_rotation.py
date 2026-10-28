@@ -63,9 +63,25 @@ def make_rotator(
     *,
     poll_s: float = 0.01,
     timeout_s: float = 0.3,
+    rotate_on_hard_429: bool = True,
 ) -> EgressRotator:
+    """Rotator wired the way a settings-driven build wires it.
+
+    ``rotate_on_hard_429`` defaults to True *here* so the historical trigger
+    tests keep testing the trigger; the shipped default is False (the
+    allowance turned out to be account-scoped, so a reboot buys no quota).
+    The production default is pinned by
+    ``test_hard_429_does_not_rotate_by_default``.
+    """
+
     counters = EgressCounters(thresholds if thresholds is not None else {"a": 3})
-    return EgressRotator(pool, counters, poll_s=poll_s, timeout_s=timeout_s)
+    return EgressRotator(
+        pool,
+        counters,
+        poll_s=poll_s,
+        timeout_s=timeout_s,
+        rotate_on_hard_429=rotate_on_hard_429,
+    )
 
 
 # ----------------------------------------------------------------- counters
@@ -1052,3 +1068,25 @@ def test_free_tier_trigger_respects_the_rotation_floor() -> None:
     assert counters.should_rotate_on_free_tier("a", now=now) is False
     assert counters.should_rotate_on_free_tier("a", now=now + 1799.0) is False
     assert counters.should_rotate_on_free_tier("a", now=now + 1800.0) is True
+
+
+@pytest.mark.asyncio
+async def test_hard_429_does_not_rotate_by_default() -> None:
+    """The shipped default is off: rotation cannot buy account-scoped quota.
+
+    Measured 2026-10-29: a freshly rebooted MiFi IP was rejected with the same
+    FreeUsageLimitError, so the old hard-429 trigger only rebooted ONTs and
+    dropped each LAN's uplink for ~65s per attempt.
+    """
+
+    pool = make_pool("a")
+    rotator = make_rotator(
+        pool, {"a": 1_000_000}, poll_s=0.02, timeout_s=0.15, rotate_on_hard_429=False
+    )
+    mark_healthy_with_ip(pool)
+
+    rotator.on_release("a", ok=False, kind="http_429", retry_after_s=27000.0)
+
+    # No rotation task was queued and the bucket's rotation count stayed 0.
+    assert not rotator._tasks  # noqa: SLF001 - test seam
+    assert rotator.counters.snapshot()["a"]["rotations"] == 0

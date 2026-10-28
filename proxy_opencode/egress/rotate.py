@@ -84,10 +84,14 @@ class EgressRotator:
         agent_secret: str = "",
         timeout_s: float = ROTATE_TIMEOUT_S,
         poll_s: float = ROTATE_POLL_S,
+        rotate_on_hard_429: bool = False,
     ) -> None:
         self._pool = pool
         self._counters = counters
         self._secret = agent_secret
+        # Off by default: the allowance is account-scoped, so a hard-429
+        # rotation reboots the ONT for an allowance a new IP does not get.
+        self._rotate_on_hard_429 = rotate_on_hard_429
         self._timeout_s = timeout_s
         self._poll_s = poll_s
         # One rotation task per bucket at a time; a trigger fired while one
@@ -118,6 +122,9 @@ class EgressRotator:
             pool,
             counters,
             agent_secret=getattr(settings, "zen_egress_secret", "") or "",
+            rotate_on_hard_429=bool(
+                getattr(settings, "zen_rotate_on_hard_429", False)
+            ),
         )
 
     @property
@@ -160,12 +167,15 @@ class EgressRotator:
         if ok:
             if self._counters.record(name, tokens=tokens):
                 self.request_rotation(name, trigger="threshold")
-        elif kind == "http_429" and self._counters.should_rotate_on_429(
-            name, retry_after_s
+        elif (
+            kind == "http_429"
+            and self._rotate_on_hard_429
+            and self._counters.should_rotate_on_429(name, retry_after_s)
         ):
             logger.warning(
-                "upstream 429 classifies as per-IP daily quota exhausted: "
-                "rotating now (bypassing request threshold)",
+                "upstream 429 classifies as a daily-quota verdict: rotating "
+                "now (ZEN_ROTATE_ON_HARD_429 is on; the allowance itself is "
+                "account-scoped, so this only re-dials the link)",
                 extra={"egress": name, "retry_after_s": retry_after_s},
             )
             self.request_rotation(name, trigger="hard_429")

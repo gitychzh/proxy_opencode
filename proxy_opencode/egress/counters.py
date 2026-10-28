@@ -201,18 +201,21 @@ class EgressCounters:
             and (ts - rec.last_rotation_epoch) < self._hard_min_interval
         ):
             return False
-        # A hard 429 proves the IP's allowance is gone; the counter records how
-        # much of its budget went unused before that happened. That gap IS the
-        # calibration error, and it is the only way to learn the real allowance
-        # without probing it: 2026-10-28 the buckets burned out at ~2.5M
-        # estimated prompt tokens while the budget was set to 8M, so the
-        # proactive trigger never fired once in a whole day and every rotation
-        # was a reactive hard-429 rescue.
+        # A hard 429 proves the ACCOUNT's allowance is gone (scope corrected
+        # 2026-10-29: a freshly rebooted IP is rejected identically), so a
+        # per-bucket token budget can never predict it — a sibling bucket may
+        # have burned the shared allowance while this one sat idle, and a
+        # wiped ledger reads 0. Report the gap as information, never as an
+        # "error, recalibrate": chasing it produced nothing but hardware
+        # reboots.
         budget = self._token_budgets.get(name, 0)
-        if budget > 0 and rec.tokens < budget:
-            logger.error(
-                "per-IP quota exhausted well below the token budget: "
-                "the budget is mis-calibrated (lower it to ~70% of the measured value)",
+        if budget > 0 and 0 < rec.tokens < budget:
+            logger.warning(
+                "upstream quota exhausted with %d/%d tokens counted on this "
+                "bucket: the allowance is account-scoped, so this budget "
+                "cannot predict it (informational)",
+                rec.tokens,
+                budget,
                 extra={
                     "egress": name,
                     "tokens": rec.tokens,

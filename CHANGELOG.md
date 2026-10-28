@@ -3,6 +3,22 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.7.13] - 2026-10-29
+
+### Fixed
+
+- **额度耗尽会把四个桶全部送进换 IP，重启 ONT 却换不来任何额度** — 0.7.12
+  部署后第一次 429，四个桶依次触发 `hard_429` 轮换：`owin10-mobile` /
+  `owin10-telecom` / `cc9` 重启光猫，`esp32-bucket` 重启 MiFi。既然额度是
+  账号级，这些重启一个字节的额度都拿不到，反而每条链路断网 ~65s、隧道重建、
+  家庭网络抖动。新增 `ZEN_ROTATE_ON_HARD_429`（**默认 false**）：硬 429 只
+  cordon 到窗口重置，不再动硬件。证据：
+  `test_hard_429_does_not_rotate_by_default`。
+- **「配额耗尽但远低于 token 预算 = 预算配错」这条 ERROR 会天天误报** — 额度
+  是账号级，单桶 token 计数根本预测不了它（兄弟桶烧的是同一份额度，账本被清
+  空时更是 0）。改为 WARNING、只在 `0 < tokens < budget` 时输出，文案写明
+  「account-scoped，此预算无法预测」。
+
 ## [0.7.12] - 2026-10-29
 
 > 0.7.9–0.7.11 的条目未补写（当时的变更只在 `git log` 里，事后重建等于伪造

@@ -285,6 +285,13 @@ class Settings:
     # fourth interactive turn into a 60s stall.
     #   ZEN_EGRESS_LAST_RESORT="esp32-bucket"
     zen_egress_last_resort: frozenset[str] = frozenset()
+    # Reboot an ONT/MiFi when an upstream 429 classifies as "daily quota"
+    # (Retry-After > 1h). DEFAULT OFF: measured 2026-10-29, the free tier's
+    # allowance is ACCOUNT-scoped, so a new IP inherits the same exhausted
+    # allowance — rotation rebooted every ONT for nothing and dropped each
+    # LAN's uplink (and its tunnel) for ~65s per attempt.
+    #   ZEN_ROTATE_ON_HARD_429=false
+    zen_rotate_on_hard_429: bool = False
     zen_egress_expect_prefix: dict[str, str] = field(default_factory=dict)
     # Shared secret for the agents' /healthz + /rotate endpoints (basic auth).
     zen_egress_secret: str = ""
@@ -632,6 +639,7 @@ def load_settings() -> Settings:
         zen_egress_last_resort=frozenset(
             _csv(os.environ.get("ZEN_EGRESS_LAST_RESORT", ""))
         ),
+        zen_rotate_on_hard_429=_env_bool("ZEN_ROTATE_ON_HARD_429", False),
         zen_egress_expect_prefix=_parse_kv(
             os.environ.get("ZEN_EGRESS_EXPECT_PREFIX", "")
         ),
