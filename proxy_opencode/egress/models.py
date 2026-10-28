@@ -136,7 +136,7 @@ class EgressState:
 class Lease:
     """One acquired egress; the holder releases it with success/failure."""
 
-    __slots__ = ("state", "released")
+    __slots__ = ("state", "released", "tokens")
 
     def __init__(self, state: EgressState) -> None:
         self.state = state
@@ -144,6 +144,12 @@ class Lease:
         # the lease and then re-raised must not decrement ``inflight`` twice
         # (that would under-count another request's in-flight slot).
         self.released = False
+        # Estimated prompt tokens this attempt will consume upstream. The
+        # adapter sets it right after acquiring (it already computed the
+        # estimate for the context guard); ``pool.release`` folds it into
+        # the bucket's daily token budget on success only — a 429/5xx
+        # attempt costs no allowance, so it must not be charged.
+        self.tokens = 0
 
     @property
     def name(self) -> str:

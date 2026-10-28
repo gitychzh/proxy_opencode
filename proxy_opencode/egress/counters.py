@@ -10,6 +10,12 @@ Semantics (single unit-test contract — see the user's example):
   the current window triggers exactly one rotation (ONT reboot via the
   agent); after the rotation the counter restarts, because the new IP is a
   fresh quota bucket.
+* **The request count is the wrong meter** (measured 2026-10-28: 166
+  requests burned a whole day's allowance because the upstream meters
+  prompt+completion tokens, ~62k per WorkBuddy turn). ``token_budget`` is
+  therefore the primary trigger: the sum of estimated prompt tokens over
+  completed requests, fired before the allowance is gone. The count
+  threshold stays as a coarse secondary guard.
 * A hard 429 bypasses the threshold and rotates immediately: either
   ``Retry-After > 3600s`` (upstream-proven classification: that shape
   means the per-IP daily quota is exhausted) or **no Retry-After at
@@ -73,6 +79,10 @@ class BucketCounts:
 
     window_start: float = 0.0
     count: int = 0
+    # Estimated prompt tokens folded from completed requests in this
+    # window. The upstream meters tokens, not calls, so this is the
+    # trigger that fires *before* the allowance is gone (2026-10-28).
+    tokens: int = 0
     # Set when the threshold fired this window; cleared on success or at
     # the next 08:00 rollover. A failed rotation leaves it set so the
     # threshold cannot re-fire endlessly during a stuck window.
@@ -93,12 +103,16 @@ class EgressCounters:
         self,
         thresholds: dict[str, int] | None = None,
         *,
+        token_budgets: dict[str, int] | None = None,
         hard_retry_after_s: float = HARD_QUOTA_RETRY_AFTER_S,
         retry_cooldown_s: float = ROTATION_RETRY_COOLDOWN_S,
         hard_rotate_min_interval_s: float = HARD_ROTATE_MIN_INTERVAL_S,
         snapshot_path: str | None = None,
     ) -> None:
         self._thresholds = {name: int(v) for name, v in (thresholds or {}).items()}
+        self._token_budgets = {
+            name: int(v) for name, v in (token_budgets or {}).items() if int(v) > 0
+        }
         self._hard = float(hard_retry_after_s)
         self._retry_cooldown = float(retry_cooldown_s)
         self._hard_min_interval = max(0.0, float(hard_rotate_min_interval_s))
@@ -111,6 +125,16 @@ class EgressCounters:
     @property
     def thresholds(self) -> dict[str, int]:
         return dict(self._thresholds)
+
+    @property
+    def token_budgets(self) -> dict[str, int]:
+        return dict(self._token_budgets)
+
+    @property
+    def names(self) -> frozenset[str]:
+        """Every bucket this counter meters (request and/or token trigger)."""
+
+        return frozenset(self._thresholds) | frozenset(self._token_budgets)
 
     @staticmethod
     def window_start(ts: float | None = None) -> float:
@@ -208,10 +232,18 @@ class EgressCounters:
             return False
         return True
 
-    def record(self, name: str, *, now: float | None = None) -> bool:
-        """Fold one completed (ok) request; True iff the threshold now fires.
+    def record(
+        self, name: str, *, tokens: int = 0, now: float | None = None
+    ) -> bool:
+        """Fold one completed (ok) request; True iff a trigger now fires.
 
-        The threshold fires at most once per window per bucket ("exactly
+        ``tokens`` is the estimated prompt size of that request. The
+        upstream meters tokens (measured 2026-10-28: 166 calls == ~10.3M
+        prompt tokens == one day's allowance), so the token budget is the
+        trigger that can fire *before* the IP is burned; the request
+        count stays as a coarse secondary guard.
+
+        Both triggers fire at most once per window per bucket ("exactly
         one rotation"); the flag is cleared by :meth:`reset` (successful
         rotation, new IP = fresh quota bucket) or by the 08:00 rollover.
         """
@@ -219,20 +251,31 @@ class EgressCounters:
         ts = now if now is not None else time.time()
         rec = self._record_for(name, ts)
         rec.count += 1
-        threshold = self._thresholds.get(name, 0)
-        fire = threshold > 0 and rec.count >= threshold and not rec.triggered
-        if fire:
+        if tokens > 0:
+            rec.tokens += int(tokens)
+        count_threshold = self._thresholds.get(name, 0)
+        token_budget = self._token_budgets.get(name, 0)
+        unit = ""
+        if not rec.triggered:
+            if count_threshold > 0 and rec.count >= count_threshold:
+                unit = "requests"
+            elif token_budget > 0 and rec.tokens >= token_budget:
+                unit = "tokens"
+        if unit:
             rec.triggered = True
             logger.warning(
-                "egress request threshold reached: rotation requested",
+                "egress rotation trigger reached: rotation requested",
                 extra={
                     "egress": name,
                     "count": rec.count,
-                    "threshold": threshold,
+                    "tokens": rec.tokens,
+                    "threshold": count_threshold,
+                    "token_budget": token_budget,
+                    "unit": unit,
                 },
             )
         self._save()
-        return fire
+        return bool(unit)
 
     def note_rotation_started(self, name: str, *, now: float | None = None) -> None:
         """Mark one rotation attempt in this window.
@@ -252,6 +295,7 @@ class EgressCounters:
 
         rec = self._record_for(name, now if now is not None else time.time())
         rec.count = 0
+        rec.tokens = 0
         rec.triggered = False
         self._save()
 
@@ -294,7 +338,7 @@ class EgressCounters:
         win_start = self.window_start(ts)
         reset_at = next_window_reset(datetime.fromtimestamp(ts, tz=window_tz))
         out: dict[str, dict[str, Any]] = {}
-        for name in sorted(set(self._thresholds) | set(self._records)):
+        for name in sorted(self.names | set(self._records)):
             rec = self.counts(name, now=ts)
             out[name] = {
                 "window_start": datetime.fromtimestamp(
@@ -306,6 +350,8 @@ class EgressCounters:
                 ).isoformat(timespec="seconds"),
                 "count": rec.count,
                 "threshold": self._thresholds.get(name, 0),
+                "tokens": rec.tokens,
+                "token_budget": self._token_budgets.get(name, 0),
                 "triggered": rec.triggered,
                 "rotations": rec.rotations,
                 "last_rotation_ok": rec.last_rotation_ok,
@@ -325,6 +371,7 @@ class EgressCounters:
                 name: {
                     "window_start": rec.window_start,
                     "count": rec.count,
+                    "tokens": rec.tokens,
                     "triggered": rec.triggered,
                     "rotations": rec.rotations,
                     "last_rotation_ok": rec.last_rotation_ok,
@@ -363,6 +410,7 @@ class EgressCounters:
                 rec = BucketCounts(
                     window_start=float(raw.get("window_start") or 0.0),
                     count=int(raw.get("count") or 0),
+                    tokens=int(raw.get("tokens") or 0),
                     triggered=bool(raw.get("triggered")),
                     rotations=int(raw.get("rotations") or 0),
                     last_rotation_ok=(
@@ -439,10 +487,12 @@ class EgressCounters:
                 egress=name,
                 ended_window=rec.window_start,
                 final_count=rec.count,
+                final_tokens=rec.tokens,
                 rotations=rec.rotations,
             )
             rec.window_start = win
             rec.count = 0
+            rec.tokens = 0
             rec.triggered = False
             rec.rotations = 0
         return rec

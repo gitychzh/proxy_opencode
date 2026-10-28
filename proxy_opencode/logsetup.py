@@ -81,6 +81,11 @@ FIELDS = (
     "dropped",
     "estimated_input",
     "max_tokens",
+    # Rotation trigger provenance (egress/counters.record): the upstream
+    # meters tokens, so the trigger reports both meters and which one fired.
+    "tokens",
+    "token_budget",
+    "unit",
 )
 
 _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"

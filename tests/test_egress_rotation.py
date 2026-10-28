@@ -99,6 +99,56 @@ def test_threshold_fires_exactly_once_and_resets_on_rotation() -> None:
     assert counters.record("a", now=now) is True
 
 
+def test_token_budget_fires_before_the_request_threshold() -> None:
+    """The upstream meters tokens, not calls (2026-10-28).
+
+    166 requests burned a whole day's allowance (~10.3M prompt tokens), so a
+    request-count threshold can only ever fire after the IP is already dead.
+    The token budget must trip first.
+    """
+
+    now = ts_cst(14, 9, 30)
+    counters = EgressCounters({"a": 500}, token_budgets={"a": 1000})
+    fired = [counters.record("a", tokens=300, now=now) for _ in range(4)]
+    assert fired == [False, False, False, True]
+    counts = counters.counts("a", now=now)
+    assert counts.count == 4  # nowhere near the 500-request threshold
+    assert counts.tokens == 1200
+    assert counts.triggered is True
+
+
+def test_token_budget_rollover_and_reset_clear_the_total() -> None:
+    day1 = ts_cst(14, 9, 0)
+    day2 = ts_cst(15, 9, 0)
+    counters = EgressCounters({}, token_budgets={"a": 1000})
+    assert counters.record("a", tokens=900, now=day1) is False
+    # A new window starts from zero, exactly like the request counter.
+    assert counters.record("a", tokens=900, now=day2) is False
+    assert counters.counts("a", now=day2).tokens == 900
+    # A successful rotation means a new IP, i.e. a fresh allowance.
+    counters.reset("a", now=day2)
+    assert counters.counts("a", now=day2).tokens == 0
+
+
+def test_token_budget_survives_a_snapshot_round_trip(tmp_path) -> None:
+    path = str(tmp_path / "egress_counts.json")
+    now = time.time()  # inside the live window: older rows are dropped on load
+    counters = EgressCounters({}, token_budgets={"a": 1000}, snapshot_path=path)
+    counters.record("a", tokens=700, now=now)
+    reloaded = EgressCounters({}, token_budgets={"a": 1000}, snapshot_path=path)
+    assert reloaded.counts("a", now=now).tokens == 700
+
+
+def test_token_only_bucket_still_rotates() -> None:
+    """A bucket configured with only a token budget must be rotatable."""
+
+    pool = make_pool("a")
+    mark_healthy_with_ip(pool)
+    counters = EgressCounters({}, token_budgets={"a": 1000})
+    rotator = EgressRotator(pool, counters, poll_s=0.01, timeout_s=0.3)
+    assert rotator.rotatable("a") is True
+
+
 def test_daily_rollover_at_0800_resets_every_counter() -> None:
     day1 = ts_cst(14, 9, 0)
     day2 = ts_cst(15, 9, 0)
@@ -328,7 +378,13 @@ async def test_release_notifies_observer_with_retry_after() -> None:
 
     class _Spy:
         def on_release(
-            self, name: str, *, ok: bool, kind: str, retry_after_s: float | None
+            self,
+            name: str,
+            *,
+            ok: bool,
+            kind: str,
+            retry_after_s: float | None,
+            tokens: int = 0,
         ) -> None:
             seen.append((name, ok, kind, retry_after_s))
 
@@ -349,20 +405,29 @@ async def test_release_notifies_observer_on_success() -> None:
     threshold could not fire. The observer must see both outcomes.
     """
 
-    seen: list[tuple[str, bool, str]] = []
+    seen: list[tuple[str, bool, str, int]] = []
 
     class _Spy:
         def on_release(
-            self, name: str, *, ok: bool, kind: str, retry_after_s: float | None
+            self,
+            name: str,
+            *,
+            ok: bool,
+            kind: str,
+            retry_after_s: float | None,
+            tokens: int = 0,
         ) -> None:
-            seen.append((name, ok, kind))
+            seen.append((name, ok, kind, tokens))
 
     pool = make_pool("a")
     mark_healthy_with_ip(pool)
     pool.attach_release_observer(_Spy())
     lease = await pool.acquire()
+    # The adapter stamps the request's estimated prompt size on the lease;
+    # a successful release must hand it to the counters (token budget).
+    lease.tokens = 6200
     await pool.release(lease, ok=True)
-    assert seen == [("a", True, "")]
+    assert seen == [("a", True, "", 6200)]
 
 
 @pytest.mark.asyncio

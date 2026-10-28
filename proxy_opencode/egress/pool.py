@@ -54,7 +54,13 @@ class ReleaseObserver(Protocol):
     """
 
     def on_release(
-        self, name: str, *, ok: bool, kind: str, retry_after_s: float | None
+        self,
+        name: str,
+        *,
+        ok: bool,
+        kind: str,
+        retry_after_s: float | None,
+        tokens: int = 0,
     ) -> None: ...
 
 
@@ -298,7 +304,9 @@ class EgressPool:
             # and the rotation threshold could not fire (found 2026-10-17:
             # every bucket showed count=0 after a full day of 200s). The
             # release outcome must reach the trigger logic on ok too.
-            self._notify_observer(state, ok, kind, retry_after_s)
+            self._notify_observer(
+                state, ok, kind, retry_after_s, tokens=lease.tokens
+            )
             return
         state.failures += 1
         state.last_error = kind or "error"
@@ -445,7 +453,13 @@ class EgressPool:
         )
 
     def _notify_observer(
-        self, state: EgressState, ok: bool, kind: str, retry_after_s: float | None
+        self,
+        state: EgressState,
+        ok: bool,
+        kind: str,
+        retry_after_s: float | None,
+        *,
+        tokens: int = 0,
     ) -> None:
         """Fold one release outcome into the rotator/counters (never fatal)."""
 
@@ -453,7 +467,11 @@ class EgressPool:
             return
         try:
             self._observer.on_release(
-                state.spec.name, ok=ok, kind=kind, retry_after_s=retry_after_s
+                state.spec.name,
+                ok=ok,
+                kind=kind,
+                retry_after_s=retry_after_s,
+                tokens=tokens,
             )
         except Exception:
             # Counter/rotation bookkeeping must never break the release

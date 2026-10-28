@@ -969,6 +969,9 @@ class _StubPool:
     def __init__(self, client: httpx.AsyncClient) -> None:
         self._client = client
         self.releases: list[tuple[str, bool, str]] = []
+        # Estimated prompt tokens the adapter stamped on each lease; the
+        # bucket's daily token budget is charged from exactly this number.
+        self.lease_tokens: list[int] = []
 
     @property
     def size(self) -> int:
@@ -989,6 +992,7 @@ class _StubPool:
         retry_after_s: float | None = None,
     ) -> None:
         self._retry_after = retry_after_s
+        self.lease_tokens.append(lease.tokens)
         self.releases.append((lease.name, ok, kind))
 
 
@@ -1025,6 +1029,42 @@ async def test_chat_stream_leases_egress_and_releases_on_stream_end() -> None:
     # healthy tunnel merely forwarded upstream's truncation) but with the
     # outcome recorded for bucket stats
     assert pool.releases == [("bucket-a", True, "stream_cut")]
+    await client.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_stamps_the_prompt_estimate_on_every_lease() -> None:
+    """The token budget is metered from the estimate the guard already made.
+
+    Nothing else in the request path knows the prompt size before the
+    upstream answers, and the upstream bills tokens rather than calls
+    (2026-10-28: 166 calls == one exhausted IP). If the stamp goes missing
+    the budget silently never fires, so this wiring is pinned here.
+    """
+
+    respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=200,
+        headers={"content-type": "text/event-stream"},
+        content=b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n',
+    )
+    client = _leased_client()
+    pool = _StubPool(client)
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    prompt = "the quick brown fox jumps over the lazy dog " * 40
+    result = await adapter.chat(
+        {
+            "model": "opencode/big-pickle",
+            "stream": True,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    )
+    assert isinstance(result, StreamRelay)
+    _ = b"".join([c async for c in result.chunks()])
+    assert len(pool.lease_tokens) == 1
+    # ~500 tokens of prose plus the injected marker prompt and builtin tools.
+    assert pool.lease_tokens[0] > 300
     await client.aclose()
     await adapter.aclose()
 

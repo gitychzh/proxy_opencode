@@ -155,8 +155,12 @@ class ZenDirectAdapter:
         model = self._zen_model(payload.get("model"))
         body = self._build_body(payload, model)
         body["stream"] = True
-        self._apply_policy(body, model)
+        applied = self._apply_policy(body, model)
         stream = bool(payload.get("stream"))
+        # Estimated prompt tokens for this request. Stamped onto every lease
+        # below so the bucket's daily TOKEN budget can be metered — the
+        # upstream quota is spent in tokens, not calls (2026-10-28).
+        estimated = applied.estimated_input
 
         if self._pool is None:
             result = await self._exchange(
@@ -165,7 +169,15 @@ class ZenDirectAdapter:
             return self._egress_gate_answer(result)
 
         attempts = min(self._pool.size, FAILOVER_MAX_ATTEMPTS)
-        lease = await self._pool.acquire()
+
+        async def _acquire() -> Lease:
+            """Acquire a bucket and stamp this request's token estimate."""
+
+            held = await self._pool.acquire()  # type: ignore[union-attr]
+            held.tokens = estimated
+            return held
+
+        lease = await _acquire()
         while True:
             try:
                 result = await self._exchange(
@@ -182,7 +194,7 @@ class ZenDirectAdapter:
                 if attempts <= 0:
                     raise _transport_error(exc) from exc
                 _log_failover(kind=kind, remaining=attempts, detail=str(exc)[:120])
-                lease = await self._pool.acquire()
+                lease = await _acquire()
                 continue
             except BaseException:
                 # Cancellation (client hung up before any byte) or an
@@ -199,14 +211,14 @@ class ZenDirectAdapter:
                 if attempts <= 0:
                     return result
                 _log_failover(kind="http_429", remaining=attempts)
-                lease = await self._pool.acquire()
+                lease = await _acquire()
                 continue
             if isinstance(status, int) and status >= 500:
                 attempts -= 1
                 if attempts <= 0:
                     return result
                 _log_failover(kind=f"http_{status}", remaining=attempts)
-                lease = await self._pool.acquire()
+                lease = await _acquire()
                 continue
             if (
                 self._auth_free
@@ -219,7 +231,7 @@ class ZenDirectAdapter:
                 if attempts <= 0:
                     return self._egress_gate_answer(result)
                 _log_failover(kind="http_403_free_tier", remaining=attempts)
-                lease = await self._pool.acquire()
+                lease = await _acquire()
                 continue
             # 200 body, or a request-level 4xx: final for this request.
             return result

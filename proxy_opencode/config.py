@@ -294,6 +294,14 @@ class Settings:
     # the whole rotation feature is off.
     #   ZEN_EGRESS_ROTATION="owin10-telecom=500,owin10-mobile=500,cc9=500"
     zen_egress_rotation: dict[str, int] = field(default_factory=dict)
+    # Per-bucket daily token budget — the PRIMARY rotation trigger. The
+    # upstream meters prompt+completion tokens rather than calls (measured
+    # 2026-10-28: 166 requests == ~10.3M prompt tokens == one exhausted
+    # IP), so a request-count threshold can only fire after the damage.
+    # This one fires *before* the allowance is gone. Values are prompt
+    # tokens per bucket per 08:00-window, e.g. 8M against a ~10M allowance.
+    #   ZEN_EGRESS_TOKEN_ROTATION="owin10-mobile=8000000,cc9=8000000"
+    zen_egress_token_rotation: dict[str, int] = field(default_factory=dict)
     # Counters/rotation JSON snapshot for restart survival (container has
     # a /data volume for exactly this); empty = in-memory only.
     #   ZEN_EGRESS_COUNTS_PATH="/data/egress_counts.json"
@@ -625,6 +633,9 @@ def load_settings() -> Settings:
             os.environ.get("ZEN_EGRESS_ROTATE_MIN_INTERVAL_S", "1800")
         ),
         zen_egress_rotation=_parse_kv_int(os.environ.get("ZEN_EGRESS_ROTATION", "")),
+        zen_egress_token_rotation=_parse_kv_int(
+            os.environ.get("ZEN_EGRESS_TOKEN_ROTATION", "")
+        ),
         zen_egress_counts_path=os.environ.get(
             "ZEN_EGRESS_COUNTS_PATH", ""
         ).strip(),

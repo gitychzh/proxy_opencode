@@ -93,7 +93,7 @@ class EgressRotator:
         # One rotation task per bucket at a time; a trigger fired while one
         # is already running is a no-op (the trigger re-arms via counters).
         self._tasks: dict[str, asyncio.Task[RotationOutcome]] = {}
-        self._names = frozenset(counters.thresholds)
+        self._names = frozenset(counters.names)
         # Wiring order in the app factory: the pool exists first, then the
         # rotator attaches itself as the pool's release observer.
         pool.attach_release_observer(self)
@@ -103,10 +103,12 @@ class EgressRotator:
         """Build from Settings; None when no bucket is configured for rotation."""
 
         thresholds = getattr(settings, "zen_egress_rotation", None) or {}
-        if not thresholds:
+        budgets = getattr(settings, "zen_egress_token_rotation", None) or {}
+        if not thresholds and not budgets:
             return None
         counters = EgressCounters(
             dict(thresholds),
+            token_budgets=dict(budgets),
             hard_rotate_min_interval_s=float(
                 getattr(settings, "zen_egress_rotate_min_interval_s", 1800.0)
             ),
@@ -128,13 +130,22 @@ class EgressRotator:
     # --------------------------------------------------- observer interface
 
     def on_release(
-        self, name: str, *, ok: bool, kind: str, retry_after_s: float | None
+        self,
+        name: str,
+        *,
+        ok: bool,
+        kind: str,
+        retry_after_s: float | None,
+        tokens: int = 0,
     ) -> None:
         """Fold one release outcome in and fire the rotation trigger.
 
-        * completed (ok) request → counters; at the per-window threshold
-          exactly one rotation is requested (a failed attempt leaves the
-          flag set until the next window rolls over at 08:00).
+        * completed (ok) request → counters; at the per-window request
+          threshold **or** the per-window token budget exactly one
+          rotation is requested (a failed attempt leaves the flag set
+          until the next window rolls over at 08:00). The token budget is
+          the primary guard: the upstream meters tokens, and 166 calls
+          were enough to burn an IP's whole day (2026-10-28).
         * upstream 429 whose Retry-After classifies as per-IP daily
           quota exhaustion (measured boundary: > 3600s, or no
           Retry-After header at all — both, 2026-10-16 measurement)
@@ -147,7 +158,7 @@ class EgressRotator:
         """
 
         if ok:
-            if self._counters.record(name):
+            if self._counters.record(name, tokens=tokens):
                 self.request_rotation(name, trigger="threshold")
         elif kind == "http_429" and self._counters.should_rotate_on_429(
             name, retry_after_s

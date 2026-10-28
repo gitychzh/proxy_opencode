@@ -28,6 +28,27 @@
   容器日志是 UTC，默认值保持 `utc`。证据：
   `test_window_events_aligns_a_local_time_log_with_the_utc_ledger`。
 
+### Changed
+
+- **换 IP 的主触发从「请求条数」改为「token 额度」** — 上游免费层按 token 计量，
+  不是按调用次数。2026-10-28 实测：本机 08:00–15:52 只发了 **166 条**请求就吃
+  429（`Retry-After` 指向次日 UTC0），而同窗口累计 prompt 是 **10,347,914
+  tokens**（WorkBuddy 长上下文，均值 62k/条）；ECS 三桶全天合计仅 52 条 /
+  1.87M tokens，`owin10-mobile` 的 IP 仍一天死两次（04:14 换到 223.68.47.105 →
+  07:57 又耗尽）。原来的 `ZEN_EGRESS_ROTATION=500` 条阈值因此**永不触发**（单桶
+  日计数 7–15 条），两次轮换全靠 hard 429 reactive，也就是先吃墙再换 IP。
+  改动：新增 `ZEN_EGRESS_TOKEN_ROTATION`（每桶每窗口估算 prompt tokens 上限，
+  默认建议 8M 对 ~10M 额度留 20% 余量）作为主闸，条数阈值保留为粗粒度副闸；
+  `BucketCounts.tokens` 随快照持久化、随 08:00 窗口与成功轮换归零。
+  计量口径由 `ZenDirectAdapter` 在取租约时把上下文闸已算出的
+  `Applied.estimated_input` 戳到 `Lease.tokens`，`EgressPool.release` **仅在
+  ok 路径**折叠（429/5xx 不消耗额度）。证据：
+  `test_token_budget_fires_before_the_request_threshold`、
+  `test_token_only_bucket_still_rotates`、
+  `test_chat_stamps_the_prompt_estimate_on_every_lease`。
+  注意：LTE 桶是 CGNAT 共享出口，邻居流量烧的是同一个 IP 的额度，自有 token
+  计量无法覆盖这部分——那一类仍只能靠 hard 429 reactive 兜底。
+
 ## [0.7.7] - 2026-10-28
 
 ### Fixed

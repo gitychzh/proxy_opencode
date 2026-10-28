@@ -109,10 +109,17 @@ cordon、换 IP、failover 语义与传输无关。
 - **首字节（TTFB）超时**：`ZEN_TTFB_S`（默认 60s；实测 TTFB p95=21s、p99=305s）只约束**响应头**，到达即解除；
   之后的静默由 `STREAM_STALL_S` 管。此前整个交换只有 `zen_timeout_s=300` 一个
   上界，隧道黑洞会让单个请求先烧掉 300s 再换桶（实测 305–315s）。
-- **换 IP**：每桶日窗 `[08:00, 08:00+1d)` Asia/Shanghai（=UTC0）计数，达到
-  `ZEN_EGRESS_ROTATION` 阈值触发；硬 429 / 403 门槛绕过阈值立即触发，二者共用
-  "每窗口每桶一次"去重与失败冷却（`ROTATION_RETRY_COOLDOWN_S=900s`），硬 429
-  路径另有 `ZEN_EGRESS_ROTATE_MIN_INTERVAL_S=1800s` 下限防风暴。
+- **换 IP**：每桶日窗 `[08:00, 08:00+1d)` Asia/Shanghai（=UTC0）计数。**主触发是
+  token 额度** `ZEN_EGRESS_TOKEN_ROTATION`（每桶每窗口的估算 prompt tokens 之和）：
+  上游按 token 计量而非请求条数（2026-10-28 实测 166 条请求即烧穿一个 IP 的日额度，
+  约 10.3M prompt tokens），条数阈值 `ZEN_EGRESS_ROTATION` 只作为粗粒度副闸——
+  它在额度烧完后才可能到达，单独使用等于"事后补救"。两者任一命中即触发；硬 429 /
+  403 门槛绕过阈值立即触发，共用"每窗口每桶一次"去重与失败冷却
+  （`ROTATION_RETRY_COOLDOWN_S=900s`），硬 429 路径另有
+  `ZEN_EGRESS_ROTATE_MIN_INTERVAL_S=1800s` 下限防风暴。
+  token 计量的口径：`ZenDirectAdapter` 把上下文闸已算出的估算 prompt 数
+  （`Applied.estimated_input`）**戳在 Lease 上**，仅在 `ok` 释放时折叠进计数
+  （429/5xx 不消耗额度，不得计入）。
   编排：标记 rotating（选桶跳过、在途自然收尾）→ `POST {agent}/rotate` →
   轮询 `/healthz` 等 IP **变化**（落在 `expect_prefix` 内只作审计，不符时记
   `prefix_mismatch`，不再判失败）→ 清 cordon、计数归零。**`POST` 传输失败不等于

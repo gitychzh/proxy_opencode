@@ -74,6 +74,7 @@ rollback 镜像；③上传包用完即删，部署树里不许出现 `__pycache
 
 ```
 ZEN_EGRESS_PROXIES / ZEN_EGRESS_EXPECT_PREFIX / ZEN_EGRESS_ROTATION   # 三处桶清单必须同步
+ZEN_EGRESS_TOKEN_ROTATION      # 主触发：每桶每窗口估算 prompt tokens 上限（建议 8M）
 ZEN_BUN_TRANSPORT=1            # 传输栈门：生产必须走 bun
 ZEN_MARKER_MODE=full           # bridge 注记过不了 body 门
 PUBLIC_MODELS=deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle
