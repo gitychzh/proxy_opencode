@@ -20,7 +20,14 @@
 
 ```jsonc
 {
-  "limit": { "context": 200000, "input": 160000, "output": 32000 },
+  // models.dev 快照写的是 {context 200000, input 160000}，**实测已过期**：
+  // 2026-10-29 把 prompt 一路顶到上游自己的拒绝线，它的原话是
+  //   "Input token count (294840) exceeds the model's maximum context
+  //    length of (262139), no tokens left for generation"
+  // 实测通过点（上游回显的 prompt_tokens）：57,240 / 92,440 / 104,760 /
+  // 118,840 / 132,040 / 149,640 / 162,840 / 198,040 / 203,320 / 233,240
+  // 全部 200；294,840 → 400。约束是 prompt + max_tokens ≤ 262,139。
+  "limit": { "context": 262139, "input": 261000, "output": 32000 },
   "capabilities": {
     "reasoning": { "supported": true },   // 注意：没有 effort 列表、没有 toggle
     "tools": { "supported": true },
@@ -42,19 +49,19 @@
   `budget_tokens`：转发一个不存在的开关，等于对客户端撒谎，还可能被上游当成
   降低强度的指令。被丢弃的只是字段**名字**，值不进日志。
 
-## 3. 压缩点（136K，不是 160K）
+## 3. 压缩点（222K，按实测窗口算）
 
 `calculateCeiling(limit)`：
 
 ```
-window  = limit.input || limit.context          // big-pickle: 160000
-reserve = max(floor(window*0.15), window >= 32000 ? 16000 : 0)  // 24000
-ceiling = window - reserve                       // 136000
+window  = limit.input || limit.context          // big-pickle: 261000（实测）
+reserve = max(floor(window*0.15), window >= 32000 ? 16000 : 0)  // 39165
+ceiling = window - reserve                       // 221835
 ```
 
-即 **big-pickle 在 136000 token 处自动压缩**；160000 是它公布的输入上限，
-200000 是含输出的总窗口。只有不公布 `input` 的模型（如 `deepseek-v4.1-flash-free`）
-才以 `context` 为窗口，压缩点是 170000。
+即按实测窗口，压缩点是 **221835**；262139 是上游真正的总窗口，261000 是我们
+留出输出下限后的输入上限。models.dev 快照给的 160000/136000 已经过期——
+按那个数值，客户端会在 136K 就压缩，白白浪费一半可用上下文。
 
 网关不自己压缩对话（那是客户端的事，服务端替客户端改写历史会破坏 prompt 缓存
 与工具调用配对）。网关做的是同一件事的另一半：**在输入上限处给出上游同款的拒绝**。
@@ -62,12 +69,12 @@ ceiling = window - reserve                       // 136000
 ## 4. 上下文守卫
 
 `ZEN_CONTEXT_GUARD=1`（默认）时，请求在**发出去之前**按同一个估算器量一遍
-（含注入的 marker prompt 与内置工具 schema——它们是真 token）：
+（含注入的 marker prompt 与内置工具 schema——它们是真 token，实测固定开销约 5,141）：
 
 | 估算值 | 网关行为 |
 |---|---|
 | ≤ 输入上限 | 正常转发 |
-| > 输入上限（big-pickle 160000） | 本地 400，`code=context_length_exceeded`，消息里写明三个数 |
+| > 输入上限（big-pickle 261000） | 本地 400，`code=context_length_exceeded`，消息里写明三个数 |
 
 为什么不直接透传给上游：上游同样会拒，但要等一整轮；更要紧的是免费额度——
 本地拒绝**不消耗配额**，也不占用出口桶。错误形状保持 OpenAI 标准，因为

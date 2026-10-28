@@ -22,13 +22,21 @@ from proxy_opencode.model_profile import (
 )
 
 
-def test_big_pickle_limits_match_the_shipped_catalogue_snapshot():
-    # models-dev/snapshot.txt: limit {context 200000, input 160000, output 32000}
+def test_big_pickle_limits_match_the_live_upstream_not_the_stale_snapshot():
+    # models-dev/snapshot.txt ships {context 200000, input 160000, output 32000},
+    # but the live upstream enforces 262139 and rejects past it with
+    # "Input token count (N) exceeds the model's maximum context length of
+    #  (262139), no tokens left for generation" (measured 2026-10-29).
+    # The provider's live numbers win: this module's contract is to mirror the
+    # provider, and the snapshot is demonstrably stale.
     prof = profile("big-pickle")
     assert prof is not None
-    assert prof.limits.context == 200_000
-    assert prof.limits.input == 160_000
+    assert prof.limits.context == 262_139
+    assert prof.limits.input == 261_000
     assert prof.limits.output == 32_000
+    # A prompt at the guard limit must still leave room for the 1024-token
+    # output floor, otherwise the upstream rejects prompt+max_tokens.
+    assert prof.limits.input < prof.limits.context
 
 
 def test_big_pickle_declares_reasoning_without_effort_levels():

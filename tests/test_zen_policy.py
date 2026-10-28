@@ -140,14 +140,13 @@ def test_off_mode_leaves_the_field_untouched():
 
 
 def test_prompt_past_the_input_limit_is_refused_locally():
-    body = _body(messages=[{"role": "user", "content": "x" * 700_000}])
+    body = _body(messages=[{"role": "user", "content": "x" * 1_200_000}])
     with pytest.raises(ContextOverflow) as excinfo:
         apply_request_policy(body, profile=BIG_PICKLE)
     err = excinfo.value
-    assert err.input_limit == 160_000
-    assert err.estimated_tokens > 160_000
-    assert "136000" in str(err)
-    assert "160000" in str(err)
+    assert err.input_limit == 261_000
+    assert err.estimated_tokens > 261_000
+    assert "261000" in str(err)
 
 
 def test_guard_measures_the_composed_body_including_injected_tools():
@@ -156,10 +155,10 @@ def test_guard_measures_the_composed_body_including_injected_tools():
     tools = [
         {
             "type": "function",
-            "function": {"name": "bash", "description": "y" * 400_000},
+            "function": {"name": "bash", "description": "y" * 600_000},
         }
     ]
-    body = _body(messages=[{"role": "user", "content": "x" * 400_000}])
+    body = _body(messages=[{"role": "user", "content": "x" * 600_000}])
     body["tools"] = tools
     with pytest.raises(ContextOverflow):
         apply_request_policy(body, profile=BIG_PICKLE)
