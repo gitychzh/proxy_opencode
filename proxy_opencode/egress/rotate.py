@@ -39,6 +39,15 @@ ROTATE_TIMEOUT_S = 420.0
 ROTATE_POLL_S = 10.0
 HTTP_TIMEOUT_S = 30.0
 
+# Timer-driven retries per window after a failed attempt (cap on
+# ``BucketCounts.rotations``, which counts every attempt). Paces a broken
+# ONT/agent to at most this many reboots per day while still converging:
+# 2026-10-29 cc9 burned its quota, its one rotation failed (ISP re-issued
+# the same IP), and without a retry loop the bucket sat cordoned until the
+# 08:00 rollover — the cordon stops the request flow, so no release event
+# can ever re-arm the triggers (the retry must not depend on traffic).
+MAX_ROTATIONS_PER_WINDOW = 5
+
 
 @dataclass
 class RotationOutcome:
@@ -85,18 +94,28 @@ class EgressRotator:
         timeout_s: float = ROTATE_TIMEOUT_S,
         poll_s: float = ROTATE_POLL_S,
         rotate_on_hard_429: bool = False,
+        max_rotations_per_window: int = MAX_ROTATIONS_PER_WINDOW,
     ) -> None:
         self._pool = pool
         self._counters = counters
         self._secret = agent_secret
-        # Off by default: the allowance is account-scoped, so a hard-429
-        # rotation reboots the ONT for an allowance a new IP does not get.
+        # Off by default in code; production turns it on via
+        # ZEN_ROTATE_ON_HARD_429: the 2026-10-29 09:15 measurement says the
+        # per-IP daily allowance is per-IP (a sibling bucket on the same
+        # account kept answering 200 while this one was hard-429'd), so a
+        # fresh IP does buy fresh quota. The
+        # HARD_ROTATE_MIN_INTERVAL_S floor in the counters guards against
+        # 429-storm reboot churn.
         self._rotate_on_hard_429 = rotate_on_hard_429
         self._timeout_s = timeout_s
         self._poll_s = poll_s
+        self._max_rotations = max(1, int(max_rotations_per_window))
         # One rotation task per bucket at a time; a trigger fired while one
         # is already running is a no-op (the trigger re-arms via counters).
         self._tasks: dict[str, asyncio.Task[RotationOutcome]] = {}
+        # Timer-driven retries for failed attempts (independent of traffic;
+        # a cordoned bucket receives no release events).
+        self._retry_tasks: dict[str, asyncio.Task[None]] = {}
         self._names = frozenset(counters.names)
         # Wiring order in the app factory: the pool exists first, then the
         # rotator attaches itself as the pool's release observer.
@@ -174,8 +193,8 @@ class EgressRotator:
         ):
             logger.warning(
                 "upstream 429 classifies as a daily-quota verdict: rotating "
-                "now (ZEN_ROTATE_ON_HARD_429 is on; the allowance itself is "
-                "account-scoped, so this only re-dials the link)",
+                "now (ZEN_ROTATE_ON_HARD_429 is on; the fresh IP gets its "
+                "own fresh allowance)",
                 extra={"egress": name, "retry_after_s": retry_after_s},
             )
             self.request_rotation(name, trigger="hard_429")
@@ -227,6 +246,10 @@ class EgressRotator:
     async def aclose(self) -> None:
         """Cancel in-flight rotations (gateway shutdown)."""
 
+        for retry_task in self._retry_tasks.values():
+            if not retry_task.done():
+                retry_task.cancel()
+        self._retry_tasks.clear()
         for task in self._tasks.values():
             if not task.done():
                 task.cancel()
@@ -285,9 +308,63 @@ class EgressRotator:
                 detail=outcome.detail[:200],
                 elapsed_s=round(outcome.elapsed_s, 1),
             )
+            self._schedule_retry(name, trigger)
         self._counters.note_rotation_result(name, ok=outcome.ok, detail=outcome.detail)
         self._pool.mark_rotating(name, False)
         return outcome
+
+    # ----------------------------------------------------- failure retry loop
+
+    def _schedule_retry(self, name: str, trigger: str) -> None:
+        """Queue one timer-driven retry after a failed attempt.
+
+        The cordon that accompanies a hard 429 stops the bucket from
+        serving, so no release event can re-arm the threshold triggers —
+        a single failed rotation (e.g. the ISP re-issued the same IP)
+        would otherwise leave the bucket dead until the 08:00 rollover.
+        The counters' retry cooldown paces attempts; the per-window cap
+        keeps a broken ONT from being rebooted all day.
+        """
+
+        rec = self._counters.counts(name)
+        if rec.rotations >= self._max_rotations:
+            logger.warning(
+                "rotation retry cap reached for this window; waiting for "
+                "the 08:00 rollover",
+                extra={"egress": name, "rotations": rec.rotations},
+            )
+            EVENTS.emit(
+                "rotation_retry_skipped",
+                egress=name,
+                reason="cap",
+                rotations=rec.rotations,
+            )
+            return
+        pending = self._retry_tasks.get(name)
+        if pending is not None and not pending.done():
+            return
+        self._retry_tasks[name] = asyncio.get_running_loop().create_task(
+            self._retry_later(name, trigger)
+        )
+
+    async def _retry_later(self, name: str, trigger: str) -> None:
+        await asyncio.sleep(self._counters.retry_cooldown_s)
+        if self.running(name):
+            return
+        rec = self._counters.counts(name)
+        # A successful concurrent attempt or a window rollover (fresh
+        # record, last_rotation_ok=None) means there is nothing to retry.
+        if rec.last_rotation_ok is not False:
+            return
+        if rec.rotations >= self._max_rotations:
+            return
+        logger.warning(
+            "retrying failed egress rotation (timer-driven, traffic-"
+            "independent)",
+            extra={"egress": name, "original_trigger": trigger},
+        )
+        EVENTS.emit("rotation_retry", egress=name, trigger=trigger)
+        self.request_rotation(name, trigger=f"{trigger}_retry")
 
     async def _rotate_flow(self, spec: EgressSpec, trigger: str) -> RotationOutcome:
         name = spec.name

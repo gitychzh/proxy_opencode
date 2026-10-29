@@ -64,17 +64,22 @@ def make_rotator(
     poll_s: float = 0.01,
     timeout_s: float = 0.3,
     rotate_on_hard_429: bool = True,
+    retry_cooldown_s: float = 900.0,
 ) -> EgressRotator:
     """Rotator wired the way a settings-driven build wires it.
 
     ``rotate_on_hard_429`` defaults to True *here* so the historical trigger
-    tests keep testing the trigger; the shipped default is False (the
-    allowance turned out to be account-scoped, so a reboot buys no quota).
-    The production default is pinned by
+    tests keep testing the trigger; the shipped code default is False and
+    production turns it on via ``ZEN_ROTATE_ON_HARD_429`` (the 2026-10-29
+    09:15 measurement says the daily allowance is per-IP, so a fresh IP
+    does buy fresh quota). The production default is pinned by
     ``test_hard_429_does_not_rotate_by_default``.
     """
 
-    counters = EgressCounters(thresholds if thresholds is not None else {"a": 3})
+    counters = EgressCounters(
+        thresholds if thresholds is not None else {"a": 3},
+        retry_cooldown_s=retry_cooldown_s,
+    )
     return EgressRotator(
         pool,
         counters,
@@ -1072,11 +1077,14 @@ def test_free_tier_trigger_respects_the_rotation_floor() -> None:
 
 @pytest.mark.asyncio
 async def test_hard_429_does_not_rotate_by_default() -> None:
-    """The shipped default is off: rotation cannot buy account-scoped quota.
+    """The shipped *code* default is off; production opts in via env.
 
-    Measured 2026-10-29: a freshly rebooted MiFi IP was rejected with the same
-    FreeUsageLimitError, so the old hard-429 trigger only rebooted ONTs and
-    dropped each LAN's uplink for ~65s per attempt.
+    Evidence history: 0.7.12–0.7.16 measured a fresh IP rejected identically
+    (account-scoped), but the 2026-10-29 09:15 measurement overturned that —
+    only owin10-mobile hard-429'd while sibling buckets on the same account
+    kept answering 200 (per-IP). Production therefore sets
+    ZEN_ROTATE_ON_HARD_429=true; the code default stays conservative so a
+    deployment without reachable agents never reboots anything.
     """
 
     pool = make_pool("a")
@@ -1090,3 +1098,115 @@ async def test_hard_429_does_not_rotate_by_default() -> None:
     # No rotation task was queued and the bucket's rotation count stayed 0.
     assert not rotator._tasks  # noqa: SLF001 - test seam
     assert rotator.counters.snapshot()["a"]["rotations"] == 0
+
+
+def test_failed_rotation_re_arms_the_threshold_after_retry_cooldown() -> None:
+    """2026-10-29 cc9: one failed rotation latched the bucket for the day.
+
+    The ISP re-issued the same IP, the attempt was recorded as failed, and
+    the ``triggered`` flag then stayed set — the burned bucket never rotated
+    again and a hard 429 finally cordoned it until the 08:00 rollover. The
+    threshold must re-arm once the retry cooldown has passed (a live bucket
+    keeps folding requests into ``record``; the timer retry covers the
+    cordoned ones).
+    """
+
+    counters = EgressCounters({}, token_budgets={"a": 100}, retry_cooldown_s=100.0)
+    t0 = ts_cst(29, 10, 0)
+    assert counters.record("a", tokens=100, now=t0) is True
+    counters.note_rotation_started("a", now=t0)
+    counters.note_rotation_result("a", ok=False, detail="ip unchanged", now=t0)
+    # Inside the retry cooldown the latch still holds.
+    assert counters.record("a", tokens=50, now=ts_cst(29, 10, 1)) is False
+    # After the cooldown the accumulated tokens re-fire the trigger.
+    assert counters.record("a", tokens=50, now=ts_cst(29, 10, 3)) is True
+    # A successful rotation resets the counter: fresh quota, no fire.
+    counters.note_rotation_started("a", now=ts_cst(29, 10, 3))
+    counters.note_rotation_result("a", ok=True, now=ts_cst(29, 10, 4))
+    counters.reset("a", now=ts_cst(29, 10, 4))
+    assert counters.record("a", tokens=10, now=ts_cst(29, 10, 5)) is False
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_failed_rotation_is_retried_without_traffic() -> None:
+    """A cordoned bucket gets no release events — the retry must be timer-driven.
+
+    2026-10-29 cc9 live run: the first redial re-issued the same IP (failure),
+    an immediate second attempt succeeded (112.83.208.198). This test replays
+    exactly that shape: attempt #1 fails on the unchanged IP, the scheduled
+    timer retry then rotates for real — with zero requests in between.
+    """
+
+    pool = make_pool("a")
+    counters = EgressCounters({"a": 1_000_000}, retry_cooldown_s=0.05)
+    rotator = EgressRotator(pool, counters, poll_s=0.01, timeout_s=0.1)
+    mark_healthy_with_ip(pool)
+    respx.post("http://a:10001/rotate").respond(
+        json={"ok": True, "results": [{"ok": True, "ont": "x", "detail": ""}]}
+    )
+    polls = {"new": False}
+
+    def _healthz(_request: httpx.Request) -> httpx.Response:
+        # Attempt #1's whole poll window sees the old IP; the test flips the
+        # flag once that attempt has deterministically failed.
+        ip = NEW_IP if polls["new"] else OLD_IP
+        return httpx.Response(200, json={"ready": True, "egress_ip": ip})
+
+    respx.get("http://a:10001/healthz").side_effect = _healthz
+
+    first = rotator.request_rotation("a", trigger="threshold")
+    assert first is not None
+    outcome1 = await asyncio.wait_for(first, timeout=5.0)
+    assert outcome1.ok is False
+    assert "unchanged" in outcome1.detail
+    polls["new"] = True
+
+    retry = rotator._retry_tasks.get("a")  # noqa: SLF001 - test seam
+    assert retry is not None, "a failed attempt must schedule a timer retry"
+    await asyncio.wait_for(retry, timeout=5.0)
+
+    second = rotator._tasks.get("a")  # noqa: SLF001 - test seam
+    assert second is not None, "the timer retry must start a real rotation"
+    outcome2 = await asyncio.wait_for(second, timeout=5.0)
+    assert outcome2.ok is True
+    assert outcome2.ip_to == NEW_IP
+    state = pool.find("a")
+    assert state is not None
+    assert state.egress_ip == NEW_IP
+    assert state.cordoned(time.monotonic()) is False
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_timer_retry_respects_the_per_window_cap() -> None:
+    """A permanently broken ONT must not be rebooted all day."""
+
+    pool = make_pool("a")
+    counters = EgressCounters({"a": 1_000_000}, retry_cooldown_s=0.01)
+    rotator = EgressRotator(
+        pool, counters, poll_s=0.01, timeout_s=0.05, max_rotations_per_window=2
+    )
+    mark_healthy_with_ip(pool)
+    respx.post("http://a:10001/rotate").respond(
+        json={"ok": True, "results": [{"ok": True, "ont": "x", "detail": ""}]}
+    )
+    respx.get("http://a:10001/healthz").side_effect = lambda _r: httpx.Response(
+        200, json={"ready": True, "egress_ip": OLD_IP}
+    )
+
+    first = rotator.request_rotation("a", trigger="threshold")
+    assert first is not None
+    await asyncio.wait_for(first, timeout=5.0)  # failure #1 (rotations=1)
+    retry = rotator._retry_tasks.get("a")  # noqa: SLF001
+    assert retry is not None
+    await asyncio.wait_for(retry, timeout=5.0)
+    second = rotator._tasks.get("a")  # noqa: SLF001
+    assert second is not None
+    await asyncio.wait_for(second, timeout=5.0)  # failure #2 (rotations=2)
+
+    # Cap reached: the failure path must not schedule another retry.
+    await asyncio.sleep(0.08)
+    pending = rotator._retry_tasks.get("a")  # noqa: SLF001
+    assert pending is None or pending.done()
+    assert counters.counts("a").rotations == 2

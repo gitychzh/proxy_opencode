@@ -131,6 +131,12 @@ class EgressCounters:
         return dict(self._token_budgets)
 
     @property
+    def retry_cooldown_s(self) -> float:
+        """Cooldown between a failed rotation attempt and its retry."""
+
+        return self._retry_cooldown
+
+    @property
     def names(self) -> frozenset[str]:
         """Every bucket this counter meters (request and/or token trigger)."""
 
@@ -201,13 +207,13 @@ class EgressCounters:
             and (ts - rec.last_rotation_epoch) < self._hard_min_interval
         ):
             return False
-        # A hard 429 proves the ACCOUNT's allowance is gone (scope corrected
-        # 2026-10-29: a freshly rebooted IP is rejected identically), so a
-        # per-bucket token budget can never predict it — a sibling bucket may
-        # have burned the shared allowance while this one sat idle, and a
-        # wiped ledger reads 0. Report the gap as information, never as an
-        # "error, recalibrate": chasing it produced nothing but hardware
-        # reboots.
+        # Evidence conflict, recorded rather than hidden: 0.7.12–0.7.16
+        # measured "fresh IP still 429s" (account-scoped), but 2026-10-29
+        # 09:15 measured the opposite — only owin10-mobile hard-429'd while
+        # the sibling buckets on the same account kept answering 200. The
+        # latest measurement says the allowance is per-IP, which is what
+        # makes a rotation (and the token budget below) meaningful. The gap
+        # is still reported as information, never as an error.
         budget = self._token_budgets.get(name, 0)
         if budget > 0 and 0 < rec.tokens < budget:
             logger.warning(
@@ -266,8 +272,13 @@ class EgressCounters:
         count stays as a coarse secondary guard.
 
         Both triggers fire at most once per window per bucket ("exactly
-        one rotation"); the flag is cleared by :meth:`reset` (successful
-        rotation, new IP = fresh quota bucket) or by the 08:00 rollover.
+        one rotation") — but a **failed** attempt re-arms them once the
+        retry cooldown has passed (2026-10-29: cc9's rotation was refused
+        by the ISP — same IP re-issued — and the latch then kept the
+        burned bucket un-rotated until a hard 429 cordoned it for the
+        rest of the day). The flag is cleared by :meth:`reset`
+        (successful rotation, new IP = fresh quota bucket) or by the
+        08:00 rollover.
         """
 
         ts = now if now is not None else time.time()
@@ -278,7 +289,10 @@ class EgressCounters:
         count_threshold = self._thresholds.get(name, 0)
         token_budget = self._token_budgets.get(name, 0)
         unit = ""
-        if not rec.triggered:
+        # _rotation_available == "not yet triggered this window" OR
+        # "last attempt failed and the retry cooldown has passed", so the
+        # threshold keeps converging instead of latching on one failure.
+        if self._rotation_available(rec, ts):
             if count_threshold > 0 and rec.count >= count_threshold:
                 unit = "requests"
             elif token_budget > 0 and rec.tokens >= token_budget:

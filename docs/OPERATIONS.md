@@ -154,7 +154,7 @@ rollback 镜像；③上传包用完即删，部署树里不许出现 `__pycache
 
 | 桶 | agent | 最近出口 IP | 备注 |
 |---|---|---|---|
-| `owin10-mobile` | `100.109.109.108:10001`（有线 `bind_source 192.168.1.222`） | `36.149.55.x` 移动 | ONT V173-50 `kind=huawei`，入 `ZEN_EGRESS_ROTATION=500`，实弹成功 |
+| `owin10-mobile` | `100.109.109.108:10001`（有线 `bind_source 192.168.1.222`） | `36.149.55.x` 移动 | ONT V173-50 `kind=huawei`，入 `ZEN_EGRESS_ROTATION=30`，实弹成功 |
 | `owin10-telecom` | `100.109.109.108:10002`（WiFi `bind_source 192.168.2.235`） | `180.117.x` / `121.234.x` 电信 | ONT HG8020C `kind=huawei_ct`，实弹成功；前缀含 `180.117.0.0/16` |
 | `cc9` | `100.87.219.115:10001` | `116.147.x` / `122.195.x` 联通 | chroot agent + Magisk 看门狗；ONT HG6142A-C `kind=fenghuo` |
 | `esp32-bucket` | ECS 本机适配器 `172.18.0.1:10005`（systemd `esp32-bucket-adapter.service`，HELLO 鉴权协议 v4） | MiFi 移动（`egress_ip` 由控制通道源地址实测，`egress_ip_source=control-peer`） | ESP32 反向隧道；**隧道空闲上限曾 20s（<网关 60s 首字节期限）导致慢请求全灭，0.7.9 修固件为 180s，需重烧**；3 连败自动 cordon；换 IP 用 `tools/reboot_mifi.py` |
@@ -165,7 +165,8 @@ rollback 镜像；③上传包用完即删，部署树里不许出现 `__pycache
 
 ```
 ZEN_EGRESS_PROXIES / ZEN_EGRESS_EXPECT_PREFIX / ZEN_EGRESS_ROTATION   # 三处桶清单必须同步
-ZEN_EGRESS_TOKEN_ROTATION      # 主触发：每桶每窗口估算 prompt tokens 上限（建议 8M）
+ZEN_EGRESS_TOKEN_ROTATION      # 主触发：每桶每窗口估算 prompt tokens 上限（生产 1.2M，见下）
+ZEN_ROTATE_ON_HARD_429=true    # 硬 429 = IP 配额判决 → 立即换 IP（0.8.6 起生产开启）
 ZEN_BUN_TRANSPORT=1            # 传输栈门：生产必须走 bun
 ZEN_MARKER_MODE=full           # bridge 注记过不了 body 门
 PUBLIC_MODELS=deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle
@@ -293,11 +294,12 @@ IP 解决。**不得仅凭 429 触发换 IP**（2026-10-25 曾因此单日换 IP
 > 旧的「账号级额度」结论**不再作为依据**；`quota_blackout` 机制保留——真正的
 > 额度耗尽确实存在，但它表现为**所有模型、所有 IP 同时 429**，且换成 CLI 也一样。
 
-`ZEN_ROTATE_ON_HARD_429`（默认 **false**）控制「硬 429 是否触发立即换 IP」。
-硬 429 现在已知多为 body 门（同形骗局），换 IP 既解决不了还会赔上每条链路
-~65s 断网 + 隧道重建（2026-10-29 实测：一次误判就让四个桶全部进入轮换）。
-只有确认是**真额度耗尽**（CLI 在同 IP 也 429）时才需要它。
-
+`ZEN_ROTATE_ON_HARD_429` **生产已开启（0.8.6）**：硬 429 = IP 配额判决 → 立即
+换 IP。证据链（2026-10-29 定案）：09:15 实测同账号在 mobile 硬 429 时
+telecom/cc9 继续 42 发全 200（额度按 IP 计）；cc9 实弹换 IP
+（122.195.202.133 → 112.83.208.198）后立即恢复服务。防风暴靠
+`ZEN_EGRESS_ROTATE_MIN_INTERVAL_S=1800`（同桶两次成功轮换下限 30 分钟）+
+每窗口轮换次数上限 5（0.8.6 起，`MAX_ROTATIONS_PER_WINDOW`）。
 `401 AuthError: Missing API key` = 模型门：请求了付费裸 ID（`deepseek-v4.1-flash`
 这类没有 `-free`/`big-pickle` 的 id）。公开别名要靠 `PUBLIC_MODELS` 第三段或
 `ZEN_MODEL_MAP` 映射到免费 id——0.7.17 起两者都生效，别名发布即映射。
