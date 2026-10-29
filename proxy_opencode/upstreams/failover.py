@@ -406,11 +406,13 @@ class FailoverAdapter:
         self._last_trip_at = now
         if re_trip:
             logger.info(
-                "FALLBACK RE-ENGAGED: primary upstream %s failed its recovery "
-                "probe (%s); backup continues for %.0fs",
+                "FALLBACK RE-ENGAGED: primary upstream %s failed again (%s); "
+                "this request is served by the backup chain%s",
                 self.name,
                 reason,
-                hold_s,
+                f" for the next {hold_s:.0f}s"
+                if hold_open
+                else "; the next request retries the pool",
             )
         elif hold_open:
             # Production-incident grade: the primary chain just died and

@@ -3,6 +3,27 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.8.4] - 2026-10-29
+
+### Fixed — 单账号故障被兄弟桶吞掉，没走备用链
+
+0.8.1 把 fallback 改成了请求级，但 `zen-direct` 的内部重试仍在原地：一个桶传输
+失败 / 5xx / 403 时，循环会 `_acquire()` 换一个**兄弟桶**重试。生产演练
+（`nsenter` 注入 `REJECT` 到 cc9 的 `100.87.219.115:10001` 一跳，10 请求）表现为 10/10 全 200、
+零 `x-gateway-fallback` 头——请求根本没到 proxy_ms，只是换了另一个账号。这与
+「任意一个账号发生故障 → 该请求 fallback 到 proxy_ms → 下一请求回轮询」不符。
+
+现在：只要配置了 `ZEN_FALLBACK_BASE_URL`，单个桶的传输失败 / 5xx / free-tier
+403 直接结束本次尝试（释放租约并把该桶 cordon），由外层 `FailoverAdapter` 把
+本次请求交给备用链。未配置备用链的部署保持原来的跨桶重试，行为不变。
+
+### Changed — 请求级 fallback 的日志不再报「hold N 秒」
+
+`request_scoped` 模式下 `fallback_engaged` 已写 `hold_s=0`，但 `FALLBACK
+RE-ENGAGED` 那行仍打印 `backup continues for 120s`，读日志的人会以为整链被按住。
+现在该行按实际语义分支：请求级报「下一次请求会重试池子」，只有全池额度黑屏
+（`quota_blackout`）才报 hold 秒数。
+
 ## [0.8.3] - 2026-10-29
 
 ### Fixed — 一次软探针失败就摘桶，把健康桶从轮询里踢掉

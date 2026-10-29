@@ -1292,6 +1292,67 @@ async def test_chat_429_surfaces_immediately_without_walking_the_pool() -> None:
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_chat_transport_failure_skips_siblings_when_backup_configured() -> None:
+    """A configured backup chain answers the request; siblings are not used.
+
+    Owner decision 2026-10-29: buckets are independent accounts, so one
+    account's failure must surface as the documented fallback (proxy_ms) for
+    THIS request rather than being silently absorbed by a sibling account.
+    """
+
+    def _upstream(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection reset", request=request)
+
+    route = respx.post("https://opencode.ai/zen/v1/chat/completions").mock(
+        side_effect=_upstream
+    )
+    a, b = httpx.AsyncClient(), httpx.AsyncClient()
+    pool = _RollingStubPool({"bucket-a": a, "bucket-b": b})
+    adapter = ZenDirectAdapter(
+        make_settings(zen_fallback_base_url="http://proxy-ms:10003/v1"),
+        pool=pool,  # type: ignore[arg-type]
+    )
+    with pytest.raises(ConnectionError, match="zen request failed"):
+        await adapter.chat(
+            {
+                "model": "opencode/big-pickle",
+                "messages": [{"role": "user", "content": "q"}],
+            }
+        )
+    assert route.call_count == 1
+    assert pool.releases == [("bucket-a", False, "transport")]
+    await a.aclose()
+    await b.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_5xx_skips_siblings_when_backup_configured() -> None:
+    """A 5xx from one account is that account's failure: no sibling sweep."""
+
+    route = respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=502, json={"error": {"message": "bad gateway"}}
+    )
+    a, b = httpx.AsyncClient(), httpx.AsyncClient()
+    pool = _RollingStubPool({"bucket-a": a, "bucket-b": b})
+    adapter = ZenDirectAdapter(
+        make_settings(zen_fallback_base_url="http://proxy-ms:10003/v1"),
+        pool=pool,  # type: ignore[arg-type]
+    )
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["__status__"] == 502
+    assert route.call_count == 1
+    assert pool.releases == [("bucket-a", False, "http_502")]
+    await a.aclose()
+    await b.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_chat_transport_failure_fails_over_to_next_bucket() -> None:
     seq = {"n": 0}
 

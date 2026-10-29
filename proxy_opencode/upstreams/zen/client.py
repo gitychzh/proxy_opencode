@@ -108,6 +108,12 @@ class ZenDirectAdapter:
         self._project_id = settings.zen_project_id
         self._builtin_tools = builtin_tools()
         self._bun = BunTransport.from_settings(settings)
+        # With a backup chain configured, a bucket failure is answered by that
+        # chain for THIS request (owner decision 2026-10-29: buckets are four
+        # independent accounts, and a failing account must not silently hand
+        # the turn to a sibling). The next request still resumes pool
+        # rotation, because nothing holds the failover breaker open.
+        self._backup_configured = bool(settings.zen_fallback_base_url)
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -209,6 +215,13 @@ class ZenDirectAdapter:
                 # transport fault: keep the two kinds apart so the daily
                 # report can tell a silent tunnel from a broken socket.
                 kind = "stream_stalled" if isinstance(exc, StreamStalled) else "transport"
+                if self._backup_configured:
+                    # The backup chain answers this request; the failing
+                    # account is cordoned by the release above and the next
+                    # request resumes rotation on a sibling. Walking the
+                    # remaining buckets would hide the failure behind a
+                    # different account instead of the documented fallback.
+                    raise _transport_error(exc) from exc
                 if attempts <= 0:
                     raise _transport_error(exc) from exc
                 _log_failover(kind=kind, remaining=attempts, detail=str(exc)[:120])
@@ -263,6 +276,11 @@ class ZenDirectAdapter:
                 )
                 return result
             if isinstance(status, int) and status >= 500:
+                # A 5xx is that account's failure: with a backup chain it
+                # ends this request (the chain answers it) instead of being
+                # retried on a sibling account.
+                if self._backup_configured:
+                    return result
                 attempts -= 1
                 if attempts <= 0:
                     return result
@@ -276,6 +294,8 @@ class ZenDirectAdapter:
                 # Defensive failover on a gate rejection: with the four-real-
                 # name toolset this should stay cold; if the gate tightens
                 # again, cordons + the rotator recover automatically.
+                if self._backup_configured:
+                    return self._egress_gate_answer(result)
                 attempts -= 1
                 if attempts <= 0:
                     return self._egress_gate_answer(result)
