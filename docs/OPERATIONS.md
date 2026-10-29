@@ -57,6 +57,7 @@ edge 的降级判据（全部在**响应首字节发给客户端之前**决定�
 | `502/503/504`（`EDGE_FAILOVER_STATUSES` 可改） | 同一请求内改投备用 |
 | `429` 且 `Retry-After > 1h` 或 `code=free_quota_exhausted` | 改投备用（主链要等窗口重置） |
 | `400/401/404/422` 等 4xx | **不**降级：这是答案不是故障 |
+| **备用链自己欠费**（429/503 + `insufficient balance` 等 billing 形状，0.8.9 起） | **绝不透传**：有界重试主链（`EDGE_FALLBACK_DEAD_RETRY_S`，默认 10s），仍不行回 `503 edge_backup_out_of_quota`（客户端会重试） |
 
 备用请求会做三件事，保证客户端无感：换 model 为
 `EDGE_FALLBACK_MODEL`、换 `Authorization` 为 `EDGE_FALLBACK_API_KEY`、把响应里的
@@ -105,10 +106,12 @@ curl -s -H "X-Admin-Key: $K" http://127.0.0.1:10002/edge/status   # 看 primary.
 > DNS/TCP 层承担，无法避免）。
 
 **重建期间的可用性**：`zen-gw` 停着的时候，edge 会按探针失败直接改投
-`172.17.0.1:10003`。2026-10-29 实测：`docker rm -f zen-gw` 之后立刻发请求，
-客户端拿到 `200`，响应头 `x-edge-route: fallback` +
-`x-edge-fallback-reason: ConnectError: ... name resolution`。这就是 0.8.0 拆分
-入口的目的，**重建时不需要停 edge，也不需要通知用户**。
+`172.17.0.1:10003`。**0.8.9 修正**：备用链自己欠费时（proxy_ms 转发
+ModelScope `insufficient balance`），edge 不再把这笔 billing 429 透传给客户端——
+2026-10-29 22:19 实测透传会让 hermes 判定主链 provider 欠费并**整会话不可逆
+切走**（用户看到 "No reply: cancelled by a new correction"）。现在这笔应答被
+吞掉，edge 有界重试主链（默认 10s，覆盖重建窗口），超时回 503（客户端会
+退避重试）。真正的根因解法是下面的**秒级换树流程**：主链停机只有数秒。
 
 
 `/opt/zen-gw/src` = **仓库 HEAD 的 `git archive` 快照**，不再是手工维护的
@@ -117,30 +120,41 @@ curl -s -H "X-Admin-Key: $K" http://127.0.0.1:10002/edge/status   # 看 primary.
 `.e2e_tmp`、`src-backup-*.tgz` 全部清除（2.8M，只有源码）。宿主 `10002 → edge 容器 10002`（明文直连；0.8.0 起 edge 独占该端口）。`/data` 属主必须
 可写（uid 10002），否则 eventlog 静默禁用。
 
-**重建流程**（改代码后照抄，端口/密钥/别名全程不动）：
+**重建流程**（0.8.9 起为**秒级停机**：先在暂存目录构建镜像，容器全程在跑；
+唯一停机窗口是最后的换树+重建，约 5–15s，期间 edge 重试主链即可无缝衔接）：
 
 ```bash
 # 本地：只发仓库里的东西，不带任何本地缓存
 git archive --format=tar.gz -o /tmp/zen-src.tar.gz HEAD
 scp -P 222 /tmp/zen-src.tar.gz root@115.29.231.25:/root/
 
-# ECS：先备份两个不可再生的东西，再清空
+# ECS 第一步：暂存构建（不碰 /opt/zen-gw/src，容器零影响，耗时都在这步）
 ssh -p 222 root@115.29.231.25 'set -e
-  cd /opt/zen-gw/src && cp deploy/ecs/.env /tmp/keep.env && cp -a deploy/ecs/data /tmp/keep.data
-  docker rm -f zen-gw; rm -rf /opt/zen-gw/src; mkdir -p /opt/zen-gw/src
+  rm -rf /tmp/zenbuild && mkdir -p /tmp/zenbuild && tar xzf /root/zen-src.tar.gz -C /tmp/zenbuild
+  cp /opt/zen-gw/src/deploy/ecs/.env /tmp/zenbuild.env
+  cp -a /opt/zen-gw/src/deploy/ecs/data /tmp/keep.data
+  docker build -f /tmp/zenbuild/deploy/ecs/Dockerfile -t zen-gw:0.8 -t zen-gw:<ver> /tmp/zenbuild'
+
+# ECS 第二步：秒级换树 + 重建（唯一停机窗口）
+ssh -p 222 root@115.29.231.25 'set -e
+  docker rm -f zen-gw
+  rm -rf /opt/zen-gw/src && mkdir -p /opt/zen-gw/src
   tar xzf /root/zen-src.tar.gz -C /opt/zen-gw/src
-  cp /tmp/keep.env /opt/zen-gw/src/deploy/ecs/.env          # 密钥/桶/别名原样
+  cp /tmp/zenbuild.env /opt/zen-gw/src/deploy/ecs/.env          # 密钥/桶/别名原样
   cp -a /tmp/keep.data /opt/zen-gw/src/deploy/ecs/data
   chmod 600 /opt/zen-gw/src/deploy/ecs/.env
   chown -R 10002:10002 /opt/zen-gw/src/deploy/ecs/data
-  cd /opt/zen-gw/src && docker build -f deploy/ecs/Dockerfile -t zen-gw:0.8 -t zen-gw:<ver> .
-  cd deploy/ecs && docker compose -f compose.yml up -d --no-build
-  rm -f /root/zen-src.tar.gz'
+  cd /opt/zen-gw/src/deploy/ecs && docker compose -f compose.yml up -d --no-build
+  rm -rf /tmp/zenbuild /tmp/zenbuild.env /tmp/keep.data /root/zen-src.tar.gz'
 
 # 验收（三件缺一不可）
 curl -s http://115.29.231.25:10002/healthz                # version 与 tag 一致
 python scripts/e2e_workbuddy.py --base http://115.29.231.25:10002 --key <GW_KEY>
 ```
+
+> 旧流程（先 `docker rm -f zen-gw` 再 build）把主链停机了整个构建时长
+> （2026-10-29 22:15–22:28 实测约 13 分钟），期间所有请求被 edge 改投欠费的
+> proxy_ms，客户端整片报 billing 429——**禁止回退到该顺序**。
 
 硬规矩：①`.env` 与 `data/` 是唯二不可再生项，先备份再动手；②镜像只保留
 `zen-gw:0.8`（compose 引用）与当前版本 tag，回滚靠 git + 重建（约 40s），不囤

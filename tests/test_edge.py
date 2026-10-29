@@ -20,6 +20,7 @@ from proxy_opencode.edge.app import EdgeApp
 from proxy_opencode.edge.config import EdgeSettings, load_edge_settings
 from proxy_opencode.edge.policy import (
     failover_reason,
+    fallback_out_of_quota,
     filter_request_headers,
     filter_response_headers,
     mask_model_in_json,
@@ -372,4 +373,96 @@ async def test_admin_can_switch_modes_at_runtime() -> None:
         headers={"x-admin-key": "edge-admin"},
     )
     assert status == 200 and "error" in json.loads(body)
+    await app._shutdown()
+
+
+# --------------------------------------------------- backup's own billing death
+
+
+def test_fallback_out_of_quota_matches_the_billing_shapes() -> None:
+    billing = json.dumps(
+        {"error": {"message": "insufficient balance", "request_id": "x"}}
+    ).encode()
+    assert fallback_out_of_quota(429, billing)
+    assert fallback_out_of_quota(503, billing)
+    assert fallback_out_of_quota(
+        429, json.dumps({"error": {"code": "insufficient_quota"}}).encode()
+    )
+    # anything else is a real answer and must be relayed untouched
+    assert not fallback_out_of_quota(429, b"")
+    assert not fallback_out_of_quota(
+        429, json.dumps({"error": {"message": "upstream busy"}}).encode()
+    )
+    assert not fallback_out_of_quota(
+        200, json.dumps({"error": {"message": "insufficient balance"}}).encode()
+    )
+    assert not fallback_out_of_quota(400, billing)
+
+
+@respx.mock
+async def test_backup_billing_death_is_never_relayed_and_primary_retry_wins() -> None:
+    """2026-10-29 22:19 CST incident: a gateway rebuild made the edge relay
+    proxy_ms's `429 insufficient balance`; hermes treated the primary as out
+    of credits and switched away for the whole session. The billing answer
+    must be swallowed and the primary given a bounded second chance."""
+
+    primary = respx.post(f"{PRIMARY}{CHAT}").mock(
+        side_effect=[httpx.ConnectError("refused"), httpx.ConnectError("refused"),
+                     httpx.Response(200, json={"model": "opencode/big-pickle", "choices": []})]
+    )
+    respx.post(f"{FALLBACK}{CHAT}").mock(
+        return_value=httpx.Response(
+            429, json={"error": {"message": "insufficient balance", "request_id": "x"}}
+        )
+    )
+    app = EdgeApp(make_settings(fallback_dead_retry_s=2.0))
+    status, head, _ = await Harness(app).call(
+        body={"model": "opencode/big-pickle", "messages": []}
+    )
+
+    assert status == 200
+    assert head["x-edge-route"] == "primary"
+    assert primary.call_count == 3
+    await app._shutdown()
+
+
+@respx.mock
+async def test_backup_billing_death_answers_503_when_primary_stays_down() -> None:
+    """503 keeps OpenAI clients retrying; a billing 429 would not."""
+
+    respx.post(f"{PRIMARY}{CHAT}").mock(side_effect=httpx.ConnectError("refused"))
+    respx.post(f"{FALLBACK}{CHAT}").mock(
+        return_value=httpx.Response(
+            429, json={"error": {"message": "insufficient balance", "request_id": "x"}}
+        )
+    )
+    app = EdgeApp(make_settings(fallback_dead_retry_s=0.3))
+    status, head, body = await Harness(app).call(
+        body={"model": "opencode/big-pickle", "messages": []}
+    )
+
+    assert status == 503
+    assert head.get("x-edge-route") is None
+    assert head.get("retry-after") == "5"
+    payload = json.loads(body)
+    assert payload["error"]["code"] == "edge_backup_out_of_quota"
+    await app._shutdown()
+
+
+@respx.mock
+async def test_backup_quota_429_with_a_healthy_fallback_still_relays() -> None:
+    """A non-billing error from the backup is a real answer: relay unchanged."""
+
+    respx.post(f"{PRIMARY}{CHAT}").mock(side_effect=httpx.ConnectError("refused"))
+    respx.post(f"{FALLBACK}{CHAT}").mock(
+        return_value=httpx.Response(503, json={"error": {"message": "upstream busy"}})
+    )
+    app = EdgeApp(make_settings(fallback_dead_retry_s=0.2))
+    status, head, body = await Harness(app).call(
+        body={"model": "opencode/big-pickle", "messages": []}
+    )
+
+    assert status == 503
+    assert head["x-edge-route"] == "fallback"
+    assert json.loads(body)["error"]["message"] == "upstream busy"
     await app._shutdown()

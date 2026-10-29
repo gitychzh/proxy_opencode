@@ -39,6 +39,18 @@ HARD_QUOTA_RETRY_AFTER_S = 3600.0
 
 _QUOTA_CODES = frozenset({"free_quota_exhausted", "insufficient_quota"})
 
+# Markers that say the *backup relay's own* account is out of money/quota.
+# proxy_ms relays ModelScope's `insufficient balance` verbatim; hermes and
+# other OpenAI clients treat that shape as a billing verdict and stop
+# retrying the provider entirely, so the edge must never pass it through
+# as if it were an answer about the client's request.
+_BILLING_MARKERS = (
+    "insufficient balance",
+    "insufficient_quota",
+    "free_quota_exhausted",
+    "insufficient user quota",
+)
+
 
 def _as_text(value: Any) -> str:
     if isinstance(value, bytes):
@@ -132,6 +144,33 @@ def is_fallback_path(path: str, allowed: frozenset[str]) -> bool:
     return path.rstrip("/") in {p.rstrip("/") for p in allowed}
 
 
+def fallback_out_of_quota(status: int, body: bytes) -> bool:
+    """True when the *backup relay's* answer means the relay itself is dead.
+
+    A billing answer from the backup is not an answer about the client's
+    request. Relaying it as-is (measured 2026-10-29 22:19 CST) made hermes
+    classify the primary provider as out of credits and switch away
+    irreversibly — for what was really a routine gateway rebuild. The edge
+    must swallow this shape and decide on its own terms instead.
+    """
+
+    if status not in (429, 503):
+        return False
+    if not body:
+        return False
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    err = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(err, dict):
+        return False
+    if str(err.get("code") or "") in _QUOTA_CODES or str(err.get("type") or "") in _QUOTA_CODES:
+        return True
+    message = str(err.get("message") or "").lower()
+    return any(marker in message for marker in _BILLING_MARKERS)
+
+
 def rewrite_for_fallback(
     body: bytes, settings: Any
 ) -> tuple[bytes, str] | None:
@@ -208,6 +247,7 @@ def failover_reason(
 __all__ = [
     "HARD_QUOTA_RETRY_AFTER_S",
     "failover_reason",
+    "fallback_out_of_quota",
     "filter_request_headers",
     "filter_response_headers",
     "header_value",

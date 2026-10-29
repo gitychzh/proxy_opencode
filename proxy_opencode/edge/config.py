@@ -80,6 +80,13 @@ class EdgeSettings:
     probe_timeout_s: float = 2.0
     connect_timeout_s: float = 5.0
     max_body_bytes: int = 32 * 1024 * 1024
+    # When the backup relay answers with its own billing/quota death (e.g.
+    # proxy_ms relaying ModelScope `insufficient balance`), that answer is
+    # never relayed to the client: the edge retries the primary for this
+    # long (covers a gateway recreate) and then answers 503, which OpenAI
+    # clients retry — unlike a billing 429, which they treat as terminal.
+    # 0 disables the retry window (immediate 503).
+    fallback_dead_retry_s: float = 10.0
     # Empty = admin endpoints disabled (404). Set it to steer routes by hand,
     # e.g. drain the primary before a rebuild.
     admin_key: str = ""
@@ -109,6 +116,9 @@ def load_edge_settings() -> EdgeSettings:
         probe_timeout_s=max(0.2, _env_float("EDGE_PROBE_TIMEOUT_S", 2.0)),
         connect_timeout_s=max(0.2, _env_float("EDGE_CONNECT_TIMEOUT_S", 5.0)),
         max_body_bytes=max(1024, _env_int("EDGE_MAX_BODY_BYTES", 32 * 1024 * 1024)),
+        fallback_dead_retry_s=max(
+            0.0, _env_float("EDGE_FALLBACK_DEAD_RETRY_S", 10.0)
+        ),
         admin_key=os.environ.get("EDGE_ADMIN_KEY", "").strip(),
         mode=mode,
     )

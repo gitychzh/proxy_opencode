@@ -28,11 +28,13 @@ from .. import __version__
 from .config import EdgeSettings, load_edge_settings
 from .policy import (
     failover_reason,
+    fallback_out_of_quota,
     filter_request_headers,
     filter_response_headers,
     header_value,
     is_fallback_path,
     mask_model_in_json,
+    quota_verdict,
     rewrite_for_fallback,
 )
 
@@ -282,7 +284,97 @@ class EdgeApp:
             )
             return
 
-        await self._deliver(resp, send, "fallback", primary_error, None, requested_model)
+        buffered: bytes | None = None
+        if resp.status_code >= 400:
+            buffered = await self._read_error_body(resp)
+            if fallback_out_of_quota(resp.status_code, buffered or b""):
+                # The backup relay's own account is dead. Its billing answer
+                # says nothing about the client's request, and OpenAI clients
+                # treat that shape as terminal (no retry, permanent provider
+                # switch — measured on hermes 2026-10-29). Swallow it, give
+                # the primary a bounded second chance, then fail with 503,
+                # which clients DO retry.
+                await self._aclose(resp)
+                self._stats["fallback_failed"] += 1
+                logger.warning(
+                    "edge: backup relay itself out of quota; not relaying its "
+                    "billing answer — retrying primary",
+                    extra={"route": "fallback", "reason": "backup_out_of_quota"},
+                )
+                await self._retry_primary_or_503(
+                    send, method, target, headers, body
+                )
+                return
+
+        await self._deliver(resp, send, "fallback", primary_error, buffered, requested_model)
+
+    async def _retry_primary_or_503(
+        self,
+        send: Send,
+        method: str,
+        target: str,
+        headers: list[tuple[str, str]],
+        body: bytes,
+    ) -> None:
+        """Bounded primary retries after the backup proved dead, else 503."""
+
+        settings = self._settings
+        retry_s = settings.fallback_dead_retry_s
+        deadline = time.monotonic() + retry_s
+        last_error = "primary still failing"
+        first = True
+        while first or time.monotonic() < deadline:
+            first = False
+            resp, err = await self._send(
+                f"{settings.primary_base_url}{target}", method, headers, body
+            )
+            if resp is not None:
+                buffered = (
+                    await self._read_error_body(resp)
+                    if resp.status_code >= 400
+                    else None
+                )
+                deliverable = resp.status_code < 500 and not (
+                    resp.status_code == 429
+                    and quota_verdict(
+                        resp.status_code, resp.headers, buffered or b""
+                    )
+                )
+                if deliverable:
+                    logger.warning(
+                        "edge: primary recovered during backup-outage retry",
+                        extra={"route": "primary"},
+                    )
+                    await self._deliver(resp, send, "primary", "", buffered, "")
+                    return
+                last_error = f"primary_http_{resp.status_code}"
+                await self._aclose(resp)
+            else:
+                last_error = err
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(min(1.0, max(0.05, retry_s / 4.0)))
+        logger.error(
+            "edge: backup out of quota and primary still down (%s); answering 503",
+            last_error,
+            extra={"route": "fallback", "reason": last_error},
+        )
+        await self._json(
+            send,
+            503,
+            {
+                "error": {
+                    "message": (
+                        "the gateway is temporarily unavailable and the backup "
+                        "relay is out of quota; the request was not billed — "
+                        f"retry shortly ({last_error})"
+                    ),
+                    "type": "server_error",
+                    "code": "edge_backup_out_of_quota",
+                }
+            },
+            extra_headers=[(b"retry-after", b"5")],
+        )
 
     async def _send(
         self,
@@ -501,7 +593,14 @@ class EdgeApp:
             if not message.get("more_body", False):
                 return b"".join(chunks)
 
-    async def _json(self, send: Send, status: int, payload: dict[str, Any]) -> None:
+    async def _json(
+        self,
+        send: Send,
+        status: int,
+        payload: dict[str, Any],
+        *,
+        extra_headers: list[tuple[bytes, bytes]] | None = None,
+    ) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         await send(
             {
@@ -510,6 +609,7 @@ class EdgeApp:
                 "headers": [
                     (b"content-type", b"application/json"),
                     (b"content-length", str(len(body)).encode()),
+                    *(extra_headers or []),
                 ],
             }
         )

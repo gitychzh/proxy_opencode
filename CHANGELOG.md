@@ -5,6 +5,26 @@
 
 ## [Unreleased]
 
+### Fixed — edge 不再透传备用链自身的 billing 死亡应答（0.8.9，2026-10-29）
+
+**事故**：22:15-22:28 部署 0.8.8 时按旧流程 `docker rm -f zen-gw` 先停主链再
+build（停机 ~13 分钟）。期间 edge 按设计改投 proxy_ms，而 proxy_ms 回的是
+`429 {"error":{"message":"insufficient balance"}}`——edge 原样透传。hermes 对
+这个形状判 billing 且**不可重试**：整会话不可逆切到 GLM 兜底（上游 empty200，
+单次 121-187s），用户每次发新消息都打断一次尝试，最终看到
+`No reply: the request was cancelled by a new correction on every attempt`。
+
+**修复（两层）**：
+1. **edge**（`fallback_out_of_quota` + `_retry_primary_or_503`）：备用链应答为
+   429/503 + billing 标记（`insufficient balance` / `insufficient_quota` /
+   `free_quota_exhausted`）时**绝不透传**——改为有界重试主链
+   （`EDGE_FALLBACK_DEAD_RETRY_S`，默认 10s，覆盖重建窗口），主链恢复则无缝
+   送达，超时回 `503 edge_backup_out_of_quota`（OpenAI 客户端对 503 退避重试，
+   对 billing 429 则永久切走）。
+2. **部署流程**（OPERATIONS §2）：旧流程先停容器再 build = 主链停机整个构建
+   时长。新流程先在 `/tmp/zenbuild` 暂存构建镜像（容器零影响），最后才换树
+   重建，停机 ~5-15s。
+
 ### Fixed — 单桶故障先在池内重试，备用链降级为最后手段（0.8.8，2026-10-29）
 
 `chat()` 的四个失败分支（429 / 传输 / 5xx / free-tier 403）里都有一条「配置了
