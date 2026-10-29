@@ -1080,3 +1080,51 @@ async def test_probe_fail_reason_distinguishes_causes(tmp_path) -> None:  # type
         }
     finally:
         cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_bucket_broken_at_startup_is_still_reported(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A bucket that never became healthy must still reach the ledger.
+
+    Measured 2026-10-29: `owin10-telecom` pointed at
+    ``bind_source=192.168.2.235``, an address that no longer existed on the
+    host, so it failed from the first probe on. ``EgressState.healthy``
+    defaults to False, there is no healthy->unhealthy transition to hook on,
+    and the 0.7.x rule ("emit when was_healthy") wrote nothing — hours of a
+    dead bucket looked like a clean pool in the ledger. Only
+    /admin/egresses showed it. One row per outage segment is enough: the
+    point is that the segment exists.
+    """
+
+    pool = make_pool("a")
+    state = pool._states[0]  # noqa: SLF001
+    assert state.healthy is False  # fresh pool: never been healthy
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://a:10001/healthz").respond(
+            json={"ready": False, "egress_probe_ok": False, "egress_ip": "9.9.9.9"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        events = [e for e in read() if e["event"] == "probe_failed"]
+        assert len(events) == 1, "startup-broken bucket must be visible once"
+        assert events[0]["reason"] == "egress_probe_ok=false (1/1)"
+
+        # ...and the same outage segment must not re-log every probe interval
+        await pool._probe_one(state)  # noqa: SLF001
+        await pool._probe_one(state)  # noqa: SLF001
+        assert len([e for e in read() if e["event"] == "probe_failed"]) == 1
+
+        # recovery closes the segment; a new outage opens a new one
+        respx.get("http://a:10001/healthz").respond(
+            json={"ready": True, "egress_probe_ok": True, "egress_ip": "9.9.9.9"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.healthy is True
+        respx.get("http://a:10001/healthz").respond(
+            json={"ready": False, "egress_probe_ok": False, "egress_ip": "9.9.9.9"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert len([e for e in read() if e["event"] == "probe_failed"]) == 2
+    finally:
+        cleanup()

@@ -110,6 +110,10 @@ class EgressState:
     # hard verdict and still drop the bucket on the first occurrence. See
     # ``EgressPool._probe_one`` for the tolerance rule.
     probe_soft_fail_streak: int = 0
+    # True once the current outage segment has been logged/emitted. Lets the
+    # pool report a bucket that was already broken at process start (no
+    # healthy->unhealthy transition to hook on) exactly once per segment.
+    probe_alert_sent: bool = False
 
     def cordoned(self, now: float) -> bool:
         return self.cordoned_until > now

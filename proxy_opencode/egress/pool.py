@@ -719,6 +719,7 @@ class EgressPool:
             return
         state.healthy = True
         state.probe_soft_fail_streak = 0
+        state.probe_alert_sent = False
         if ip_changed:
             # Only lift on a *proven-good* probe: a ready=false answer with
             # a fresh IP means the agent is still mid-recovery.
@@ -789,7 +790,16 @@ class EgressPool:
         if was_healthy is None:
             was_healthy = state.healthy
         state.healthy = False
-        if was_healthy:
+        # A bucket that is broken from process start never transitions
+        # healthy->unhealthy, so the 0.7.x rule below wrote nothing at all:
+        # `owin10-telecom` sat at bind_source=192.168.2.235 (an address that
+        # no longer existed on the host) for hours while the ledger showed a
+        # perfectly clean pool — the fact only surfaced through
+        # /admin/egresses. `probe_alert_sent` makes the FIRST failure of an
+        # outage segment visible regardless of the previous state, while
+        # still logging once per segment (not every 30s).
+        if was_healthy or not state.probe_alert_sent:
+            state.probe_alert_sent = True
             logger.warning(
                 "egress agent probe failed: bucket marked unhealthy",
                 extra={"egress": state.spec.name, "reason": reason[:80]},
