@@ -143,6 +143,15 @@ python scripts/e2e_workbuddy.py --base http://115.29.231.25:10002 --key <GW_KEY>
 `zen-gw:0.8`（compose 引用）与当前版本 tag，回滚靠 git + 重建（约 40s），不囤
 rollback 镜像；③上传包用完即删，部署树里不许出现 `__pycache__`/缓存/备份。
 
+> **`chown -R 10002:10002 data` 不是可选项**（2026-10-29 又踩了一次）：容器以
+> `USER gw`（uid 10002）运行，而部署是 root 在操作。root 重建/回填 `data/` 后
+> 属主变成 0:0，`EventLog.emit` 拿到 `PermissionError` 就把 sink **永久禁用**
+> （设计如此：绝不因 I/O 失败抛错打断请求），于是账本静默停写、`docker logs` 里
+> 只剩一行 `egress event log disabled after write failure`。症状是「池子在动、
+> 账本不涨」，归因链断掉。回填后务必 `ls -ln deploy/ecs/data` 确认属主是 10002，
+> 并 `docker exec -u 10002 zen-gw sh -c 'echo x >> /data/egress_events.jsonl'`
+> 试写一次（记得删掉那一行）。
+
 | 桶 | agent | 最近出口 IP | 备注 |
 |---|---|---|---|
 | `owin10-mobile` | `100.109.109.108:10001`（有线 `bind_source 192.168.1.222`） | `36.149.55.x` 移动 | ONT V173-50 `kind=huawei`，入 `ZEN_EGRESS_ROTATION=500`，实弹成功 |
@@ -164,17 +173,19 @@ ZEN_EGRESS_ROTATE_MIN_INTERVAL_S=1800   # 硬 429 换 IP 下限，防轮换风�
 ZEN_TTFB_S=60                  # 响应头超时（只约束首字节，默认 60s）
 ZEN_TTFB_DEMOTED_S=15          # 降权桶的响应头超时（只缩短，0=关闭分级）
 ZEN_EGRESS_COOLDOWN_S=20       # 单次失败→降权秒数（×连续次数，不再移出轮换）
-ZEN_EGRESS_COOLDOWN_MAX_S=60   # 降权上限，必须小于 ZEN_EGRESS_CORDON_S
+ZEN_EGRESS_COOLDOWN_MAX_S=300  # 降权上限＝旧 cordon 长度（传输失败永不 cordon）
 ZEN_FALLBACK_BASE_URL / _API_KEY / _MODEL_MAP / _DEFAULT_MODEL   # 备用链路，见 §3
 ZEN_FALLBACK_RECOVER_AFTER=2   # 主链路连续成功多少次才算恢复（防抖动）
 ```
 
 **单桶故障的语义（0.8.5 起，用户明确要求）**：一个桶失败一次**不会**离开轮换。
 该请求照旧交给备用链（proxy_ms 的 `DeepSeek-V4.1-Flash-1017`），这个桶只是排到
-选择顺序末尾（`egress_cooldown`，20s × 连续次数，上限 60s），下一请求正常回到
-轮询——包括它自己；成功一次立即恢复。连续 3 次失败才 escalate 到真 cordon
-（`ZEN_EGRESS_CORDON_S=300`），即「死腿」而非「抖动」。与此配套，处于降权状态的
-桶只拿到 `ZEN_TTFB_DEMOTED_S` 的首字节期限，避免同一个腿让用户连等两个满分钟。
+选择顺序末尾（`egress_cooldown`，20s × 连续次数，上限 300s），下一请求正常回到
+轮询——包括它自己；成功一次立即恢复。**任何次数的传输失败都不 cordon**（第一版
+保留「3 次失败 escalate」，被演练推翻：esp32 累积到 13 次仍被隔离，而隔离恰恰
+是用户要禁掉的行为）。cordon 只留给 IP 域判决（硬 429 日配额、free-tier 403）。
+与此配套，处于降权状态的桶只拿到 `ZEN_TTFB_DEMOTED_S` 的首字节期限，避免同一个
+腿让用户连等两个满分钟。
 
 **EXPECT_PREFIX 是审计字段，不是可用性开关**（2026-10-25 起）：IP 一变即解除
 IP 域 cordon 并接受轮换结果，前缀不符只记 `prefix_mismatch` 事件 + WARNING。它

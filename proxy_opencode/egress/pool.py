@@ -91,7 +91,7 @@ class EgressPool:
         cordon_s: float = 300.0,
         failure_threshold: int = 3,
         cooldown_s: float = 20.0,
-        cooldown_max_s: float = 60.0,
+        cooldown_max_s: float = 300.0,
         probe_fail_tolerance: int = 1,
         observer: ReleaseObserver | None = None,
         last_resort: frozenset[str] = frozenset(),
@@ -103,10 +103,14 @@ class EgressPool:
         self._timeout = httpx.Timeout(timeout_s, connect=15.0)
         self._probe_interval_s = probe_interval_s
         self._cordon_s = cordon_s
+        # Retained for API/back-compat and for the demotion escalation
+        # curve only: a transport failure NEVER cordons since 0.8.5
+        # (owner: a failing bucket must not leave rotation).
         self._failure_threshold = failure_threshold
-        # Demotion window for a failing-but-not-dead bucket (see
-        # _enter_cooldown). Kept short and bounded: the bucket stays in
-        # rotation, it only loses tie-breaks to healthy siblings.
+        # Demotion window for a failing bucket (see _enter_cooldown). The
+        # bucket stays in rotation and only loses tie-breaks to healthy
+        # siblings; the window grows with the failure streak so a dead leg
+        # stops winning picks without ever being banned.
         self._cooldown_s = max(1.0, float(cooldown_s))
         self._cooldown_max_s = max(self._cooldown_s, float(cooldown_max_s))
         # Consecutive soft probe failures tolerated before a bucket is pulled
@@ -148,7 +152,7 @@ class EgressPool:
                 getattr(settings, "zen_egress_cooldown_s", 20) or 20
             ),
             cooldown_max_s=float(
-                getattr(settings, "zen_egress_cooldown_max_s", 60) or 60
+                getattr(settings, "zen_egress_cooldown_max_s", 300) or 300
             ),
             probe_fail_tolerance=int(
                 getattr(settings, "zen_egress_probe_fail_tolerance", 1) or 1
@@ -461,31 +465,30 @@ class EgressPool:
                 event_reason="free_tier_rejected",
                 detail={"egress_ip": state.egress_ip},
             )
-        elif state.failures >= self._failure_threshold:
-            # Genuinely dead leg (three consecutive failures): bench it for
-            # the full cooldown so it cannot eat a header deadline every
-            # turn. A SINGLE failure never reaches this branch — it is only
-            # demoted below, which keeps the bucket in rotation (owner
-            # decision 2026-10-29).
-            self._enter_cordon(
-                state,
-                now + self._cordon_s,
-                f"{state.failures} consecutive failures ({kind})",
-                event_reason=None,
-                detail={"egress_ip": state.egress_ip},
-            )
         else:
-            # First (and second) failure: demote, do not remove.
+            # Any transport failure at any streak: demote, never remove.
             #
-            # Owner decision 2026-10-29: "不要移出轮换". A single transport
-            # hiccup on one leg used to bench that bucket outright; with
-            # four buckets, three cordons drained the pool and selection was
-            # forced onto benched buckets (114 `request_on_cordoned_bucket`
-            # events in one day). The correct shape is: this request is
-            # answered by the backup chain, this bucket sinks to the back of
-            # the pick order for a short cooldown, and the next request
-            # resumes normal round-robin — including this bucket once it is
-            # the best candidate again.
+            # Owner decision 2026-10-29 ("不要移出轮换", applied to the second
+            # revision after the drill): a bucket must NOT leave rotation when
+            # a request fails. That request is answered by the backup chain,
+            # the bucket sinks to the back of the pick order for a cooldown,
+            # and the next request resumes normal round-robin — including this
+            # bucket. The old rule benched it outright; with four buckets,
+            # three such cordons drained the pool and selection was forced
+            # onto the buckets it had just benched (114
+            # `request_on_cordoned_bucket` events in one day).
+            #
+            # The escalating cooldown carries the whole "this leg is dead"
+            # signal now: the window grows with the streak up to
+            # ``_cooldown_max_s`` (default 300s, i.e. the old cordon length),
+            # so a dead leg stops winning the pick while staying a legal
+            # candidate — and the demoted header deadline (15s) bounds what
+            # that can cost.
+            #
+            # Cordon (removal) is reserved for IP-scoped VERDICTS: a hard 429
+            # ("the allowance is gone until the window resets") and a
+            # free-tier 403 ("this IP is flagged until it re-dials"). Those are
+            # not "one request failed", they are "do not send here again".
             self._enter_cooldown(state, now, kind)
         self._notify_observer(state, ok, kind, retry_after_s)
 

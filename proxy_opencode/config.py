@@ -340,10 +340,12 @@ class Settings:
     # back onto the buckets it had benched).
     #   ZEN_EGRESS_COOLDOWN_S=20
     zen_egress_cooldown_s: float = 20.0
-    # Upper bound on the escalated demotion (see above). Must stay below
-    # ZEN_EGRESS_CORDON_S: beyond that the escalating cordon takes over.
-    #   ZEN_EGRESS_COOLDOWN_MAX_S=60
-    zen_egress_cooldown_max_s: float = 60.0
+    # Upper bound on the escalated demotion (see above). Since 0.8.5 a
+    # transport failure never cordons, so this window carries the whole
+    # "this leg is dead" signal: it may (and does, by default) equal the old
+    # cordon length. A dead leg stops winning picks without being banned.
+    #   ZEN_EGRESS_COOLDOWN_MAX_S=300
+    zen_egress_cooldown_max_s: float = 300.0
     # Floor between two hard-429 rotations of the SAME bucket. A 429 is
     # ambiguous (transport gate / stale-prompt body gate / session reuse /
     # real per-IP quota all ship the same FreeUsageLimitError), and only the
@@ -716,7 +718,7 @@ def load_settings() -> Settings:
         zen_egress_cordon_s=int(os.environ.get("ZEN_EGRESS_CORDON_S", "300")),
         zen_egress_cooldown_s=float(os.environ.get("ZEN_EGRESS_COOLDOWN_S", "20")),
         zen_egress_cooldown_max_s=float(
-            os.environ.get("ZEN_EGRESS_COOLDOWN_MAX_S", "60")
+            os.environ.get("ZEN_EGRESS_COOLDOWN_MAX_S", "300")
         ),
         zen_egress_rotate_min_interval_s=float(
             os.environ.get("ZEN_EGRESS_ROTATE_MIN_INTERVAL_S", "1800")

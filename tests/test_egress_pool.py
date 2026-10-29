@@ -220,7 +220,15 @@ async def test_release_ok_resets_failures() -> None:
 
 
 @pytest.mark.asyncio
-async def test_three_consecutive_failures_cordon() -> None:
+async def test_three_consecutive_failures_demote_but_never_cordon() -> None:
+    """Owner decision 2026-10-29: a failing bucket NEVER leaves rotation.
+
+    Three failures used to escalate to a cordon, which removed the bucket from
+    the ring. The drill showed that is the same defect at a larger streak: the
+    escalation belongs in the demotion window (which reaches the old cordon
+    length), and cordon is reserved for IP-scoped verdicts (429 / gate 403).
+    """
+
     pool = make_pool("a", failure_threshold=3, cordon_s=120)
     state = pool._states[0]
     state.healthy = True
@@ -228,8 +236,10 @@ async def test_three_consecutive_failures_cordon() -> None:
         lease = await pool.acquire()
         assert lease.name == "a"
         await pool.release(lease, ok=False, kind="transport")
-    assert state.cordoned(time.monotonic())
-    assert "consecutive failures" in state.cordon_reason
+    now = time.monotonic()
+    assert not state.cordoned(now)          # still a legal candidate
+    assert state.cooling_down(now)          # but demoted, window escalated
+    assert state.cordon_reason == ""
 
 
 @pytest.mark.asyncio
@@ -512,8 +522,12 @@ async def test_quota_cordon_not_lifted_when_probe_not_ready(tmp_path) -> None:  
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_transport_cordon_not_lifted_by_ip_change(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """Only the IP-scoped verdicts lift; streak cordons keep their deadline."""
+async def test_transport_demotion_not_lifted_by_ip_change(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Only IP-scoped *verdicts* lift on an IP change; a demotion is not one.
+
+    A transport failure says nothing about the address, so a new IP must not
+    clear the demotion - the window keeps escalation intact.
+    """
 
     pool = EgressPool(
         [EgressSpec("a", "http://agent1:10001")], failure_threshold=3, cordon_s=9999
@@ -524,15 +538,16 @@ async def test_transport_cordon_not_lifted_by_ip_change(tmp_path) -> None:  # ty
     for _ in range(3):
         lease = await pool.acquire()
         await pool.release(lease, ok=False, kind="transport")
-    assert state.cordoned(time.monotonic()) is True
+    assert state.cooling_down(time.monotonic()) is True
     read, cleanup = _capture_events(tmp_path)
     try:
         respx.get("http://agent1:10001/healthz").respond(
             json={"ready": True, "egress_ip": "4.4.4.4"}
         )
         await pool._probe_one(state)  # noqa: SLF001
-        assert state.cordoned(time.monotonic()) is True
-        assert "consecutive failures" in state.cordon_reason
+        # the probe learned the new IP but did not touch the demotion, and it
+        # emitted nothing but the observation (no recovery, no cordon)
+        assert state.cooling_down(time.monotonic()) is True
         assert [e["event"] for e in read()] == ["egress_ip_observed"]
     finally:
         cleanup()
@@ -780,14 +795,15 @@ async def test_probe_success_keeps_request_failure_streak(tmp_path) -> None:  # 
             "egress_cooldown",
             "egress_ip_observed",
         ]
-        # ...and the third failure still cordons
+        # ...and the third failure escalates the demotion but never cordons
         for _ in range(4):
             lease = await pool.acquire()
             hit_a = lease.name == "a"
             await pool.release(lease, ok=False, kind="transport")
             if hit_a:
                 break
-        assert a.cordoned(time.monotonic())
+        assert not a.cordoned(time.monotonic())
+        assert a.cooling_down(time.monotonic())
     finally:
         cleanup()
 
@@ -1210,19 +1226,22 @@ async def test_cooldown_bucket_serves_when_it_is_the_only_candidate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_three_failures_still_cordon() -> None:
-    """Escalation is preserved: a genuinely dead leg is benched, not spun on."""
+async def test_transport_failure_never_cordons_at_any_streak() -> None:
+    """No number of transport failures removes a bucket from rotation."""
 
-    pool = make_pool("a", failure_threshold=3, cordon_s=120)
+    pool = make_pool("a", failure_threshold=3, cordon_s=120, cooldown_max_s=300)
     state = pool._states[0]
     state.healthy = True
-    for _ in range(3):
+    for _ in range(10):
         lease = await pool.acquire()
         assert lease.name == "a"
         await pool.release(lease, ok=False, kind="transport")
     now = time.monotonic()
-    assert state.cordoned(now)
-    assert "consecutive failures" in state.cordon_reason
+    assert not state.cordoned(now)
+    assert state.cooling_down(now)
+    assert state.cordon_reason == ""
+    # the demotion saturates at the cap (300s == the old cordon length)
+    assert state.cooldown_remaining_s(now) <= 300.0
 
 
 @pytest.mark.asyncio

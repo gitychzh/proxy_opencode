@@ -244,8 +244,10 @@ def test_egress_cooldown_defaults_and_env(monkeypatch):
     monkeypatch.delenv("ZEN_EGRESS_COOLDOWN_MAX_S", raising=False)
     s = config.load_settings()
     assert s.zen_egress_cooldown_s == 20.0
-    assert s.zen_egress_cooldown_max_s == 60.0
-    assert s.zen_egress_cooldown_max_s < s.zen_egress_cordon_s
+    # 0.8.5: a transport failure never cordons, so the demotion may escalate
+    # all the way to the old cordon length (300s) instead of stopping short.
+    assert s.zen_egress_cooldown_max_s == 300.0
+    assert s.zen_egress_cooldown_s <= s.zen_egress_cooldown_max_s
 
     monkeypatch.setenv("ZEN_EGRESS_COOLDOWN_S", "7")
     monkeypatch.setenv("ZEN_EGRESS_COOLDOWN_MAX_S", "9")

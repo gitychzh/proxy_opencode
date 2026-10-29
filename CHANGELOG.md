@@ -41,15 +41,20 @@ cordon，池子被排空，`request_on_cordoned_bucket` 触发 **114 次**——
 现在：
 * **单次失败 = 降权，不是隔离**。该请求照旧交给备用链（0.8.4 的行为），
   这个桶只是排到选择顺序末尾（`egress cooldown`，默认 20s × 连续失败次数，
-  上限 60s），**仍然留在轮换里**——它是唯一可用候选时立刻继续服务。
+  上限 300s），**仍然留在轮换里**——它是唯一可用候选时立刻继续服务。
 * **成功一次立即恢复**：`release(ok=True)` 清空 cooldown，下一个请求就回到
   正常轮次。
-* **连续 3 次失败仍 escalate 到真 cordon**（`ZEN_EGRESS_CORDON_S`）：那是
-  死腿，不是抖动，继续拿它吃首字节期限才是坏体验。
+* **任何次数的传输失败都不 cordon**。第一版保留了「连续 3 次失败仍 escalate
+  到 `ZEN_EGRESS_CORDON_S`」，演练直接推翻了它：注入故障后 esp32 的 streak
+  走到 4/5/10/11/12/13 次，每一次都被隔离——这正是用户要求禁掉的行为，只是
+  阈值更靠后。递增的降权窗口（封顶 300s＝旧 cordon 长度）独自承担「这条腿已
+  死」的信号：死腿自然排到队尾，永不失去被选资格。cordon 从此只用于 IP 域
+  **判决**（硬 429 日配额、free-tier 403），因为那两句的意思是「这个地址别再
+  发过来了」，而不是「这一次没成功」。
 * 新事件 `egress_cooldown`（带 `count` / `elapsed_s`）；`/admin/egresses`
   快照新增 `cooldown` / `cooldown_remaining_s`，与 `cordoned` 互斥可读。
 * 新配置：`ZEN_EGRESS_COOLDOWN_S`（默认 20）、`ZEN_EGRESS_COOLDOWN_MAX_S`
-  （默认 60，必须小于 `ZEN_EGRESS_CORDON_S`）。
+  （默认 300，等于旧 cordon 长度；不再要求小于 `ZEN_EGRESS_CORDON_S`）。
 
 ### Changed — 首字节期限按桶分级，不再让降权桶吃掉第二个满分钟
 

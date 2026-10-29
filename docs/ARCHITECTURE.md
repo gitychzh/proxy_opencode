@@ -119,14 +119,17 @@ cordon、换 IP、failover 语义与传输无关。
 - **cordon 与降权（两档，0.8.5 起）**：429 烧穿（`free_quota_exhausted`，绑到窗口末）
   与 403 门槛（`free_tier_rejected`）都是**对出口 IP 的判决**——探针观测到 IP 变化
   且就绪时立即解除（`cordon_lifted`，IP 不在 `expect_prefix` 内时另记
-  `prefix_mismatch` 审计事件）；传输连败 streak cordon 保持原 deadline。**软 429**
+  `prefix_mismatch` 审计事件）。**传输失败（任何次数）永不 cordon**（0.8.5 起，
+  演练推翻了「3 次才 escalate」——那是同一缺陷的放大版）。**软 429**
   （`Retry-After`≤3600s）是突发节流而非额度判决，只 cordon 该时长
   （`free_quota_soft`）。重复判决只静默延长租约、不重复记事件，更短的判决不得覆盖
   更长的存活 cordon。
-  与 cordon 并列的是**降权（cooldown）**：单次传输失败/5xx **不移出轮换**，只把桶
+  与 cordon 并列的是**降权（cooldown）**：传输失败/5xx **不移出轮换**，只把桶
   排到选择顺序末尾（`ZEN_EGRESS_COOLDOWN_S=20` × 连续次数，上限
-  `ZEN_EGRESS_COOLDOWN_MAX_S=60`），该请求由备用链答完，下一请求照常轮询（含它
-  自己），成功一次立即清零。连续 3 次失败才 escalate 到 cordon。选择顺序为
+  `ZEN_EGRESS_COOLDOWN_MAX_S=300`），该请求由备用链答完，下一请求照常轮询（含它
+  自己），成功一次立即清零。0.8.5 起**任何次数的传输失败都只降权**，递增窗口
+  （封顶 300s＝旧 cordon 长度）独自承担「这条腿已死」的信号；cordon 只留给
+  IP 域判决。选择顺序为
   正常健康桶 → 降权桶 → last-resort 桶 → cordon 桶。
 - **首字节（TTFB）超时**：`ZEN_TTFB_S`（默认 60s；实测 TTFB p95=21s、p99=305s）只约束**响应头**，到达即解除；
   之后的静默由 `STREAM_STALL_S` 管。此前整个交换只有 `zen_timeout_s=300` 一个
