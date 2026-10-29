@@ -110,6 +110,12 @@ cordon、换 IP、failover 语义与传输无关。
   事件，按状态跃迁记一行 WARNING，不打 traceback（2026-10-25 前此处异常会逃逸，
   死 agent 继续接客直到 3 次请求级失败）。IP 前缀匹配只作审计字段，不参与健康
   判定，也不作为 cordon 解除的前置。
+  **软失败有容忍度**（0.8.2 起）：200 但 `ready=false` / `egress_probe_ok=false`
+  属「agent 活着、出口腿短暂不通」，连续 `ZEN_EGRESS_PROBE_FAIL_TOLERANCE`
+  次（默认 1 = 历史行为，生产设 2）才摘桶；未达阈值只记 INFO、不发事件。
+  传输异常与「非 200 且未就绪」仍是硬判决，第一次即摘桶——两者必须分开：
+  前者是 LTE 丢包（2026-10-29 实测 5h/13 次，全在下一探针自愈，桶 `failures=0`），
+  后者是 agent 真的没了（2026-10-25 僵尸桶）。
 - **cordon**：429 烧穿（`free_quota_exhausted`，绑到窗口末）与 403 门槛
   （`free_tier_rejected`）都是**对出口 IP 的判决**——探针观测到 IP 变化且就绪时
   立即解除（`cordon_lifted`，IP 不在 `expect_prefix` 内时另记 `prefix_mismatch`

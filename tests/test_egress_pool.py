@@ -930,3 +930,153 @@ async def test_quota_blackout_ignores_transport_cordons() -> None:
     state.cordoned_until = time.monotonic() + 300.0
     state.cordon_reason = "3 consecutive failures (transport)"
     assert pool.quota_blackout_s() == 0.0
+
+
+# ------------------------------------------- soft probe failures (tolerance)
+#
+# 2026-10-29 nightly review: the ledger held 26 probe_failed events in 5h,
+# every one reading "agent not ready" and every one self-healing on the next
+# 30s probe, while the buckets in question served 20/21 requests with
+# failures=0. A single dropped packet on an LTE uplink (the agent probes
+# ipip.net with an 8s timeout) was enough to pull a working bucket out of
+# rotation, which pushes the same traffic onto fewer IPs and burns their
+# daily allowance faster.
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_single_soft_probe_failure_tolerated(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """One 200-not-ready answer must not pull a working bucket (tolerance=2)."""
+
+    pool = make_pool("a", probe_fail_tolerance=2)
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://a:10001/healthz").respond(
+            json={"ready": False, "egress_probe_ok": False, "egress_ip": "5.5.5.5"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.healthy is True  # still in rotation
+        assert state.last_probe_ok is False  # ...but the snapshot tells the truth
+        assert state.probe_soft_fail_streak == 1
+        # only the first-sight egress_ip_observed; no probe_failed (not an outage)
+        assert [e["event"] for e in read()] == ["egress_ip_observed"]
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_consecutive_soft_failures_pull_bucket(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Two soft failures in a row are a real verdict: pull it, once."""
+
+    pool = make_pool("a", probe_fail_tolerance=2)
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://a:10001/healthz").respond(
+            json={"ready": False, "egress_ip": "5.5.5.5"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.healthy is False
+        events = [e for e in read() if e["event"] == "probe_failed"]
+        assert len(events) == 1
+        # the reason names the field AND the streak it took to pull the bucket
+        assert events[0]["reason"] == "ready=false (2/2)"
+        assert state.probe_soft_fail_streak == 2
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_soft_failure_streak_resets_on_success(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A good probe between two blips must reset the streak (no slow drift)."""
+
+    pool = make_pool("a", probe_fail_tolerance=2)
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://a:10001/healthz").respond(
+            json={"ready": False, "egress_ip": "5.5.5.5"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.probe_soft_fail_streak == 1
+        respx.get("http://a:10001/healthz").respond(
+            json={"ready": True, "egress_probe_ok": True, "egress_ip": "5.5.5.5"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.probe_soft_fail_streak == 0
+        assert state.healthy is True
+        respx.get("http://a:10001/healthz").respond(
+            json={"ready": False, "egress_ip": "5.5.5.5"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.healthy is True  # a fresh streak, still tolerated
+        assert state.probe_soft_fail_streak == 1
+        assert [e for e in read() if e["event"] == "probe_failed"] == []
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_transport_probe_failure_stays_hard_at_any_tolerance(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Tolerance covers 200-not-ready only; an unreachable agent leaves at once.
+
+    The 2026-10-25 zombie-bucket incident was exactly this: an agent whose
+    tailnet path was gone kept receiving client work. A patience setting for
+    LTE blips must never buy that bucket another probe interval.
+    """
+
+    pool = make_pool("a", probe_fail_tolerance=5)
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://a:10001/healthz").mock(
+            side_effect=httpx.ConnectTimeout("tailnet down")
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.healthy is False
+        assert [e["event"] for e in read()] == ["probe_failed"]
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_probe_fail_reason_distinguishes_causes(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """ready=false and egress_probe_ok=false need different remedies.
+
+    Before 2026-10-29 both shipped as "agent not ready", so the nightly
+    report could not tell "the device's uplink is down" (device-side) from
+    "the agent state says not ready" (agent-side).
+    """
+
+    pool = make_pool("a", "b")
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        a, b = pool._states  # noqa: SLF001
+        a.healthy = b.healthy = True
+        respx.get("http://a:10001/healthz").respond(
+            json={"ready": True, "egress_probe_ok": False, "egress_ip": "5.5.5.5"}
+        )
+        respx.get("http://b:10001/healthz").respond(
+            json={"ready": False, "egress_ip": "6.6.6.6"}
+        )
+        await pool._probe_one(a)  # noqa: SLF001
+        await pool._probe_one(b)  # noqa: SLF001
+        reasons = {
+            e["egress"]: e["reason"] for e in read() if e["event"] == "probe_failed"
+        }
+        assert reasons == {
+            "a": "egress_probe_ok=false (1/1)",
+            "b": "ready=false (1/1)",
+        }
+    finally:
+        cleanup()

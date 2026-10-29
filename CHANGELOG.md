@@ -3,7 +3,35 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.8.2] - 2026-10-29
+
+### Fixed — 一次软探针失败就摘桶，把健康桶从轮询里踢掉
+
+`/healthz` 答 200 但 `ready=false` / `egress_probe_ok=false` 时，池子在**第一次**
+就 `healthy=False`。而 agent 侧 `ready` 的语义是「最近一次对 echo_url 的探测
+成功」（8s 超时、30s 一次），所以一台 LTE 设备丢一个包就足以让整桶下线 30s。
+
+2026-10-29 夜间复盘（5 小时窗口）：账本 26 条 `probe_failed`，全部
+`agent not ready`，全部在下一个探针自愈，期间这些桶 `failures=0`
+（20/21 条请求全成功）。后果不是报错，而是**流量被挤到更少的 IP 上**：
+单桶承担的 prompt tokens 更多 → 日额度更早烧穿 → 硬 429。
+
+现在：
+
+- `ZEN_EGRESS_PROBE_FAIL_TOLERANCE`（默认 `1` = 历史行为，生产设 `2`）：
+  连续 N 次软失败才摘桶；未达阈值只记 INFO，不发 `probe_failed` 事件；
+- `last_probe_ok` 仍报原始结果（快照不许说坏探测成功了）；
+- **传输失败 / 非 200 不受影响**，仍然第一次就摘桶（2026-10-25 僵尸桶事故：
+  agent 的 tailnet 路径没了却继续接活）。
+
+### Changed — 探针失败原因可归因
+
+`probe_failed` 的 `reason` 从统一的 `agent not ready` 拆成
+`ready=false` / `egress_probe_ok=false` / `status <code>`，并附 `(n/N)` 连击数。
+两者处置不同（设备上行 vs agent 状态），之前同形导致巡检报告无法归因。
+
 ## [0.8.1] - 2026-10-29
+
 
 ### Changed — 四个出口桶按「四个账号」语义重做故障处理
 

@@ -297,6 +297,17 @@ class Settings:
     # Shared secret for the agents' /healthz + /rotate endpoints (basic auth).
     zen_egress_secret: str = ""
     zen_egress_probe_interval_s: int = 30
+    # Consecutive *soft* probe failures (agent answers 200 with ready=false /
+    # egress_probe_ok=false) tolerated before the bucket is pulled from
+    # selection. 1 = the historical behaviour (one soft failure drops it).
+    # Measured 2026-10-29: 13 such flaps in 5h, every one self-healed within
+    # the next probe 30s later and none was backed by a request-level failure
+    # (buckets served 20/21 requests with failures=0). Pulling a healthy
+    # bucket on a single LTE blip concentrates traffic on the remaining IPs
+    # and burns their daily allowance faster. Transport failures against the
+    # agent are NOT tolerated (they stay hard, see ZEN_EGRESS_PROBE_*).
+    #   ZEN_EGRESS_PROBE_FAIL_TOLERANCE=2
+    zen_egress_probe_fail_tolerance: int = 1
     zen_egress_cordon_s: int = 300
     # Floor between two hard-429 rotations of the SAME bucket. A 429 is
     # ambiguous (transport gate / stale-prompt body gate / session reuse /
@@ -659,6 +670,9 @@ def load_settings() -> Settings:
         zen_egress_secret=os.environ.get("ZEN_EGRESS_SECRET", "").strip(),
         zen_egress_probe_interval_s=int(
             os.environ.get("ZEN_EGRESS_PROBE_INTERVAL_S", "30")
+        ),
+        zen_egress_probe_fail_tolerance=max(
+            1, int(os.environ.get("ZEN_EGRESS_PROBE_FAIL_TOLERANCE", "1"))
         ),
         zen_egress_cordon_s=int(os.environ.get("ZEN_EGRESS_CORDON_S", "300")),
         zen_egress_rotate_min_interval_s=float(

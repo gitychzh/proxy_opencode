@@ -90,6 +90,7 @@ class EgressPool:
         probe_interval_s: float = 30.0,
         cordon_s: float = 300.0,
         failure_threshold: int = 3,
+        probe_fail_tolerance: int = 1,
         observer: ReleaseObserver | None = None,
         last_resort: frozenset[str] = frozenset(),
     ) -> None:
@@ -101,6 +102,10 @@ class EgressPool:
         self._probe_interval_s = probe_interval_s
         self._cordon_s = cordon_s
         self._failure_threshold = failure_threshold
+        # Consecutive soft probe failures tolerated before a bucket is pulled
+        # (see _probe_one). Never below 1: a tolerance of 0 would mean "pull
+        # the bucket before the first failure", which is the same as 1.
+        self._probe_fail_tolerance = max(1, probe_fail_tolerance)
         self._observer = observer
         # Buckets that may only absorb overflow (see ZEN_EGRESS_LAST_RESORT).
         # Unknown names are ignored so a retired bucket cannot silently make
@@ -132,6 +137,9 @@ class EgressPool:
                 getattr(settings, "zen_egress_probe_interval_s", 30) or 30
             ),
             cordon_s=float(getattr(settings, "zen_egress_cordon_s", 300) or 300),
+            probe_fail_tolerance=int(
+                getattr(settings, "zen_egress_probe_fail_tolerance", 1) or 1
+            ),
             last_resort=frozenset(
                 getattr(settings, "zen_egress_last_resort", frozenset()) or frozenset()
             ),
@@ -690,16 +698,27 @@ class EgressPool:
             state.egress_ip = ip
             state.egress_ip_at = str(payload.get("egress_ip_at") or "")
         # ip-matching is informational only (do not gate health)
-        state.healthy = ok
         if not ok:
-            self._mark_probe_failed(
+            # A 200 answer that says "not ready" is a *soft* verdict: the
+            # agent is up and talking, only its outbound leg is momentarily
+            # unusable (the agent itself probes ipip.net every 30s with an
+            # 8s timeout, so one dropped packet on an LTE uplink is enough).
+            # Measured 2026-10-29: 13 such flaps in 5h, each self-healed on
+            # the very next probe, none backed by a request-level failure
+            # (those buckets served 20/21 requests with failures=0).
+            # Tolerating a few of them keeps the bucket in rotation, which
+            # spreads traffic over more IPs and slows daily-allowance burn.
+            # Transport failures / non-200 stay HARD (handled above): a
+            # bucket whose agent is unreachable must leave rotation at once
+            # (2026-10-25 zombie-bucket incident).
+            self._probe_soft_failure(
                 state,
-                f"status {resp.status_code}"
-                if resp.status_code != 200
-                else "agent not ready",
+                self._probe_fail_reason(resp.status_code, payload),
                 was_healthy=previous_ok,
             )
             return
+        state.healthy = True
+        state.probe_soft_fail_streak = 0
         if ip_changed:
             # Only lift on a *proven-good* probe: a ready=false answer with
             # a fresh IP means the agent is still mid-recovery.
@@ -713,6 +732,47 @@ class EgressPool:
             if not state.cordoned(now):
                 state.failures = 0
                 state.cordon_reason = ""
+
+    @staticmethod
+    def _probe_fail_reason(status_code: int, payload: dict[str, object]) -> str:
+        """Name the exact field a not-ready answer came from.
+
+        2026-10-29 review: every flap in the ledger read ``agent not ready``,
+        which is the same string for "agent admits its own outbound probe
+        failed" and "agent reports ready=false" — the two have different
+        remedies (device uplink vs. agent state), and the ambiguity made the
+        nightly report unable to attribute them. Keep both spellings stable so
+        findings can group by them.
+        """
+
+        if status_code != 200:
+            return f"status {status_code}"
+        if payload.get("egress_probe_ok") is False:
+            return "egress_probe_ok=false"
+        return "ready=false"
+
+    def _probe_soft_failure(
+        self, state: EgressState, reason: str, *, was_healthy: bool
+    ) -> None:
+        """Fold a soft (200-but-not-ready) probe failure into health state.
+
+        The bucket leaves rotation only once ``ZEN_EGRESS_PROBE_FAIL_TOLERANCE``
+        consecutive soft failures pile up; below that the streak is logged as
+        INFO (no WARNING, no ``probe_failed`` event) so a single LTE blip does
+        not show up as a pool outage. ``last_probe_ok`` still reports the raw
+        truth — the snapshot must not claim a broken probe succeeded.
+        """
+
+        state.probe_soft_fail_streak += 1
+        streak = state.probe_soft_fail_streak
+        suffix = f" ({streak}/{self._probe_fail_tolerance})"
+        if streak < self._probe_fail_tolerance:
+            logger.info(
+                "egress probe soft failure (tolerated)",
+                extra={"egress": state.spec.name, "reason": reason + suffix},
+            )
+            return
+        self._mark_probe_failed(state, reason + suffix, was_healthy=was_healthy)
 
     def _mark_probe_failed(
         self, state: EgressState, reason: str, *, was_healthy: bool | None = None

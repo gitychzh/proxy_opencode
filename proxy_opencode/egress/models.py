@@ -105,6 +105,11 @@ class EgressState:
     egress_ip_at: str | None = None
     last_probe_at: float = 0.0
     last_probe_ok: bool | None = None
+    # Consecutive *soft* probe failures (agent answered 200 but not ready).
+    # Transport failures against the agent are not counted here: those are a
+    # hard verdict and still drop the bucket on the first occurrence. See
+    # ``EgressPool._probe_one`` for the tolerance rule.
+    probe_soft_fail_streak: int = 0
 
     def cordoned(self, now: float) -> bool:
         return self.cordoned_until > now
