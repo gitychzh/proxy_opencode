@@ -146,6 +146,7 @@ def _summarize_events(
     fallback_reasons: dict[str, int] = {}
     fallback_models: dict[str, int] = {}
     probe_by_egress: dict[str, int] = {}
+    probe_reasons: dict[str, dict[str, int]] = {}
     rotation_ok = 0
     rotation_failed = 0
     ips: dict[str, set[str]] = {}
@@ -162,6 +163,14 @@ def _summarize_events(
             egress = record.get("egress")
             if isinstance(egress, str) and egress:
                 probe_by_egress[egress] = probe_by_egress.get(egress, 0) + 1
+                # 0.8.2 splits the reason into the field that failed
+                # (ready=false / egress_probe_ok=false / status N) plus a
+                # "(n/N)" streak suffix. Group by the field only: the streak
+                # number differs run to run and would fragment the buckets.
+                reason = str(record.get("reason") or "unknown")
+                core = reason.split(" (", 1)[0].strip() or "unknown"
+                bucket = probe_reasons.setdefault(egress, {})
+                bucket[core] = bucket.get(core, 0) + 1
         elif name == "cordon":
             reason = str(record.get("cordon_reason") or "unknown")
             core = reason.split(" (", 1)[0].strip() or "unknown"
@@ -195,6 +204,10 @@ def _summarize_events(
         "probe_failed_by_egress": dict(
             sorted(probe_by_egress.items(), key=lambda kv: (-kv[1], kv[0]))
         ),
+        "probe_failed_reasons": {
+            name: dict(sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0])))
+            for name, reasons in sorted(probe_reasons.items())
+        },
         "egress_recovered": events_by_name.get("egress_recovered", 0),
         "rotations_ok": rotation_ok,
         "rotations_failed": rotation_failed,

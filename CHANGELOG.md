@@ -30,6 +30,21 @@
 `ready=false` / `egress_probe_ok=false` / `status <code>`，并附 `(n/N)` 连击数。
 两者处置不同（设备上行 vs agent 状态），之前同形导致巡检报告无法归因。
 
+### Changed — 巡检规则按「主导原因 + 是否影响请求」分流
+
+`egress_probe_flapping` 之前对所有形态都输出同一句「设备侧上行，不要调大探针
+容忍度」。三种形态的处置互斥，现在按账本里的主导 `reason` 与「是否全部自愈 /
+是否有请求失败」分流：
+
+- `egress_probe_ok=false` → 这条腿出不去网（设备/运营商线路）：换 IP、调容忍度
+  都无效，先查宽带；
+- 异常类名（`ConnectTimeout` 等）→ agent 本身不可达：查 tailnet 与 agent 进程；
+- 全部自愈且 `ok_ratio ≥ 0.99` → 采样噪声，降级为 `提示` 并给出
+  `ZEN_EGRESS_PROBE_FAIL_TOLERANCE=2` 的做法；
+- 其它（含旧账本的 `agent not ready`）→ 保留原文案。
+
+`probe_failed_reasons` 同时进入报告的 evidence，抖动不再是「一个数字」。
+
 ## [0.8.1] - 2026-10-29
 
 

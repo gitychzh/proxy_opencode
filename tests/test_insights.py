@@ -392,6 +392,82 @@ def test_diagnose_stays_quiet_on_a_single_probe_transition():
     assert "egress_probe_flapping" not in _keys(findings)
 
 
+def test_diagnose_separates_a_dead_leg_from_probe_noise():
+    """The three probe-failure shapes need three different remedies.
+
+    2026-10-29: the report said "device-side uplink, don't raise the probe
+    tolerance" for every case. That is right for transport failures and
+    actively wrong for `egress_probe_ok=false` (the agent's own uplink is
+    down: tolerance and rotation are both useless) and for churn that always
+    self-healed with zero request failures (sampling noise: tolerance is
+    exactly the fix).
+    """
+
+    # (a) dead egress leg: agent answers, its own outbound probe fails
+    dead_leg = [
+        _event(event="probe_failed", egress="owin10-telecom", reason="egress_probe_ok=false (2/2)")
+        for _ in range(20)
+    ] + [
+        _event(event="egress_recovered", egress="owin10-telecom") for _ in range(2)
+    ]
+    item = next(
+        f
+        for f in diagnose(summarize(dead_leg, [_chat(200, 1000.0)]))
+        if f["key"] == "egress_probe_flapping"
+    )
+    assert item["severity"] == "warning"
+    assert item["evidence"]["sampling_noise"] is False
+    assert item["evidence"]["primary_reason"] == "egress_probe_ok=false"
+    assert "宽带" in item["action"]
+    # rotation / tolerance must NOT be offered as the cure
+    assert "ZEN_EGRESS_PROBE_FAIL_TOLERANCE=2" not in item["action"]
+
+    # (b) the agent itself is unreachable
+    transport = [
+        _event(event="probe_failed", egress="cc9", reason="ConnectTimeout")
+        for _ in range(20)
+    ]
+    item = next(
+        f
+        for f in diagnose(summarize(transport, [_chat(200, 1000.0)]))
+        if f["key"] == "egress_probe_flapping"
+    )
+    assert item["evidence"]["primary_reason"] == "ConnectTimeout"
+    assert "tailnet" in item["action"]
+
+    # (c) churn that healed every time and never touched a request
+    noise = [
+        _event(event="probe_failed", egress="owin10-mobile", reason="egress_probe_ok=false (1/2)")
+        for _ in range(13)
+    ] + [
+        _event(event="egress_recovered", egress="owin10-mobile") for _ in range(13)
+    ]
+    item = next(
+        f
+        for f in diagnose(summarize(noise, [_chat(200, 1000.0)]))
+        if f["key"] == "egress_probe_flapping"
+    )
+    assert item["severity"] == "info"
+    assert item["evidence"]["sampling_noise"] is True
+    assert "ZEN_EGRESS_PROBE_FAIL_TOLERANCE=2" in item["action"]
+
+
+def test_diagnose_probe_noise_downgrades_only_with_clean_requests():
+    """Same churn, but requests failed: never call that noise."""
+
+    events = [
+        _event(event="probe_failed", egress="owin10-mobile", reason="ready=false (1/2)")
+        for _ in range(13)
+    ] + [_event(event="egress_recovered", egress="owin10-mobile") for _ in range(13)]
+    item = next(
+        f
+        for f in diagnose(summarize(events, [_chat(200, 1000.0), _chat(502, 1000.0)]))
+        if f["key"] == "egress_probe_flapping"
+    )
+    assert item["severity"] == "warning"
+    assert item["evidence"]["sampling_noise"] is False
+
+
 def test_diagnose_flags_quota_cordon_rate_without_touching_rotation():
     events = [
         _event(event="cordon", egress="cc9", cordon_reason="free_quota_exhausted")

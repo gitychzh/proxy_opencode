@@ -337,20 +337,94 @@ def diagnose(
     )
     hours = float(window.get("hours") or 0.0)
     if worst_failures >= PROBE_FAILURES_WARN:
-        findings.append(
-            _finding(
-                "warning",
-                "egress_probe_flapping",
-                "出口探针反复抖动：桶在健康/不健康之间来回切换",
+        # Which field actually failed decides the remedy, and the three
+        # remedies are mutually exclusive:
+        #   egress_probe_ok=false -> the agent's own outbound leg is dead
+        #                            (broadband / ISP). Rotation and probe
+        #                            tolerance are both useless here.
+        #   transport exception    -> the agent itself is unreachable
+        #                            (tailnet / process).
+        #   ready=false / status N -> the agent answered but is not serving.
+        # 0.8.2 renamed these apart; older ledgers carry the single
+        # ambiguous "agent not ready" string, which falls through to the
+        # device-side wording below.
+        probe_reasons = {
+            str(k): {str(rk): int(rv) for rk, rv in (v or {}).items()}
+            for k, v in (events.get("probe_failed_reasons") or {}).items()
+        }
+        worst_reasons = probe_reasons.get(worst_egress) or {}
+        primary_reason = (
+            max(worst_reasons.items(), key=lambda kv: (kv[1], kv[0]))[0]
+            if worst_reasons
+            else ""
+        )
+        leg_down = primary_reason.startswith("egress_probe_ok=false")
+        # Transport reasons are exception class names (ConnectTimeout,
+        # ConnectError, ReadTimeout, ...). Matching on the suffix keeps the
+        # legacy ambiguous "agent not ready" out of this bucket: it was the
+        # 0.7.x wording for "the agent answered but is not serving", which is
+        # a different remedy than "the agent is unreachable".
+        transport = primary_reason.endswith(("Timeout", "Error", "Exception"))
+        probe_total = sum(probe_by_egress.values())
+        recovered_total = int(events.get("egress_recovered") or 0)
+        ok_ratio = float(requests.get("ok_ratio") or 0.0)
+        # Churn that always healed and never reached a single request is
+        # sampling noise (one 8s echo probe timing out), not an outage.
+        # 2026-10-29: 26 transitions in 5h, every one recovered on the next
+        # probe, 42/42 requests 200. Pulling a working bucket on that is how
+        # traffic ends up concentrated on fewer IPs. Note the reason cannot
+        # separate this case from a dead leg — both read
+        # `egress_probe_ok=false`; only "did it come back / did requests
+        # suffer" can, so this is tested before the leg_down branch.
+        sampling_noise = (
+            probe_total > 0
+            and ok_ratio >= 0.99
+            and recovered_total >= probe_total * 0.9
+        )
+        if sampling_noise:
+            action = (
+                "这些抖动全部在下一个探针周期自愈，且窗口内没有一条请求失败——"
+                "属采样噪声（agent 的 8s 出口探测偶发超时），不是桶不可用。"
+                "可设 ZEN_EGRESS_PROBE_FAIL_TOLERANCE=2 让单次抖动不下线，"
+                "把流量留在更多 IP 上；若同时出现请求级失败，按设备故障处理。"
+            )
+        elif leg_down:
+            action = (
+                f"`{worst_egress}` 的 agent 自报出口探测失败（`egress_probe_ok=false`）"
+                "——这条上行真的出不去网，属于设备或运营商线路，不是网关缺陷。"
+                "换 IP、调探针容忍度、动 ZEN_EGRESS_PROXIES 都治不了：先确认那一路"
+                "宽带在线（在设备上直接探一次公网 IP 对照 expect_prefix）；"
+                "线路恢复后探针会自动把桶带回轮询。"
+            )
+        elif transport:
+            action = (
+                f"`{worst_egress}` 的 agent 连不上（{primary_reason}）：查 tailnet 路径"
+                "与设备上的 agent 进程。这才是真正的设备/隧道问题。"
+            )
+        else:
+            action = (
                 "这是设备侧上行/隧道（agent not ready、ConnectTimeout），"
                 "不是网关缺陷：查那台设备的网络与 agent 进程。"
                 "**不要**为抖动调大探针容忍度来掩盖它——只在确认某桶长期"
-                "不可用时才动 ZEN_EGRESS_PROXIES。",
+                "不可用时才动 ZEN_EGRESS_PROXIES。"
+            )
+        findings.append(
+            _finding(
+                "info" if sampling_noise else "warning",
+                "egress_probe_flapping",
+                "出口探针抖动：全部自愈且未影响请求"
+                if sampling_noise
+                else "出口探针反复抖动：桶在健康/不健康之间来回切换",
+                action,
                 probe_failed_by_egress=probe_by_egress,
+                probe_failed_reasons=probe_reasons,
                 worst_egress=worst_egress,
                 worst_failures=worst_failures,
+                primary_reason=primary_reason or None,
+                recovered_total=recovered_total,
+                request_ok_ratio=ok_ratio,
+                sampling_noise=sampling_noise,
                 per_hour=round(worst_failures / hours, 2) if hours > 0 else None,
-                recovered_total=int(events.get("egress_recovered") or 0),
                 window_hours=hours or None,
             )
         )
