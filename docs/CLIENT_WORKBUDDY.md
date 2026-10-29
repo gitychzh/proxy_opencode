@@ -103,9 +103,15 @@ python scripts/e2e_workbuddy.py --base http://127.0.0.1:8787 --key wb-local-8787
 （数十发量级即烧穿，UTC 00:00 重置）。适合日常问答/短任务；长时间高强度使用
 会被 `429 FreeUsageLimitError` 挡住。
 
-需要持续吞吐时改用 ECS 网关（`https://115.29.231.25:10002/v1`，三桶出口池 +
+需要持续吞吐时改用 ECS 网关（`http://115.29.231.25:10002/v1`，四桶出口池 +
 `FailoverAdapter` → proxy_ms 兜底）。切换只需把 `models.json` 里该项的 `url` /
 `apiKey` 换成 ECS 入口与其网关密钥，其余字段不变。
+
+> **入口协议是明文 HTTP，不是 HTTPS**（2026-10-28 取消 caddy TLS 中转，见
+> OPERATIONS §1）。写 `https://` 会得到 `[SSL: WRONG_VERSION_NUMBER]` →
+> 客户端显示 `Connection error.`（Hermes 2026-10-29 即因此故障）。
+> 网关密钥必须是 ECS `deploy/ecs/.env` 的 `GATEWAY_API_KEYS` 值；用旧 key
+> 会得到 401 `invalid_api_key`。两者之一出错都会表现为"连不上"。
 
 ## 5. 回滚
 

@@ -212,7 +212,7 @@ cordon、换 IP、failover 语义与传输无关。
 |---|---|---|
 | agent 语言 | Linux/Windows=Python；Android=Kotlin（占位） | 稳定优先；现役设备都能跑 Python（含 Android chroot） |
 | 第三方依赖 | 成熟库优先（aiohttp / requests），仅 CONNECT 双工管道自写 ~100 行 | proxy.py 过重且源地址绑定能力不明确 |
-| TLS | IP 入口自签 CA（hermes 已 pin）；客户入口域名 + LE（DNS-01，灰云直连） | 公共 CA 不签裸 IP；CF 代理绕海外慢 10 倍 |
+| TLS | **IP 入口无 TLS（明文 HTTP）**，2026-10-28 起取消 caddy 自签 CA 中转；域名入口 + LE 方案保留未启用 | 客户端装证书代价大于收益（用户否决）；域名链路实测 23–68s 不可用 |
 | 计数器 | 每出口日窗 [08:00, 08:00+1d) Asia/Shanghai，≥500 触发换 IP，换完清零 | 与上游 UTC0 重置对齐；上游真实额度 ≪500，阈值仅作兜底 |
 | 403 门槛 | 释放为失败 + 立即 cordon + 绕过阈值换 IP | 曾被当请求级 ok 释放 → 用户持续报错；根因是形状门，防御保留 |
 | 桶间 failover | 429/5xx/传输失败/匿名 403 → 换桶；SSE 开播后不换；兜底 503 | 单桶故障时别桶仍可用；透传 403 会被客户端判不可重试 |

@@ -132,8 +132,8 @@ ssh -p 222 root@115.29.231.25 'set -e
   rm -f /root/zen-src.tar.gz'
 
 # 验收（三件缺一不可）
-curl -s https://115.29.231.25:10002/healthz -k          # version 与 tag 一致
-python scripts/e2e_workbuddy.py --base https://115.29.231.25:10002 --key <GW_KEY> --insecure
+curl -s http://115.29.231.25:10002/healthz                # version 与 tag 一致
+python scripts/e2e_workbuddy.py --base http://115.29.231.25:10002 --key <GW_KEY>
 ```
 
 硬规矩：①`.env` 与 `data/` 是唯二不可再生项，先备份再动手；②镜像只保留
@@ -313,6 +313,26 @@ docker logs zen-gw 2>&1 | grep -E "bun upstream attempt|answering 503|FALLBACK"
 
 > 紧随 `client write stalled` 之后的 uvicorn `ASGI callable returned without
 > completing response` ERROR 是**预期**（我们主动取消响应任务以关连接）。
+
+### 4.3.1 客户端 `Connection error.`（连不上，非断流）
+
+这是**客户端侧**故障，特征是没到网关就失败——网关日志里**没有任何请求记录**。
+判据是拿不到任何 HTTP 状态码，而不是拿到 429/500。
+
+| 客户端报错 | 真实原因 | 一锤定音的判据 |
+|---|---|---|
+| `[SSL: WRONG_VERSION_NUMBER]` → `Connection error.` | 客户端写 `https://`，但 10002 是**明文 HTTP** | `curl -s http://<ip>:10002/healthz` 200，而 `curl -sk https://<ip>:10002/healthz` 返回 exit 35 / `appconnect=0` |
+| `401 invalid_api_key` | 密钥不是 ECS `GATEWAY_API_KEYS` 的值 | 明文探测 200 但鉴权 401；比对密钥 sha256 而不是肉眼看长度 |
+| `ConnectTimeout` / 无响应 | 安全组或 IP 变更，与网关无关 | `connect=` 时间超时（非秒级 RST） |
+
+**根因教训（2026-10-29）**：10-28 取消 caddy TLS 后，`docs/` 里仍留有多处
+`https://115.29.231.25:10002` 的旧写法，Hermes 照文档配置 → 全体请求
+`WRONG_VERSION_NUMBER`。同时它的 `key_env` 指向一把 17 字符的旧密钥（ECS 唯一
+密钥是 15 字符），两层故障叠加：**即使把 https 改成 http，下一跳仍会 401**。
+排查时必须分别验证协议层与鉴权层，不能只修第一层就宣称修好。
+
+诊断入口：Hermes 的 `logs/errors.log` 里搜 `WRONG_VERSION_NUMBER`（协议错）与
+`invalid_api_key`（鉴权错）；网关容器日志**无记录**即证明请求没到达。
 
 ### 4.4 纪律
 
