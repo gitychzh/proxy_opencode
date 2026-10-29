@@ -26,12 +26,15 @@
 > 2026-10-28 变更：取消 caddy TLS 中转，容器直接发布 `10002`。理由——客户端
 > 装证书的代价大于收益（用户明确否决）；域名链路实测 23–68s，不可用。
 
-> 域名入口 `llm.223722.xyz` 当前**不可用**（2026-10-25 实测 404：cloudflared
-> 只剩 `http_status:404` 兜底规则，无 hostname ingress）。见 ARCHITECTURE §10。
+> 域名入口 `llm.223722.xyz` **已彻底下线**（2026-10-29）：`100.90.84.65` 上的
+> `cloudflared-tunnel` 与 `zen-lb` 已停止、disable 并删除 unit，`/etc/cloudflared`
+> 与 `/root/.cloudflared` 已删。2026-10-25 它就已不可用（只剩 `http_status:404`
+> 兜底规则）；本次是把无源的空壳一并清退。见 ARCHITECTURE §10。
 
 对外只暴露一个掩码别名 `deepseek-ai/deepseek-v4.1-flash`（`PUBLIC_MODELS` 第三
 列决定上游，当前 `big-pickle`）。旧栈（`9443` + `zen-lb` + 各设备完整网关）已于
-2026-10-17 从 ECS 清退；设备侧 `:879x` 旧网关因入口断开而不可达闲置。
+2026-10-17 从 ECS 清退；设备侧 `:8791`/`:8793` 旧网关已于 **2026-10-29 删除**
+（计划任务、部署树、日志、payload_dump 全清，见 CHANGELOG `Unreleased`）。
 
 ## 2. 部署与桶状态
 

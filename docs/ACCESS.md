@@ -16,9 +16,11 @@
 | 桶状态 / 手动换 IP | `http://127.0.0.1:10002/admin/egresses[/{name}/rotate]` | 管理员 key，**公网可达**（明文入口的代价） |
 | 设备侧 agent | `<tailscale-ip>:10001`（owin10 第二上行 `:10002`） | CONNECT/rotate 用 Basic |
 
-> **域名入口不可用（2026-10-25 实测）**：`llm.223722.xyz` 已解析到 Cloudflare，
-> 但 `cloudflared` 隧道无 hostname ingress（只剩 404 兜底），`443`/`10002` 也不在 CF
-> 代理端口白名单。恢复步骤见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §10。
+> **域名入口已下线（2026-10-29）**：`llm.223722.xyz` 曾解析到 Cloudflare，但
+> `cloudflared` 隧道自 2026-10-25 起无 hostname ingress（只剩 404 兜底），`443`/`10002`
+> 也不在 CF 代理端口白名单。2026-10-29 已在 `100.90.84.65` 上把
+> `cloudflared-tunnel` + `zen-lb` 停止、disable 并删除 unit，配置与凭据目录一并删除；
+> 该域名现在**无任何后端**。现役入口只用 ECS 明文 `10002`。
 
 聊天接口只接受公开别名 `deepseek-ai/deepseek-v4.1-flash`，上游裸 ID 返回 404。
 

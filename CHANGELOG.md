@@ -3,6 +3,28 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [Unreleased]
+
+### Removed — 旧栈 8791/8793 彻底下线（含远程旧入口）
+
+旧设备侧网关（本机 `0.0.0.0:8791` 与第二实例 `:8793`）自 2026-10-03 起无成功
+业务调用，此后仅被远程旧 LB 以健康检查空转（累计 109,503 次 `GET /v1/models`）。
+远程 LB 的 4 个上游（`win10-local:8791` / `owin10:8791` / `phone115:8792` /
+`owin10-tel:8793`）现已全部不可达，链路整体为空壳，按用户指令清退。
+
+* 本机：注销 `ProxyOpencodeBoot` 计划任务；停 `:8791`、`:8793` 进程树；删除
+  `C:/Users/owin10/proxy_opencode/` 部署树（含 `.venv`）、`proxyo{,2}.log`、
+  `payload_dump/`（含历史请求体快照）。
+* 远程 `100.90.84.65`：`zen-lb.service` 与 `cloudflared-tunnel.service` 停止并
+  disable、unit 已删；`/opt/proxy_opencode`（54M）、`/etc/cloudflared`、
+  `/root/.cloudflared` 已删。`llm.223722.xyz` 随之从 404 变为无源（本就不可用）。
+* 仓库：删除 `start_gateway.bat`（硬编码 8791 与 `dev-local-key`，无引用）。
+* 退役证据留档：`.workbuddy/memory/retired-8791/`（脱敏启动器快照 + 两端源码
+  归档，凭据文件已剔除）。
+
+现役入口不变：ECS `http://115.29.231.25:10002/v1`（生产）与本机
+`http://127.0.0.1:8787/v1`（WorkBuddy 桌面端）。
+
 ## [0.8.5] - 2026-10-29
 
 ### Fixed — 一次失败就把出口桶移出轮换（用户明确否决）
