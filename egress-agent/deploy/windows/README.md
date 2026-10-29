@@ -49,3 +49,14 @@ Task Scheduler（而非 systemd）、出网绑定用 `socket.bind` 源地址钉�
 - 与既有 Windows 桶 `win10`（`deploy/windows` 旧占位路径已由本文件取代）的
   差异：win10 用 `.venv` + Startup 目录脚本；owin10 用系统 Python +
   schtasks——两条路径均已实测可用，新部署推荐 schtasks（不依赖用户登录）。
+- **echo_url 必须选无 AAAA 记录的域名**（win107 实测 2026-10-29）：宿迁电信
+  宽带的 IPv6 不通，`myip.ipip.net` 有 AAAA → aiohttp 走 v6 直接
+  `TimeoutError`，22 分钟 14/15 次探针失败、桶被判不健康；隧道本身完全正常。
+  换 `https://ipv4.icanhazip.com`（A only）后 ready 即恢复。排查口诀：隧道
+  能通但探针全超时 = 先测 `curl -6`，不是网络挂了。
+- SYSTEM 计划任务的 Python 依赖必须装进**系统** site-packages：交互 shell 里
+  `pip install` 默认落用户目录（`%APPDATA%\Python\Python311\site-packages`），
+  SYSTEM 看不见。用 `pip install --ignore-installed --target
+  "C:\Program Files\Python3XX\Lib\site-packages" <pkg>`。另：aiohttp 3.14 还
+  需要 `attrs==24.3.0`（新版 attrs 已删 `attr` 别名）、`idna`、
+  `typing_extensions`。
