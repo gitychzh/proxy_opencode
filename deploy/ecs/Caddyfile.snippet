@@ -1,4 +1,6 @@
 # 0.7.x 新栈入口（追加到 /etc/caddy/Caddyfile；P2 应用）
+# ⚠️ 整份文件自 2026-10-28 起已废弃：取消 caddy TLS 中转，容器直接发布 10002。
+#    保留仅为「万一要恢复 TLS 入口」的模板，任何一行都不要直接照抄上线。
 # 旧栈 9443/zen.223722.xyz 两个 site 保持原样，不要改动。
 
 # --- 1. IP + 自签 CA（默认，hermes 用；证书与 9443 同一对） ---
@@ -8,8 +10,9 @@ https://:10002 {
 	encode gzip
 }
 
-# --- 2. 域名 + LE 真证书（客户零安装；P2 验证 DNS-01 稳定性后启用） ---
-# 前置：llm.223722.xyz A 记录灰云直指 ECS IP；CF_API_TOKEN 已进 caddy 环境。
+# --- 2. 域名 + LE 真证书（已废弃：2026-10-29 域名入口整体删除） ---
+# 该方案依赖 llm.223722.xyz 的 DNS 记录与 CF_API_TOKEN，两者均已不存在。
+# 重建需先 ICP 备案 → 重建 A 记录 → 注入新 CF token。勿按下方注释直接操作。
 # llm.223722.xyz:10002 {
 # 	tls {
 # 		dns cloudflare {env.CF_API_TOKEN}

@@ -125,6 +125,11 @@ http://115.29.231.25:10002/v1/models_cus?key=<网关或管理员KEY>
 **历史方案（已下线，保留以备恢复）**：caddy 监听 `:10002` 做 TLS，反代
 `127.0.0.1:10010`。配置见 `Caddyfile.snippet`；恢复步骤：
 
+> ⚠️ 现状（2026-10-29 核实）：ECS 上 caddy 仍装着但**服务未运行**，
+> `/etc/caddy/Caddyfile` 只剩全局块、**已无任何 site 定义**，`certs/` 里的
+> 证书是 10-15 的旧物。下方步骤是「从零重建」而不是「重启」，照抄前先确认
+> 证书与 site 段都还在。域名方案（第 2 条）已随域名入口整体删除，不可用。
+
 ```bash
 sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%F-%H%M)
 # 1) 把 Caddyfile.snippet 追加进 /etc/caddy/Caddyfile
