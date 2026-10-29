@@ -13,6 +13,10 @@ Responsibilities:
   the lease and retry on the next bucket — none of these depend on the request
   and no client byte has been sent yet. The loop is bounded so a drained pool
   answers instead of hanging. Never retried after bytes reached the client.
+  The backup chain engages only after the pool's attempts are spent (or in a
+  pool-wide blackout): a healthy sibling answers with the same model, which
+  is always preferable — 2026-10-29: a dead backup chain turned every
+  single-bucket 429 into a hard 503 while three siblings were healthy.
 * **Per-attempt session mint.** Headers are rebuilt inside the loop: upstream
   sessions are single-use, and a replay returns the quota-shaped 429.
 * **Transport choice.** bun (boringssl/HTTP2) is required by the transport
@@ -110,12 +114,9 @@ class ZenDirectAdapter:
         self._project_id = settings.zen_project_id
         self._builtin_tools = builtin_tools()
         self._bun = BunTransport.from_settings(settings)
-        # With a backup chain configured, a bucket failure is answered by that
-        # chain for THIS request (owner decision 2026-10-29: buckets are four
-        # independent accounts, and a failing account must not silently hand
-        # the turn to a sibling). The next request still resumes pool
-        # rotation, because nothing holds the failover breaker open.
-        self._backup_configured = bool(settings.zen_fallback_base_url)
+        # (Backup-chain wiring lives in the FailoverAdapter wrapper, not
+        # here: this adapter walks the pool itself and only surfaces a
+        # failure once every attempt is spent — see chat().)
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -217,14 +218,10 @@ class ZenDirectAdapter:
                 # transport fault: keep the two kinds apart so the daily
                 # report can tell a silent tunnel from a broken socket.
                 kind = "stream_stalled" if isinstance(exc, StreamStalled) else "transport"
-                if self._backup_configured:
-                    # The backup chain answers this request; the failing
-                    # account is cordoned by the release above and the next
-                    # request resumes rotation on a sibling. Walking the
-                    # remaining buckets would hide the failure behind a
-                    # different account instead of the documented fallback.
-                    raise _transport_error(exc) from exc
                 if attempts <= 0:
+                    # Pool exhausted for this request: the failover wrapper
+                    # answers it. This is the last resort — a healthy
+                    # sibling is always tried first (see __init__ note).
                     raise _transport_error(exc) from exc
                 _log_failover(kind=kind, remaining=attempts, detail=str(exc)[:120])
                 lease = await _acquire()
@@ -241,18 +238,14 @@ class ZenDirectAdapter:
             status = result.get("__status__")
             if status == 429:
                 attempts -= 1
-                # The bucket that just answered 429 is already cordoned.
-                # Buckets are independent accounts (owner decision
-                # 2026-10-29): one account's verdict ends THIS request's
-                # retries — the fallback chain answers it, and the next
-                # request resumes rotation on a sibling bucket (the cordon
-                # keeps this one out of the ring until its window resets).
-                # Walking the siblings would only add one upstream RTT each.
-                #
-                # The exception is a genuine pool-wide blackout: when every
-                # account is benched there is nothing to rotate to, and the
-                # backup should be held for the documented reset window
-                # instead of being re-probed on every request.
+                # The bucket that just answered 429 is already cordoned, so
+                # the next acquire lands on a sibling. A sibling answers
+                # with the SAME model and a 429 burns no quota, so walking
+                # the pool is strictly better than the backup chain (which
+                # serves a different model — or, out of balance, a 503).
+                # The walk is bounded: each 429 cordons its bucket, and the
+                # blackout check below stops the sweep once every bucket is
+                # benched.
                 blackout = (
                     float(blackout_probe()) if callable(blackout_probe) else 0.0
                 )
@@ -262,13 +255,23 @@ class ZenDirectAdapter:
                         extra={"blackout_s": round(blackout, 1)},
                     )
                     return quota_exhausted_result(blackout)
-                # A single-account hint must NOT become a blackout deadline:
-                # strip it so the failover wrapper treats this as a
-                # request-scoped failure instead of holding the backup.
+                if attempts > 0:
+                    _log_failover(
+                        kind="http_429_quota",
+                        remaining=attempts,
+                        detail=f"egress={lease.name}",
+                    )
+                    lease = await _acquire()
+                    continue
+                # Every attempt burned: request-scoped handoff to the
+                # backup chain. The single-account hint must NOT become a
+                # blackout deadline — strip it so the failover wrapper
+                # treats this as a request-scoped failure instead of
+                # holding the backup for the window.
                 hinted = result.pop("__quota_blackout_s__", None)
                 logger.warning(
-                    "quota verdict on one account; failing this request over "
-                    "to the backup chain",
+                    "quota verdict on every usable bucket; handing this "
+                    "request to the backup chain",
                     extra={
                         "egress": lease.name,
                         "retry_after_s": round(float(hinted), 1)
@@ -278,11 +281,9 @@ class ZenDirectAdapter:
                 )
                 return result
             if isinstance(status, int) and status >= 500:
-                # A 5xx is that account's failure: with a backup chain it
-                # ends this request (the chain answers it) instead of being
-                # retried on a sibling account.
-                if self._backup_configured:
-                    return result
+                # A 5xx is that bucket's failure: retry on a sibling first
+                # (same model), and only hand the request to the backup
+                # chain once the pool's attempts are used up.
                 attempts -= 1
                 if attempts <= 0:
                     return result
@@ -295,9 +296,9 @@ class ZenDirectAdapter:
             ):
                 # Defensive failover on a gate rejection: with the four-real-
                 # name toolset this should stay cold; if the gate tightens
-                # again, cordons + the rotator recover automatically.
-                if self._backup_configured:
-                    return self._egress_gate_answer(result)
+                # again, cordons + the rotator recover automatically. A
+                # sibling is tried before the backup chain, like every
+                # other bucket-scoped failure.
                 attempts -= 1
                 if attempts <= 0:
                     return self._egress_gate_answer(result)

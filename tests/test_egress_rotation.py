@@ -1210,3 +1210,50 @@ async def test_timer_retry_respects_the_per_window_cap() -> None:
     pending = rotator._retry_tasks.get("a")  # noqa: SLF001
     assert pending is None or pending.done()
     assert counters.counts("a").rotations == 2
+
+@pytest.mark.asyncio
+async def test_request_rotation_enforces_the_cap_on_every_trigger() -> None:
+    """The per-window cap must bind the TRIGGER paths, not only retries.
+
+    2026-10-29: the cap lived only in the failed-retry loop, so with
+    ZEN_ROTATE_ON_HARD_429 a bucket whose rotations kept *succeeding*
+    re-armed its own trigger after every attempt (reset() clears the
+    triggered flag) and logged 6 rotations against a cap of 5 -- each fresh
+    IP 429'd again within minutes, i.e. exactly the reboot storm the cap
+    exists to prevent.
+    """
+
+    pool = make_pool("a")
+    counters = EgressCounters({"a": 1_000_000}, retry_cooldown_s=0.01)
+    rotator = EgressRotator(
+        pool, counters, poll_s=0.01, timeout_s=0.05, max_rotations_per_window=2
+    )
+    mark_healthy_with_ip(pool)
+    respx.post("http://a:10001/rotate").respond(
+        json={"ok": True, "results": [{"ok": True, "ont": "x", "detail": ""}]}
+    )
+    # healthz always answers with a CHANGED ip so every attempt succeeds.
+    ips = iter(f"117.95.231.{n}" for n in range(10, 100))
+    respx.get("http://a:10001/healthz").mock(
+        side_effect=lambda _r: httpx.Response(
+            200, json={"ready": True, "egress_ip": next(ips)}
+        )
+    )
+
+    first = rotator.request_rotation("a", trigger="hard_429")
+    assert first is not None
+    await asyncio.wait_for(first, timeout=5.0)  # success #1 (rotations=1)
+    second = rotator.request_rotation("a", trigger="hard_429")
+    assert second is not None
+    await asyncio.wait_for(second, timeout=5.0)  # success #2 (rotations=2)
+
+    # Cap reached: the trigger path must refuse now -- this is the regression.
+    third = rotator.request_rotation("a", trigger="hard_429")
+    assert third is None
+    assert counters.counts("a").rotations == 2
+
+    # Admin requests bypass the cap on purpose.
+    forced = rotator.request_rotation("a", trigger="admin", force=True)
+    assert forced is not None
+    await asyncio.wait_for(forced, timeout=5.0)
+    assert counters.counts("a").rotations == 3

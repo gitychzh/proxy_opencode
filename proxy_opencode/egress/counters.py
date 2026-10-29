@@ -207,19 +207,22 @@ class EgressCounters:
             and (ts - rec.last_rotation_epoch) < self._hard_min_interval
         ):
             return False
-        # Evidence conflict, recorded rather than hidden: 0.7.12–0.7.16
-        # measured "fresh IP still 429s" (account-scoped), but 2026-10-29
-        # 09:15 measured the opposite — only owin10-mobile hard-429'd while
-        # the sibling buckets on the same account kept answering 200. The
-        # latest measurement says the allowance is per-IP, which is what
-        # makes a rotation (and the token budget below) meaningful. The gap
-        # is still reported as information, never as an error.
+        # Evidence note, recorded rather than hidden: 0.7.12–0.7.16 measured
+        # "fresh IP still 429s" (account-scoped), 2026-10-29 09:15 measured
+        # the opposite (mobile hard-429'd while sibling buckets on the same
+        # account kept answering 200), and the same evening showed a third
+        # shape — even a DEDICATED IP (win107) 429'd after ~6 requests and
+        # recovered on the same address minutes later. The verdict that
+        # survives: the 429 is IP-scoped but far shorter-lived than its
+        # Retry-After claims, so a rotation is a reasonable bet and the
+        # budget below is advisory. Either way the mismatch is information,
+        # never an error.
         budget = self._token_budgets.get(name, 0)
         if budget > 0 and 0 < rec.tokens < budget:
             logger.warning(
                 "upstream quota exhausted with %d/%d tokens counted on this "
-                "bucket: the allowance is account-scoped, so this budget "
-                "cannot predict it (informational)",
+                "bucket: the Retry-After outlives the real condition, so "
+                "this budget cannot predict it (informational)",
                 rec.tokens,
                 budget,
                 extra={

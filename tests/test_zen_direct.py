@@ -1193,31 +1193,75 @@ _SSE_OK = (
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_chat_429_ends_the_request_on_the_failing_account() -> None:
-    """Buckets are independent accounts: one quota verdict ends THIS request.
+async def test_chat_429_retries_on_a_sibling_before_the_backup() -> None:
+    """A quota verdict on one bucket is retried on a sibling first.
 
-    Owner decision 2026-10-29: the four egress buckets are four accounts. A
-    verdict on one is not evidence about the others, and walking the siblings
-    costs one upstream RTT each. The request is answered by the fallback chain
-    instead, while the pool cordons the dead account so the next request lands
-    on a sibling.
+    Owner decision 2026-10-29 21:00 CST (supersedes the same-day "backup
+    answers first" rule): a sibling answers with the SAME model and a 429
+    burns no quota, so walking the pool is strictly better than handing the
+    request to the backup chain — which, out of balance, turned every
+    single-bucket 429 into a hard 503 while three siblings sat healthy.
     """
+
+    seq = {"n": 0}
+
+    def _upstream(request: httpx.Request) -> httpx.Response:
+        if seq["n"] == 0:
+            seq["n"] += 1
+            return httpx.Response(429, json={"error": {"message": "FreeUsageLimitError"}})
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_SSE_OK
+        )
+
+    route = respx.post("https://opencode.ai/zen/v1/chat/completions").mock(
+        side_effect=_upstream
+    )
+    a, b = httpx.AsyncClient(), httpx.AsyncClient()
+    pool = _RollingStubPool({"bucket-a": a, "bucket-b": b})
+    # Backup chain configured: it must NOT be consulted while a sibling
+    # is available.
+    adapter = ZenDirectAdapter(
+        make_settings(zen_fallback_base_url="http://proxy-ms:10003/v1"),
+        pool=pool,  # type: ignore[arg-type]
+    )
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert route.call_count == 2
+    assert pool.releases == [
+        ("bucket-a", False, "http_429"),
+        ("bucket-b", True, ""),
+    ]
+    await a.aclose()
+    await b.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_chat_429_every_attempt_burned_hands_off_to_backup() -> None:
+    """When every attempt 429s, the last error surfaces to the failover
+    wrapper (backup chain) after the bounded walk — with the hold hint
+    stripped so the wrapper does not latch the backup for the window."""
 
     route = respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
         status_code=429, json={"error": {"message": "FreeUsageLimitError"}}
     )
     a, b = httpx.AsyncClient(), httpx.AsyncClient()
     pool = _RollingStubPool({"bucket-a": a, "bucket-b": b})
-    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    adapter = ZenDirectAdapter(
+        make_settings(zen_fallback_base_url="http://proxy-ms:10003/v1"),
+        pool=pool,  # type: ignore[arg-type]
+    )
     result = await adapter.chat(
         {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
     )
     assert result["__status__"] == 429
-    # One attempt only: no sibling sweep, and no blackout deadline leaking to
-    # the failover wrapper (that would hold the backup for hours).
-    assert route.call_count == 1
+    # Bounded walk: attempts = min(pool.size, FAILOVER_MAX_ATTEMPTS) = 2.
+    assert route.call_count == 2
     assert "__quota_blackout_s__" not in result
-    assert pool.releases == [("bucket-a", False, "http_429")]
+    assert [r[0] for r in pool.releases] == ["bucket-a", "bucket-b"]
     await a.aclose()
     await b.aclose()
     await adapter.aclose()
@@ -1266,12 +1310,12 @@ async def test_chat_mints_fresh_session_per_upstream_attempt() -> None:
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_chat_429_surfaces_immediately_without_walking_the_pool() -> None:
-    """Every bucket 429ing used to cost one upstream RTT each.
+async def test_chat_429_walk_is_bounded_without_backup() -> None:
+    """The sibling walk is bounded even without a backup chain configured.
 
-    Under the four-accounts model a quota verdict is terminal for the request:
-    the client-facing 429 is the *first* one, and the failover chain takes over
-    without a sibling sweep.
+    With no failover wrapper the last upstream error surfaces directly to
+    the client after ``min(pool.size, FAILOVER_MAX_ATTEMPTS)`` attempts —
+    the pool is never walked until the client times out.
     """
 
     route = respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
@@ -1284,8 +1328,8 @@ async def test_chat_429_surfaces_immediately_without_walking_the_pool() -> None:
         {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
     )
     assert result["__status__"] == 429
-    assert route.call_count == 1
-    assert pool.releases == [("bucket-a", False, "http_429")]
+    assert route.call_count == 2
+    assert [r[0] for r in pool.releases] == ["bucket-a", "bucket-b"]
     await a.aclose()
     await b.aclose()
     await adapter.aclose()
@@ -1293,16 +1337,24 @@ async def test_chat_429_surfaces_immediately_without_walking_the_pool() -> None:
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_chat_transport_failure_skips_siblings_when_backup_configured() -> None:
-    """A configured backup chain answers the request; siblings are not used.
+async def test_chat_transport_failure_walks_siblings_even_with_backup() -> None:
+    """A transport failure is retried on a sibling BEFORE the backup chain.
 
-    Owner decision 2026-10-29: buckets are independent accounts, so one
-    account's failure must surface as the documented fallback (proxy_ms) for
-    THIS request rather than being silently absorbed by a sibling account.
+    Supersedes the 2026-10-29 "backup answers first" decision: with the
+    backup out of balance, short-circuiting to it produced hard 503s while
+    sibling buckets were healthy. The pool walk is bounded (see
+    FAILOVER_MAX_ATTEMPTS); only a fully-spent pool raises to the wrapper.
     """
 
+    seq = {"n": 0}
+
     def _upstream(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection reset", request=request)
+        if seq["n"] == 0:
+            seq["n"] += 1
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_SSE_OK
+        )
 
     route = respx.post("https://opencode.ai/zen/v1/chat/completions").mock(
         side_effect=_upstream
@@ -1313,15 +1365,18 @@ async def test_chat_transport_failure_skips_siblings_when_backup_configured() ->
         make_settings(zen_fallback_base_url="http://proxy-ms:10003/v1"),
         pool=pool,  # type: ignore[arg-type]
     )
-    with pytest.raises(ConnectionError, match="zen request failed"):
-        await adapter.chat(
-            {
-                "model": "opencode/big-pickle",
-                "messages": [{"role": "user", "content": "q"}],
-            }
-        )
-    assert route.call_count == 1
-    assert pool.releases == [("bucket-a", False, "transport")]
+    result = await adapter.chat(
+        {
+            "model": "opencode/big-pickle",
+            "messages": [{"role": "user", "content": "q"}],
+        }
+    )
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert route.call_count == 2
+    assert pool.releases == [
+        ("bucket-a", False, "transport"),
+        ("bucket-b", True, ""),
+    ]
     await a.aclose()
     await b.aclose()
     await adapter.aclose()
@@ -1329,11 +1384,21 @@ async def test_chat_transport_failure_skips_siblings_when_backup_configured() ->
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_chat_5xx_skips_siblings_when_backup_configured() -> None:
-    """A 5xx from one account is that account's failure: no sibling sweep."""
+async def test_chat_5xx_retries_on_a_sibling_before_the_backup() -> None:
+    """A 5xx from one bucket is that bucket's failure: walk siblings first."""
 
-    route = respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
-        status_code=502, json={"error": {"message": "bad gateway"}}
+    seq = {"n": 0}
+
+    def _upstream(request: httpx.Request) -> httpx.Response:
+        if seq["n"] == 0:
+            seq["n"] += 1
+            return httpx.Response(502, json={"error": {"message": "bad gateway"}})
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_SSE_OK
+        )
+
+    route = respx.post("https://opencode.ai/zen/v1/chat/completions").mock(
+        side_effect=_upstream
     )
     a, b = httpx.AsyncClient(), httpx.AsyncClient()
     pool = _RollingStubPool({"bucket-a": a, "bucket-b": b})
@@ -1344,9 +1409,12 @@ async def test_chat_5xx_skips_siblings_when_backup_configured() -> None:
     result = await adapter.chat(
         {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
     )
-    assert result["__status__"] == 502
-    assert route.call_count == 1
-    assert pool.releases == [("bucket-a", False, "http_502")]
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert route.call_count == 2
+    assert pool.releases == [
+        ("bucket-a", False, "http_502"),
+        ("bucket-b", True, ""),
+    ]
     await a.aclose()
     await b.aclose()
     await adapter.aclose()
@@ -1739,7 +1807,8 @@ async def test_retry_after_alone_is_not_a_pool_wide_blackout() -> None:
     The deadline is only meaningful when the *pool* reports every account
     benched. Stamping it from one response turned one dead account into a
     chain-wide hold (2026-10-29), so the hint is stripped here and the
-    failover wrapper treats the fault as request-scoped.
+    failover wrapper treats the fault as request-scoped. With the sibling
+    walk enabled the walk itself is bounded (min(size, 3) attempts).
     """
 
     class _NeverBlackoutPool(_StubPool):
@@ -1763,7 +1832,7 @@ async def test_retry_after_alone_is_not_a_pool_wide_blackout() -> None:
         {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
     )
 
-    assert route.call_count == 1
+    assert route.call_count == 3
     assert result["__status__"] == 429
     assert "__quota_blackout_s__" not in result
 

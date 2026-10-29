@@ -116,7 +116,10 @@ def make_router(
                 "(missing ZEN_EGRESS_ROTATION entry).",
                 err_type="invalid_request_error",
             )
-        task = egress_rotator.request_rotation(name, trigger="admin")
+        # Operator action: bypass the per-window rotation cap (the cap is a
+        # storm guard for the automatic triggers, not a handbrake for the
+        # person who deliberately asked for a reset).
+        task = egress_rotator.request_rotation(name, trigger="admin", force=True)
         if task is None:
             return JSONResponse(
                 status_code=200,

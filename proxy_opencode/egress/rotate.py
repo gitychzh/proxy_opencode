@@ -210,14 +210,22 @@ class EgressRotator:
     # ------------------------------------------------------------ triggering
 
     def request_rotation(
-        self, name: str, *, trigger: str
+        self, name: str, *, trigger: str, force: bool = False
     ) -> asyncio.Task[RotationOutcome] | None:
         """Start one rotation for ``name`` (at most one task per bucket).
 
-        Returns the task, or None when the bucket has no ONT configured or
-        a rotation is already running. Non-rotatable buckets are rejected
-        outright (e.g. the ECS host itself runs an agent but must never
-        reboot anything).
+        Returns the task, or None when the bucket has no ONT configured,
+        a rotation is already running, or the per-window rotation cap is
+        reached (``force=True`` bypasses the cap — admin API only). The
+        cap is enforced HERE, on every trigger path: it used to live only
+        in the failed-retry loop, so with ``ZEN_ROTATE_ON_HARD_429`` a
+        bucket whose rotations kept *succeeding* re-armed its own trigger
+        after every attempt and the per-window cap never applied (measured
+        2026-10-29: mobile/cc9 logged 6 rotations against a cap of 5 —
+        each fresh IP 429'd again within minutes, so the storm guard the
+        cap exists for was effectively off). Non-rotatable buckets are
+        rejected outright (e.g. the ECS host itself runs an agent but must
+        never reboot anything).
         """
 
         if not self.rotatable(name):
@@ -229,6 +237,24 @@ class EgressRotator:
         if self.running(name):
             logger.info(
                 "rotation already running", extra={"egress": name, "trigger": trigger}
+            )
+            return None
+        if not force and self._counters.counts(name).rotations >= self._max_rotations:
+            logger.warning(
+                "rotation cap reached for this window; refusing (admin "
+                "requests bypass the cap)",
+                extra={
+                    "egress": name,
+                    "trigger": trigger,
+                    "rotations": self._counters.counts(name).rotations,
+                    "cap": self._max_rotations,
+                },
+            )
+            EVENTS.emit(
+                "rotation_retry_skipped",
+                egress=name,
+                reason="cap",
+                rotations=self._counters.counts(name).rotations,
             )
             return None
         EVENTS.emit("rotation_requested", egress=name, trigger=trigger)
