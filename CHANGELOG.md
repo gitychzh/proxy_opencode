@@ -5,6 +5,25 @@
 
 ## [Unreleased]
 
+### Removed — 223722.xyz 的 LLM 域名入口整体删除（2026-10-29）
+
+大陆节点走域名需 ICP 备案，用户决定至少一年内不再使用域名入口，要求连 DNS
+一起清空。判据：`zen-gw` 隧道 26 小时累计仅 4 次请求（含 2 次清理前的验证
+探针），零真实业务；网关流量全部走内网与 IP 直连，域名不承载任何链路。
+
+* **Cloudflare DNS**（zone `223722.xyz`）：删除 `llm` / `llm2` / `gw2` /
+  `zen-gw` / `zen` 五条记录。**保留** 根域 / `www` / `job` / `jsj`（Pages
+  站点）与 `phone`（phone 设备隧道，4 条活跃连接）——与网关无关。
+* **隧道**：`zen-gw`（`420b27fc`）与 `llm-gateway`（`8e86d61b`，conns=0）
+  已 delete；仅剩 `phone-cc9`（`f51388ad`）。
+* **ECS**：`cloudflared-tunnel.service` 停止 / disable / 删 unit；
+  `/etc/cloudflared`、`/root/.cloudflared`、`/usr/bin/cloudflared`（39M）删除。
+* **未动**：出口桶（`owin10-mobile` / `owin10-telecom` / `cc9` / `esp32`）、
+  ECS `10002` 入口、本机 `8787` 网关、egress-agent 与计划任务。
+* 退役证据：`.workbuddy/memory/retired-223722xyz/`（清理前隧道与 DNS 清单）。
+* 重建路径：先 ICP 备案 → `cloudflared tunnel create/login` → 重新添加 ingress
+  与 DNS 记录。历史配置模板见本 commit 前的 git 历史。
+
 ### Fixed — 换 IP 三个触发器全部失效（0.8.6，2026-10-29）
 
 用户判定「理论上不存在配额耗尽——所有桶都有换 IP 机制；出现了就是代码问题」。

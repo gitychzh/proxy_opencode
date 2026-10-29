@@ -23,8 +23,8 @@
 ## 2. 闭环四层
 
 ```
-① 流量层   WorkBuddy / Hermes ──▶ https://llm.223722.xyz/v1 ──▶ 网关 zen-gw
-                                                               │
+① 流量层   WorkBuddy / Hermes ──▶ http://115.29.231.25:10002/v1 ──▶ 网关 zen-gw
+                                                              │
 ② 观测层   ┌────────────────────────────────────────────────┬──┴────────────────┬─────────────┐
            │ /data/egress_events.jsonl  (JSONL 事件账本)     │ docker logs        │ /admin/egresses │
            │ cordon/rotation/fallback/window_rollover/ip     │ chat completion    │ 快照            │
@@ -248,7 +248,7 @@ WantedBy=timers.target
 
 ## 8. WorkBuddy 的循环职责
 
-1. **产生流量**：日常编码/问答走 `https://llm.223722.xyz/v1`（别名
+1. **产生流量**：日常编码/问答走 `http://115.29.231.25:10002/v1`（别名
    `deepseek-ai/deepseek-v4.1-flash`），本身就是闭环输入。
 2. **读报告**：拉 `/data/self_opt_report.md`（或本地跑 CLI）。
 3. **执行**：按 §6 分级——T0 直接改 `.env` 并 `docker compose up -d`；T1 改代码 +

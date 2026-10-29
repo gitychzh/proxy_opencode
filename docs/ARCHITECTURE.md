@@ -12,8 +12,8 @@
 ```
 hermes / codex / 任意 OpenAI 兼容客户端
    │ http://115.29.231.25:10002/v1    (明文 + API key；唯一入口)
-   │ https://llm.223722.xyz:443/v1    (已下线：2026-10-29 删除 cloudflared
-   │                                   隧道与 zen-lb，域名无后端)
+   │ (无域名入口：2026-10-29 起 223722.xyz 的 LLM 记录与隧道全部删除，
+   │  域名为空，需 ICP 备案后才可能重建)
    ▼
 ECS ┌───────────────────────────────────────────────────────────────┐
     │ docker zen-gw-edge  :10002（公网唯一入口；只做透传 + 路由选择） │
@@ -57,6 +57,7 @@ cordon、换 IP、failover 语义与传输无关。
 | 10003 | proxy_ms（ECS 宿主） | 备用链路网关，见 §7 |
 | 20001 / 20002 | proxy_nv（ECS 宿主，caddy `:20002`） | 与本栈无关，不动 |
 | 9443 / 7892 / 8791 / 8793 | 旧栈 | `since-retired`：9443/7892/8793 于 2026-10-17 清退；**8791/8793 于 2026-10-29 彻底下线**（`ProxyOpencodeBoot` 计划任务已注销，`C:/Users/owin10/proxy_opencode/` 部署树、日志、payload_dump 已删，仓库 `start_gateway.bat` 已移除）。最后成功业务调用 2026-10-03，此后仅旧 LB 健康检查空转 |
+| 443（域名入口） | 223722.xyz | `since-retired`：**2026-10-29 域名入口整体删除**——`llm` / `llm2` / `gw2` / `zen-gw` / `zen` 五条 DNS 记录删除，`zen-gw` 与 `llm-gateway` 隧道 delete，ECS 上 `cloudflared` 二进制 + unit + 配置 + 凭据全清。重建需先 ICP 备案 |
 | 40016 / 40066 | GLM 网关 | 与本栈无关，不动 |
 
 安全组只放行 10002。设备侧 10001/10002 只听 Tailscale，另有 agent basic auth。

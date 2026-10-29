@@ -137,10 +137,10 @@ TLS 两方案（历史）：
 
 1. **IP + 自签 CA**：复用 `/etc/caddy/certs/gw.crt` / `gw.key`（hermes 已
    pin 该 CA，`ssl_ca_cert` 不变）。
-2. **域名 + LE 真证书（客户零安装）**：`llm.223722.xyz` 的 A 记录**灰云**（仅
-   DNS，不走 CF 代理——CF 海外绕行实测慢 10 倍）直指 ECS IP，caddy 用 Cloudflare
-   DNS-01 签证书。CF API Token（Zone.DNS:edit）写入 caddy 服务环境
-   （`systemctl edit caddy` → `Environment=CF_API_TOKEN=...`），不进仓库。
+2. **域名 + LE 真证书（客户零安装）** —— **2026-10-29 已废弃**，域名入口整体
+   删除（DNS 记录、隧道、cloudflared 二进制全清）。当年方案：`llm.223722.xyz`
+   的 A 记录**灰云**（仅 DNS，不走 CF 代理——CF 海外绕行实测慢 10 倍）直指 ECS
+   IP，caddy 用 Cloudflare DNS-01 签证书。重建需先 ICP 备案。
 
 ## 回滚
 

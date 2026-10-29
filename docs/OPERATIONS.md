@@ -26,10 +26,13 @@
 > 2026-10-28 变更：取消 caddy TLS 中转，容器直接发布 `10002`。理由——客户端
 > 装证书的代价大于收益（用户明确否决）；域名链路实测 23–68s，不可用。
 
-> 域名入口 `llm.223722.xyz` **已彻底下线**（2026-10-29）：`100.90.84.65` 上的
-> `cloudflared-tunnel` 与 `zen-lb` 已停止、disable 并删除 unit，`/etc/cloudflared`
-> 与 `/root/.cloudflared` 已删。2026-10-25 它就已不可用（只剩 `http_status:404`
-> 兜底规则）；本次是把无源的空壳一并清退。见 ARCHITECTURE §10。
+> 域名入口 **已彻底移除**（2026-10-29）：Cloudflare 上的 `llm` / `llm2` / `gw2` /
+> `zen-gw` / `zen` 五条 DNS 记录已删除，`zen-gw` 与 `llm-gateway` 两条隧道已
+> delete；ECS 侧 `cloudflared` 二进制、`cloudflared-tunnel.service`、
+> `/etc/cloudflared`、`/root/.cloudflared` 全部删除。2026-10-25 它就已不可用
+> （只剩 `http_status:404` 兜底），本次把空壳连 DNS 一起清退。原因是大陆节点
+> 走域名需 ICP 备案，用户决定至少一年不用域名入口。见 ARCHITECTURE §10。
+> Zone 内与网关无关的记录（根域 / `www` / `job` / `jsj` / `phone`）保留未动。
 
 对外只暴露一个掩码别名 `deepseek-ai/deepseek-v4.1-flash`（`PUBLIC_MODELS` 第三
 列决定上游，当前 `big-pickle`）。旧栈（`9443` + `zen-lb` + 各设备完整网关）已于
@@ -439,9 +442,9 @@ XDG_DATA_HOME=$PWD/xdg opencode run "reply with the single word OK" \
    额度；同出口桶越多，单 IP 额度越快烧穿。
 3. **容器时区**：容器 UTC（计数窗口按 Asia/Shanghai 计算，不受影响）；对账需
    加 `TZ` 并重建。
-4. **公网入口域名化**：当前只剩 IP 直连（需分发/更新自签 CA）。域名入口
-   `llm.223722.xyz` 实测 404（cloudflared 无 hostname ingress），修复方案见
-   ARCHITECTURE §10；大陆节点走域名还需 ICP 备案。
+4. **公网入口域名化**：当前只剩 IP 直连（需分发/更新自签 CA）。域名入口已于
+   2026-10-29 全部删除（DNS + 隧道 + cloudflared），大陆节点走域名还需 ICP
+   备案——用户决定至少一年内不重建。
 5. **`/healthz` 暴露桶拓扑与错误摘要**：应评估收至管理员接口或脱敏。
 6. **上游偶发 400**：`stream=false, tools=false` 形态（2026-10-25 起 24h 内
    1 次），错误体原样透传；三种常见请求体复现均 200，未定位触发字段。下次
@@ -456,9 +459,11 @@ XDG_DATA_HOME=$PWD/xdg opencode run "reply with the single word OK" \
   MTU 1480、经 Tailscale 直连 ECS。
 - **直连入口被拦（10-03）**：杭州 ECS 受阿里云 ICP 合规拦截，按 `Host` 头 /
   TLS `SNI` 的**域名**生效且不限端口；`223722.xyz` 未备案 → 全端口被封。故
-  客户端连 **IP 字面量**（不发 SNI）绕过；`llm.223722.xyz` 能用是因为 CF 在边缘
-  终止 TLS、cloudflared 主动出站。
+  客户端连 **IP 字面量**（不发 SNI）绕过；当年 `llm.223722.xyz` 能用是因为 CF
+  在边缘终止 TLS、cloudflared 主动出站。该域名族已于 2026-10-29 整体删除。
 - **旧栈端口/服务**：`9443`、`zen-lb:7892`、`zen-glm53`、`cloudflared-ingress`
-  均已停止并删除；历史文档里的 `llm2.223722.xyz` 计划命令**不是**当前步骤。
+  均已停止并删除；`cloudflared` 二进制与全部隧道（`zen-gw` / `llm-gateway`）
+  亦于 2026-10-29 删除。历史文档里的 `llm2.223722.xyz` 计划命令**不是**当前
+  步骤，该记录已不存在。
 - **opc2**：设备已永久下线；其 uid 策略路由、ONT cron 等记录见
   `egress-agent/deploy/README.md` 与 `ARCHITECTURE.md` §10。

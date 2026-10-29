@@ -16,11 +16,14 @@
 | 桶状态 / 手动换 IP | `http://127.0.0.1:10002/admin/egresses[/{name}/rotate]` | 管理员 key，**公网可达**（明文入口的代价） |
 | 设备侧 agent | `<tailscale-ip>:10001`（owin10 第二上行 `:10002`） | CONNECT/rotate 用 Basic |
 
-> **域名入口已下线（2026-10-29）**：`llm.223722.xyz` 曾解析到 Cloudflare，但
-> `cloudflared` 隧道自 2026-10-25 起无 hostname ingress（只剩 404 兜底），`443`/`10002`
-> 也不在 CF 代理端口白名单。2026-10-29 已在 `100.90.84.65` 上把
-> `cloudflared-tunnel` + `zen-lb` 停止、disable 并删除 unit，配置与凭据目录一并删除；
-> 该域名现在**无任何后端**。现役入口只用 ECS 明文 `10002`。
+> **域名入口已彻底移除（2026-10-29）**：`llm.223722.xyz` / `llm2` / `gw2` /
+> `zen-gw` / `zen` 五条 DNS 记录已从 Cloudflare 删除，`zen-gw` 与 `llm-gateway`
+> 两条隧道已 delete，ECS 上的 `cloudflared` 二进制、unit、`/etc/cloudflared`
+> 与 `/root/.cloudflared` 全部清除。**该域名族在整个体系中不再存在任何入口**。
+> 原因：大陆节点走域名需 ICP 备案，用户决定至少一年内不再使用域名入口。
+> 现役入口只用 ECS 明文 `10002`（生产）与本机 `8787`（桌面端）。
+> Zone 内保留的 `223722.xyz` 根域 / `www` / `job` / `jsj`（Pages 站点）与
+> `phone`（phone 设备隧道）与网关无关，未动。
 
 聊天接口只接受公开别名 `deepseek-ai/deepseek-v4.1-flash`，上游裸 ID 返回 404。
 
