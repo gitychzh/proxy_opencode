@@ -3,7 +3,7 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
-## [0.8.2] - 2026-10-29
+## [0.8.3] - 2026-10-29
 
 ### Fixed — 一次软探针失败就摘桶，把健康桶从轮询里踢掉
 
