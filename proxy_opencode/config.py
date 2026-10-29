@@ -346,6 +346,18 @@ class Settings:
     # cordon length. A dead leg stops winning picks without being banned.
     #   ZEN_EGRESS_COOLDOWN_MAX_S=300
     zen_egress_cooldown_max_s: float = 300.0
+    # Ceiling on a hard-429 cordon. A 429 carrying "Retry-After > 1h" is read
+    # as a burned per-IP daily allowance and used to bench the bucket until
+    # the upstream window reset (up to ~12h). That is too long: the verdict's
+    # Retry-After merely names the window end, while the real condition often
+    # clears in minutes. Measured 2026-10-29 20:50 CST — `owin10-mobile` was
+    # cordoned at 12:34 UTC on the same IP and answered 200 again at 12:47,
+    # i.e. an 11-hour bench for a 12-minute outage; with the backup chain out
+    # of balance every request in between became a hard 503. Capping the
+    # bench makes an expired verdict get re-tested, and one 200 lifts it
+    # (a 429 costs no quota, so the retry is free). 0 = old behaviour.
+    #   ZEN_QUOTA_CORDON_MAX_S=1800
+    zen_quota_cordon_max_s: float = 1800.0
     # Floor between two hard-429 rotations of the SAME bucket. A 429 is
     # ambiguous (transport gate / stale-prompt body gate / session reuse /
     # real per-IP quota all ship the same FreeUsageLimitError), and only the
@@ -719,6 +731,9 @@ def load_settings() -> Settings:
         zen_egress_cooldown_s=float(os.environ.get("ZEN_EGRESS_COOLDOWN_S", "20")),
         zen_egress_cooldown_max_s=float(
             os.environ.get("ZEN_EGRESS_COOLDOWN_MAX_S", "300")
+        ),
+        zen_quota_cordon_max_s=float(
+            os.environ.get("ZEN_QUOTA_CORDON_MAX_S", "1800")
         ),
         zen_egress_rotate_min_interval_s=float(
             os.environ.get("ZEN_EGRESS_ROTATE_MIN_INTERVAL_S", "1800")

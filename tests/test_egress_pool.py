@@ -243,8 +243,15 @@ async def test_three_consecutive_failures_demote_but_never_cordon() -> None:
 
 
 @pytest.mark.asyncio
-async def test_429_cordons_until_next_window_reset() -> None:
-    pool = make_pool("a")
+async def test_429_cordons_until_next_window_reset_when_cap_is_off() -> None:
+    """ZEN_QUOTA_CORDON_MAX_S=0: the bench runs to the 08:00 CST window reset.
+
+    The capped default is covered by
+    ``test_hard_429_cordon_is_capped_by_quota_cordon_max``; this case keeps the
+    opt-out path honest.
+    """
+
+    pool = make_pool("a", quota_cordon_max_s=0.0)
     state = pool._states[0]
     state.healthy = True
     lease = await pool.acquire()
@@ -695,6 +702,45 @@ async def test_late_hard_429_does_not_shorten_a_live_cordon() -> None:
     assert state.cordon_reason.startswith("free_quota_exhausted")
 
 
+@pytest.mark.asyncio
+async def test_hard_429_cordon_is_capped_by_quota_cordon_max() -> None:
+    """A hard 429 benches the bucket for the cap, not until the window reset.
+
+    2026-10-29 20:50 CST: `owin10-mobile` was cordoned `free_quota_exhausted`
+    with Retry-After 41106s and answered 200 again on the SAME IP 12 minutes
+    later. Trusting Retry-After cost that bucket the rest of the day, and —
+    with the backup chain out of balance — turned every request in between
+    into a 503. The bench must expire so the verdict gets re-tested.
+    """
+
+    pool = make_pool("a", quota_cordon_max_s=1800.0)
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    assert seconds_to_window_reset() > 3600.0  # sanity: the window is far away
+
+    lease = await pool.acquire()
+    await pool.release(lease, ok=False, kind="http_429", retry_after_s=41106.0)
+
+    assert state.cordon_reason.startswith("free_quota_exhausted")
+    remaining = state.cordon_remaining_s(time.monotonic())
+    assert 1795.0 <= remaining <= 1800.0, remaining
+
+
+@pytest.mark.asyncio
+async def test_quota_cordon_cap_zero_restores_window_length() -> None:
+    """ZEN_QUOTA_CORDON_MAX_S=0 keeps the historical end-of-window bench."""
+
+    pool = make_pool("a", quota_cordon_max_s=0.0)
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+
+    lease = await pool.acquire()
+    await pool.release(lease, ok=False, kind="http_429", retry_after_s=41106.0)
+
+    remaining = state.cordon_remaining_s(time.monotonic())
+    assert remaining == pytest.approx(seconds_to_window_reset(), abs=30.0)
+
+
 # ------------------------------------------------------- probe robustness
 #
 # 2026-10-25: a ConnectTimeout against an agent escaped to the probe loop,
@@ -917,12 +963,16 @@ async def test_probe_tolerates_non_object_health_payload() -> None:
 async def test_quota_blackout_requires_every_bucket_to_be_benched() -> None:
     """Pool-wide blackout is an all-or-nothing verdict.
 
-    The free tier meters the account, not the IP (measured 2026-10-29: four
-    egress IPs plus a fresh MiFi IP all 429'd together), so a single healthy
+    The allowance is metered per egress IP (settled 2026-10-29 09:15: mobile
+    hard-429'd while telecom/cc9 kept answering 200), so a single healthy
     bucket means the pool can still serve and the blackout must read 0.
+
+    Runs with the cordon ceiling disabled so the "benched to the window reset"
+    shape is what gets asserted; with the capped default the blackout is
+    merely bounded (see test_hard_429_cordon_is_capped_by_quota_cordon_max).
     """
 
-    pool = make_pool("a", "b")
+    pool = make_pool("a", "b", quota_cordon_max_s=0.0)
     for state in pool._states:  # noqa: SLF001
         state.healthy = True
     assert pool.quota_blackout_s() == 0.0

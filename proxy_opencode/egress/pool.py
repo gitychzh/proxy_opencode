@@ -92,6 +92,7 @@ class EgressPool:
         failure_threshold: int = 3,
         cooldown_s: float = 20.0,
         cooldown_max_s: float = 300.0,
+        quota_cordon_max_s: float = 1800.0,
         probe_fail_tolerance: int = 1,
         observer: ReleaseObserver | None = None,
         last_resort: frozenset[str] = frozenset(),
@@ -113,6 +114,10 @@ class EgressPool:
         # stops winning picks without ever being banned.
         self._cooldown_s = max(1.0, float(cooldown_s))
         self._cooldown_max_s = max(self._cooldown_s, float(cooldown_max_s))
+        # Ceiling on the hard-429 cordon (see the http_429 branch of
+        # release()). 0 disables the ceiling and restores the old
+        # "benched until the window reset" behaviour.
+        self._quota_cordon_max_s = max(0.0, float(quota_cordon_max_s))
         # Consecutive soft probe failures tolerated before a bucket is pulled
         # (see _probe_one). Never below 1: a tolerance of 0 would mean "pull
         # the bucket before the first failure", which is the same as 1.
@@ -153,6 +158,11 @@ class EgressPool:
             ),
             cooldown_max_s=float(
                 getattr(settings, "zen_egress_cooldown_max_s", 300) or 300
+            ),
+            # No `or` default here: 0 is a meaningful value (disable the
+            # ceiling and fall back to "benched until the window reset").
+            quota_cordon_max_s=float(
+                getattr(settings, "zen_quota_cordon_max_s", 1800.0)
             ),
             probe_fail_tolerance=int(
                 getattr(settings, "zen_egress_probe_fail_tolerance", 1) or 1
@@ -296,12 +306,15 @@ class EgressPool:
     def quota_blackout_s(self, now: float | None = None) -> float:
         """Seconds of *pool-wide* quota blackout, or 0 when any bucket can serve.
 
-        The upstream's free tier meters an account, not an IP (measured
-        2026-10-29: four egress IPs plus the ECS's own IP plus a freshly
-        rebooted MiFi IP all answered ``FreeUsageLimitError`` within minutes).
-        So when every bucket carries a quota verdict there is nothing left to
-        try: the caller should answer 429 immediately and let the fallback
-        chain take over instead of paying one upstream RTT per dead bucket.
+        The free tier meters each egress IP separately (settled 2026-10-29
+        09:15: mobile hard-429'd while telecom/cc9 answered 42 requests with
+        200s, and cc9 recovered right after an IP change; the earlier
+        "account-scoped" reading is retired). When *every* bucket carries a
+        quota verdict there is nothing left to try: the caller should answer
+        429 immediately and let the fallback chain take over instead of paying
+        one upstream RTT per dead bucket. The reported duration is bounded by
+        ZEN_QUOTA_CORDON_MAX_S like the cordons themselves, so a blackout is
+        re-tested instead of being trusted for the rest of the day.
         """
 
         now = time.monotonic() if now is None else now
@@ -415,15 +428,25 @@ class EgressPool:
             # verdict: benching the bucket until UTC midnight for a 30s
             # throttle used to cost the bucket the rest of the day. Only the
             # hard shape (Retry-After > 1h, or none at all) means the
-            # account's allowance is gone.
+            # allowance is gone.
             #
-            # Scope (corrected 2026-10-29 02:00 CST): the allowance is
-            # ACCOUNT-scoped, not per-IP. Four egress IPs, the ECS's own IP
-            # and a freshly rebooted MiFi IP (111.55.72.119 -> 111.55.74.1)
-            # all returned FreeUsageLimitError within minutes of each other,
-            # with the same Retry-After pointing at the 08:00 window reset.
-            # Rotation therefore buys a fresh rate-limit bucket, never new
-            # quota; only the reset does.
+            # Scope (per-IP, settled 2026-10-29 09:15): the allowance is
+            # metered per egress IP, not per account — mobile hard-429'd while
+            # telecom/cc9 answered 42 requests with 200s, and cc9 recovered
+            # immediately after an IP change (the 0.7.12-0.7.16 "account
+            # scoped" reading is retired).
+            #
+            # Duration (capped 2026-10-29 20:50 CST): Retry-After on a hard
+            # 429 names the window reset, but the real condition often clears
+            # far sooner. Measured tonight: `owin10-mobile` was cordoned
+            # `free_quota_exhausted` at 12:34 UTC (Retry-After 41106s) and
+            # answered 200 again on the SAME IP (36.149.54.10) at 12:47 —
+            # a 12-minute outage cost that bucket 11 hours of rotation and,
+            # with the backup chain out of balance, turned every subsequent
+            # request into a 503. The cordon is therefore bounded by
+            # ZEN_QUOTA_CORDON_MAX_S so an expired verdict is re-tested
+            # instead of being trusted for the rest of the day; a single
+            # 200 lifts it (see the ok branch above).
             soft_s = (
                 retry_after_s
                 if retry_after_s is not None and retry_after_s <= HARD_QUOTA_RETRY_AFTER_S
@@ -438,10 +461,16 @@ class EgressPool:
                     detail={"retry_after_s": round(float(soft_s), 1)},
                 )
             else:
+                window_s = seconds_to_window_reset()
+                capped = (
+                    min(window_s, self._quota_cordon_max_s)
+                    if self._quota_cordon_max_s > 0
+                    else window_s
+                )
                 self._enter_cordon(
                     state,
-                    now + seconds_to_window_reset(),
-                    "free_quota_exhausted (account daily quota)",
+                    now + capped,
+                    "free_quota_exhausted (per-IP daily quota)",
                     event_reason="free_quota_exhausted",
                     detail={
                         "reset_at": datetime.fromtimestamp(
@@ -450,6 +479,8 @@ class EgressPool:
                         "retry_after_s": round(retry_after_s, 1)
                         if retry_after_s is not None
                         else None,
+                        "cordon_s": round(capped, 1),
+                        "capped_from_window_s": round(window_s, 1),
                     },
                 )
         elif kind == "free_tier_rejected":

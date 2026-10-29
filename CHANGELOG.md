@@ -5,6 +5,34 @@
 
 ## [Unreleased]
 
+### Fixed — 429 硬隔离时长不再信任 Retry-After（0.8.7，2026-10-29）
+
+上游 429 的 `Retry-After` 指向窗口重置（最多约 12 小时），但**真实条件常常几分钟
+就恢复**。旧逻辑据此把桶隔离到日界，等于把一个短故障放大成整天的停机；兜底链
+（proxy_ms）当天又欠费，于是隔离期间每个请求都变成硬 503。实测证据：
+
+* 12:34:55 UTC `owin10-mobile`（IP `36.149.54.10`）以 `Retry-After=41106s`
+  被判 `free_quota_exhausted`，隔离到 `2026-10-30T08:00+08`；
+* 12:47:05 UTC **同一个 IP** 返回 200（经 `bun upstream attempt:
+  proxy=100.109.109.108:10001` 确认），间隔 12 分钟；
+* 同日 `cc9` 亦在 12:01 判隔离、12:47 恢复服务。
+
+改动：新增 `ZEN_QUOTA_CORDON_MAX_S`（默认 **1800**，0 = 保留旧行为），把
+`free_quota_exhausted` 的隔离时长封顶为
+`min(距窗口重置, 上限)`；到期后桶自动回到轮换，任意一次 200 立即解除（429 不烧
+额度，重试免费）。`quota_blackout_s()` 同步受该上限约束，不再对外宣称"整天黑洞"。
+事件 `cordon` 明细新增 `cordon_s` / `capped_from_window_s` 两项，便于回看当时
+窗口距离。同时把两条过时注释（"额度是账号级"）改为已定案的 per-IP 口径。
+
+### Added — 第 5 个出口桶 `win107`（2026-10-29）
+
+`100.109.109.107`（江苏宿迁电信 `218.93.215.38`，独享公网 IP）装 Windows
+egress-agent，端口 `10001`，计划任务 `EgressAgent-win107`（SYSTEM/ONSTART）。
+与移动/联通 CGNAT 桶的差别：它的 IP 不与他人共享，换到的 IP 不会被别人提前
+烧穿。**无 ONT 驱动**，故只入 `ZEN_EGRESS_PROXIES` / `ZEN_EGRESS_EXPECT_PREFIX`，
+不入 `ZEN_EGRESS_ROTATION` / `ZEN_EGRESS_TOKEN_ROTATION`：它靠 429 反应式兜底，
+不主动换 IP。
+
 ### Removed — 223722.xyz 的 LLM 域名入口整体删除（2026-10-29）
 
 大陆节点走域名需 ICP 备案，用户决定至少一年内不再使用域名入口，要求连 DNS

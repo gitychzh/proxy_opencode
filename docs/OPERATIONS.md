@@ -161,6 +161,7 @@ rollback 镜像；③上传包用完即删，部署树里不许出现 `__pycache
 | `owin10-telecom` | `100.109.109.108:10002`（WiFi `bind_source 192.168.2.235`） | `180.117.x` / `121.234.x` 电信 | ONT HG8020C `kind=huawei_ct`，实弹成功；前缀含 `180.117.0.0/16` |
 | `cc9` | `100.87.219.115:10001` | `116.147.x` / `122.195.x` 联通 | chroot agent + Magisk 看门狗；ONT HG6142A-C `kind=fenghuo` |
 | `esp32-bucket` | ECS 本机适配器 `172.18.0.1:10005`（systemd `esp32-bucket-adapter.service`，HELLO 鉴权协议 v4） | MiFi 移动（`egress_ip` 由控制通道源地址实测，`egress_ip_source=control-peer`） | ESP32 反向隧道；**隧道空闲上限曾 20s（<网关 60s 首字节期限）导致慢请求全灭，0.7.9 修固件为 180s，需重烧**；3 连败自动 cordon；换 IP 用 `tools/reboot_mifi.py` |
+| `win107` | `100.109.109.107:10001`（Windows 10，宿迁电信，**独享公网 IP**） | `218.93.215.38` | 2026-10-29 新增。计划任务 `EgressAgent-win107`（SYSTEM/ONSTART），包在 `C:\egress-agent\`，配置在 `C:\ProgramData\egress-agent\win107.json`。**无 ONT 驱动**：只入 `PROXIES/EXPECT_PREFIX`，不入 `ROTATION/TOKEN_ROTATION`（靠 429 反应式，不主动换 IP）。价值在于它的 IP 不与 CGNAT 用户共享，不会被别人提前烧穿 |
 | ~~`win10`~~ | — | — | 2026-10-25 移出池：与 owin10-mobile 同 CGNAT 出口、无独立换 IP 能力 |
 | ~~`ecs` 本机桶~~ | — | — | 2026-10-17 移出：机房 IP 共享流量即耗 |
 
@@ -168,6 +169,7 @@ rollback 镜像；③上传包用完即删，部署树里不许出现 `__pycache
 
 ```
 ZEN_EGRESS_PROXIES / ZEN_EGRESS_EXPECT_PREFIX / ZEN_EGRESS_ROTATION   # 三处桶清单必须同步
+ZEN_QUOTA_CORDON_MAX_S=1800    # 429 硬隔离封顶（0=隔离到日界；见 §4.1 结尾）
 ZEN_EGRESS_TOKEN_ROTATION      # 主触发：每桶每窗口估算 prompt tokens 上限（生产 1.2M，见下）
 ZEN_ROTATE_ON_HARD_429=true    # 硬 429 = IP 配额判决 → 立即换 IP（0.8.6 起生产开启）
 ZEN_BUN_TRANSPORT=1            # 传输栈门：生产必须走 bun
@@ -308,6 +310,17 @@ telecom/cc9 继续 42 发全 200（额度按 IP 计）；cc9 实弹换 IP
 `ZEN_MODEL_MAP` 映射到免费 id——0.7.17 起两者都生效，别名发布即映射。
 `403 FreeTierError` = 形状门（内置工具名不全或 `stream:false`）+ 出口 IP 门槛
 （防御路径）；网关按 `ZEN_TOOLS_MODE=full` 注入全部 12 个内置工具。
+
+**429 的 Retry-After 不等于"这个 IP 今天废了"（0.8.7 定案）**：硬 429 的
+`Retry-After` 一律指向窗口重置（最多约 12h），但真实条件常常十几分钟就恢复。
+2026-10-29 实测：`owin10-mobile` 的 `36.149.54.10` 在 12:34:55 UTC 被判
+`free_quota_exhausted`（`Retry-After=41106s`），12:47:05 **同一个 IP** 回来
+200；`cc9` 同样在 12:01 判隔离、12:47 恢复。所以 0.8.7 起隔离时长封顶
+`ZEN_QUOTA_CORDON_MAX_S`（默认 1800s），到期自动回轮换，任意一次 200 立即
+解除——429 不烧额度，重试是免费的。看到 `cordon` 事件里
+`capped_from_window_s` 远大于 `cordon_s` 就是这个封顶在生效。
+**判据**：若某桶被隔离后一直不回来，先看 `cordon_remaining_s` 是否还有几十秒
+（说明在封顶循环里），而不是直接判定"额度到日界"。
 
 **慢请求（>60s）先分相，再谈归因**：`chat completion.latency_ms` 与同 request_id
 的 `stream ended.duration_ms` 之差就是「首字节前」的耗时。
