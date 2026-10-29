@@ -23,8 +23,10 @@ Authority for every rule above: AGENTS.md 硬约束 1.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from typing import Any, Mapping
 from urllib.parse import quote_plus, urlparse
 
@@ -362,6 +364,7 @@ class ZenDirectAdapter:
                 body=json.dumps(body).encode("utf-8"),
                 proxy_url=self._egress_proxy_url(lease),
                 timeout_s=float(self._settings.zen_timeout_s),
+                ttfb_s=self._header_deadline_s(lease),
             )
         except BunTransportError as exc:
             await self._release(lease, ok=False, kind="transport")
@@ -388,7 +391,22 @@ class ZenDirectAdapter:
             "POST", f"{self._base}/chat/completions", json=body, headers=headers
         )
         try:
-            resp = await client.send(req, stream=True)
+            # The deadline is applied to the HEADER phase only: with
+            # stream=True httpx returns as soon as the response head is in,
+            # so wrapping the send (not the body iteration) shortens the
+            # wait for a demoted bucket without imposing a 15s read timeout
+            # on the streamed body — that is STREAM_STALL_S's job.
+            deadline = self._header_deadline_s(lease)
+            send = client.send(req, stream=True)
+            if deadline > 0:
+                resp = await asyncio.wait_for(send, timeout=deadline)
+            else:
+                resp = await send
+        except (TimeoutError, asyncio.TimeoutError) as exc:
+            await self._release(lease, ok=False, kind="transport")
+            raise ConnectionError(
+                f"zen request failed: header deadline {deadline:.0f}s exceeded"
+            ) from exc
         except httpx.HTTPError as exc:
             await self._release(lease, ok=False, kind="transport")
             raise ConnectionError(f"zen request failed: {exc}") from exc
@@ -510,6 +528,31 @@ class ZenDirectAdapter:
             await pool.release(held, ok=ok, kind=kind)
 
         return StreamRelay(resp, {}, on_close=_released, stall_s=stall_s)
+
+    def _header_deadline_s(self, lease: Lease | None) -> float:
+        """Response-header deadline for THIS attempt (see ZEN_TTFB_DEMOTED_S).
+
+        A bucket with a clean record gets the full ``ZEN_TTFB_S`` window: a
+        legitimately slow first byte must never be cut. A bucket that is
+        demoted (a recent failure, i.e. egress cooldown) or that has already
+        failed in this request gets the much shorter demoted deadline, so the
+        user does not wait a second full minute for a leg that just told us
+        it cannot answer. ``zen_ttfb_demoted_s <= 0`` folds back to the single
+        deadline.
+
+        Note this only ever SHORTENS: it cannot raise the deadline above
+        ``ZEN_TTFB_S`` even if the demoted value is configured larger.
+        """
+
+        full = float(getattr(self._settings, "zen_ttfb_s", 60.0) or 0.0)
+        short = float(getattr(self._settings, "zen_ttfb_demoted_s", 0.0) or 0.0)
+        if short <= 0 or lease is None:
+            return full
+        now = time.monotonic()
+        state = lease.state
+        if state.cooling_down(now):
+            return min(full, short) if full > 0 else short
+        return full
 
     def _egress_proxy_url(self, lease: Lease | None) -> str | None:
         """HTTP-proxy URL for the leased bucket's agent (bun subprocess env).

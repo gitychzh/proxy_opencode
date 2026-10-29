@@ -56,7 +56,7 @@ cordon、换 IP、failover 语义与传输无关。
 | **10010** | 容器宿主映射 | `since-retired`（2026-10-28）：旧 loopback 运维入口，随 caddy 链路一并下线 |
 | 10003 | proxy_ms（ECS 宿主） | 备用链路网关，见 §7 |
 | 20001 / 20002 | proxy_nv（ECS 宿主，caddy `:20002`） | 与本栈无关，不动 |
-| 9443 / 7892 / 8793 等 | 旧栈 | 2026-10-17 已清退；设备侧 8791 旧网关不可达闲置 |
+| 9443 / 7892 / 8791 / 8793 | 旧栈 | `since-retired`：9443/7892/8793 于 2026-10-17 清退；**8791/8793 于 2026-10-29 彻底下线**（`ProxyOpencodeBoot` 计划任务已注销，`C:/Users/owin10/proxy_opencode/` 部署树、日志、payload_dump 已删，仓库 `start_gateway.bat` 已移除）。最后成功业务调用 2026-10-03，此后仅旧 LB 健康检查空转 |
 | 40016 / 40066 | GLM 网关 | 与本栈无关，不动 |
 
 安全组只放行 10002。设备侧 10001/10002 只听 Tailscale，另有 agent basic auth。
@@ -116,15 +116,25 @@ cordon、换 IP、failover 语义与传输无关。
   传输异常与「非 200 且未就绪」仍是硬判决，第一次即摘桶——两者必须分开：
   前者是 LTE 丢包（2026-10-29 实测 5h/13 次，全在下一探针自愈，桶 `failures=0`），
   后者是 agent 真的没了（2026-10-25 僵尸桶）。
-- **cordon**：429 烧穿（`free_quota_exhausted`，绑到窗口末）与 403 门槛
-  （`free_tier_rejected`）都是**对出口 IP 的判决**——探针观测到 IP 变化且就绪时
-  立即解除（`cordon_lifted`，IP 不在 `expect_prefix` 内时另记 `prefix_mismatch`
-  审计事件）；传输连败 streak cordon 保持原 deadline。**软 429**（`Retry-After`
-  ≤3600s）是突发节流而非额度判决，只 cordon 该时长（`free_quota_soft`）。重复
-  判决只静默延长租约、不重复记事件，更短的判决不得覆盖更长的存活 cordon。
+- **cordon 与降权（两档，0.8.5 起）**：429 烧穿（`free_quota_exhausted`，绑到窗口末）
+  与 403 门槛（`free_tier_rejected`）都是**对出口 IP 的判决**——探针观测到 IP 变化
+  且就绪时立即解除（`cordon_lifted`，IP 不在 `expect_prefix` 内时另记
+  `prefix_mismatch` 审计事件）；传输连败 streak cordon 保持原 deadline。**软 429**
+  （`Retry-After`≤3600s）是突发节流而非额度判决，只 cordon 该时长
+  （`free_quota_soft`）。重复判决只静默延长租约、不重复记事件，更短的判决不得覆盖
+  更长的存活 cordon。
+  与 cordon 并列的是**降权（cooldown）**：单次传输失败/5xx **不移出轮换**，只把桶
+  排到选择顺序末尾（`ZEN_EGRESS_COOLDOWN_S=20` × 连续次数，上限
+  `ZEN_EGRESS_COOLDOWN_MAX_S=60`），该请求由备用链答完，下一请求照常轮询（含它
+  自己），成功一次立即清零。连续 3 次失败才 escalate 到 cordon。选择顺序为
+  正常健康桶 → 降权桶 → last-resort 桶 → cordon 桶。
 - **首字节（TTFB）超时**：`ZEN_TTFB_S`（默认 60s；实测 TTFB p95=21s、p99=305s）只约束**响应头**，到达即解除；
   之后的静默由 `STREAM_STALL_S` 管。此前整个交换只有 `zen_timeout_s=300` 一个
   上界，隧道黑洞会让单个请求先烧掉 300s 再换桶（实测 305–315s）。
+  **降权桶用更短的 `ZEN_TTFB_DEMOTED_S`（默认 15s）**：60s 是给首次尝试的耐心，
+  一个刚失败过的腿不该再拿走用户第二个满分钟。该值只缩短不延长，0 关闭分级；
+  bun 逐次覆盖 `ZEN_BUN_TTFB_MS`，httpx 路径作用于响应头阶段（正文仍归
+  `STREAM_STALL_S`）。
 - **换 IP**：每桶日窗 `[08:00, 08:00+1d)` Asia/Shanghai（=UTC0）计数。**主触发是
   token 额度** `ZEN_EGRESS_TOKEN_ROTATION`（每桶每窗口的估算 prompt tokens 之和）：
   上游按 token 计量而非请求条数（2026-10-28 实测 166 条请求即烧穿一个 IP 的日额度，

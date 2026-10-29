@@ -132,6 +132,7 @@ class BunTransport:
         body: bytes,
         proxy_url: str | None,
         timeout_s: float,
+        ttfb_s: float | None = None,
     ) -> "_BunResponse":
         """Run one upstream exchange through the bun forwarder.
 
@@ -141,7 +142,15 @@ class BunTransport:
         non-200 statuses are returned too (the caller relays/failovers
         exactly as with httpx). Transport failures raise
         :class:`BunTransportError`.
+
+        ``ttfb_s`` overrides this instance's response-header deadline for one
+        attempt. Callers use it to give a bucket with a recent failure a much
+        stricter deadline than a healthy one: the same 60s patience that a
+        first attempt deserves would be the second time the user waits a full
+        minute for a leg that already proved it is not answering.
         """
+
+        ttfb = self._ttfb_s if ttfb_s is None else max(0.0, float(ttfb_s))
         env = dict(os.environ)
         for name in _AMBIENT_PROXY_VARS:
             env.pop(name, None)
@@ -156,9 +165,10 @@ class BunTransport:
             parsed = urlsplit(proxy_url)
             proxy_hop = f"{parsed.hostname}:{parsed.port}"
         logger.info(
-            "bun upstream attempt: proxy=%s timeout_ms=%d",
+            "bun upstream attempt: proxy=%s timeout_ms=%d ttfb_ms=%d",
             proxy_hop,
             int(timeout_s * 1000),
+            int(ttfb * 1000),
         )
         env["ZEN_UPSTREAM_BASE"] = base_url
         env["ZEN_BUN_HEADERS"] = json.dumps(dict(headers))
@@ -166,7 +176,7 @@ class BunTransport:
         # Always exported, including "0": forward.ts defaults to 60000ms when
         # the variable is absent, so omitting it turned ``ZEN_TTFB_S=0``
         # ("disables the extra timer") into the default deadline instead.
-        env["ZEN_BUN_TTFB_MS"] = str(int(self._ttfb_s * 1000))
+        env["ZEN_BUN_TTFB_MS"] = str(int(ttfb * 1000))
         try:
             proc = await asyncio.create_subprocess_exec(
                 self._bin,
@@ -184,8 +194,8 @@ class BunTransport:
         # a hop that never answers must cost one failover step, not the
         # client's entire patience budget.
         budget = timeout_s
-        if 0 < self._ttfb_s < budget:
-            budget = self._ttfb_s
+        if 0 < ttfb < budget:
+            budget = ttfb
         deadline = budget + self._meta_timeout
         try:
             if proc.stdin is not None:

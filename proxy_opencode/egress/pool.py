@@ -90,6 +90,8 @@ class EgressPool:
         probe_interval_s: float = 30.0,
         cordon_s: float = 300.0,
         failure_threshold: int = 3,
+        cooldown_s: float = 20.0,
+        cooldown_max_s: float = 60.0,
         probe_fail_tolerance: int = 1,
         observer: ReleaseObserver | None = None,
         last_resort: frozenset[str] = frozenset(),
@@ -102,6 +104,11 @@ class EgressPool:
         self._probe_interval_s = probe_interval_s
         self._cordon_s = cordon_s
         self._failure_threshold = failure_threshold
+        # Demotion window for a failing-but-not-dead bucket (see
+        # _enter_cooldown). Kept short and bounded: the bucket stays in
+        # rotation, it only loses tie-breaks to healthy siblings.
+        self._cooldown_s = max(1.0, float(cooldown_s))
+        self._cooldown_max_s = max(self._cooldown_s, float(cooldown_max_s))
         # Consecutive soft probe failures tolerated before a bucket is pulled
         # (see _probe_one). Never below 1: a tolerance of 0 would mean "pull
         # the bucket before the first failure", which is the same as 1.
@@ -137,6 +144,12 @@ class EgressPool:
                 getattr(settings, "zen_egress_probe_interval_s", 30) or 30
             ),
             cordon_s=float(getattr(settings, "zen_egress_cordon_s", 300) or 300),
+            cooldown_s=float(
+                getattr(settings, "zen_egress_cooldown_s", 20) or 20
+            ),
+            cooldown_max_s=float(
+                getattr(settings, "zen_egress_cooldown_max_s", 60) or 60
+            ),
             probe_fail_tolerance=int(
                 getattr(settings, "zen_egress_probe_fail_tolerance", 1) or 1
             ),
@@ -206,31 +219,58 @@ class EgressPool:
         the alphabetically-first bucket and drained its per-IP daily quota
         first (observed in the 2026-10-15 ECS e2e). The rotation is applied
         before the stable least-inflight sort.
+
+        Ordering (owner decision 2026-10-29 — a failing bucket must not
+        leave rotation):
+
+          1. normal healthy buckets;
+          2. buckets in a *cooldown* (one recent failure): still candidates,
+             just picked after every healthy sibling, so the next request
+             tries a different account first and this one serves again as
+             soon as it is needed;
+          3. last-resort buckets, withheld while any normal bucket can
+             serve (a weak uplink that cannot meet the header deadline);
+          4. cordoned buckets, only when nothing else is left (queueing
+             upstream beats inventing a 502).
+
+        The tiers are cumulative: a bucket appears in exactly one, and the
+        first non-empty tier wins. This is why a single transport failure no
+        longer parks a third of the pool.
         """
 
         now = time.monotonic()
-        ready = [
-            s
-            for s in self._states
-            if not s.cordoned(now) and s.healthy and not s.rotating
+        healthy = [
+            s for s in self._states if s.available(now) and s.healthy
         ]
+        cooling = [s for s in healthy if s.cooling_down(now)]
+        normal = [s for s in healthy if not s.cooling_down(now)]
         # Last-resort buckets (a weak uplink that cannot meet the first-byte
         # deadline) are withheld as long as any normal bucket can serve: an
         # equal share of round-robin picks turned every fourth turn into a
         # 60s TTFB stall followed by a failover (measured 2026-10-29).
-        preferred = [s for s in ready if s.spec.name not in self._last_resort]
-        # Last resort excludes rotating egresses too: their ONT is mid-reboot
-        # and every data connection they accept dies with it. Only when the
-        # entire pool is rotating fall back to them (queueing upstream).
-        non_rotating = [s for s in self._states if not s.rotating]
-        usable = preferred or ready or non_rotating or list(self._states)
+        ready = [s for s in normal if s.spec.name not in self._last_resort]
+        # Everything cordoned/unhealthy: queue upstream rather than inventing
+        # a 502. Rotating egresses stay excluded while any alternative
+        # exists — their ONT is mid-reboot and every data connection they
+        # accept dies with it.
+        benched = [s for s in self._states if s.available(now)]
+        tiers = [
+            ready,
+            # A cooling bucket is still a healthy sibling of the same speed
+            # class, so it outranks a last-resort uplink that cannot meet the
+            # header deadline anyway.
+            [s for s in cooling if s.spec.name not in self._last_resort],
+            [s for s in normal if s.spec.name in self._last_resort],
+            cooling,
+            benched,
+            list(self._states),
+        ]
+        usable = next((t for t in tiers if t), list(self._states))
         offset = next(self._rr) % len(usable)
         rotated = usable[offset:] + usable[:offset]
         state = min(rotated, key=lambda s: s.inflight)
         state.inflight += 1
-        if not ready and state.cordoned(now):
-            # Everything is cordoned/saturated: queue upstream rather than
-            # inventing a 502.
+        if state.cordoned(now):
             logger.warning(
                 "no healthy egress; using cordoned bucket",
                 extra={"egress": state.spec.name, "reason": state.cordon_reason},
@@ -313,6 +353,7 @@ class EgressPool:
         state.failures = 0
         state.cordoned_until = 0.0
         state.cordon_reason = ""
+        state.cooldown_until = 0.0
         logger.info(
             "egress rotation complete: new egress IP live",
             extra={"egress": name, "previous_ip": previous, "current_ip": ip},
@@ -349,6 +390,10 @@ class EgressPool:
         if ok:
             state.failures = 0
             state.last_error = ""
+            # A success is the only proof the leg works again: drop the
+            # demotion immediately so the bucket returns to its normal share
+            # of rotation on the very next pick.
+            state.cooldown_until = 0.0
             # The ok path used to return before the observer ran, which
             # meant counters.record() never saw a single completed request
             # and the rotation threshold could not fire (found 2026-10-17:
@@ -417,6 +462,11 @@ class EgressPool:
                 detail={"egress_ip": state.egress_ip},
             )
         elif state.failures >= self._failure_threshold:
+            # Genuinely dead leg (three consecutive failures): bench it for
+            # the full cooldown so it cannot eat a header deadline every
+            # turn. A SINGLE failure never reaches this branch — it is only
+            # demoted below, which keeps the bucket in rotation (owner
+            # decision 2026-10-29).
             self._enter_cordon(
                 state,
                 now + self._cordon_s,
@@ -424,7 +474,53 @@ class EgressPool:
                 event_reason=None,
                 detail={"egress_ip": state.egress_ip},
             )
+        else:
+            # First (and second) failure: demote, do not remove.
+            #
+            # Owner decision 2026-10-29: "不要移出轮换". A single transport
+            # hiccup on one leg used to bench that bucket outright; with
+            # four buckets, three cordons drained the pool and selection was
+            # forced onto benched buckets (114 `request_on_cordoned_bucket`
+            # events in one day). The correct shape is: this request is
+            # answered by the backup chain, this bucket sinks to the back of
+            # the pick order for a short cooldown, and the next request
+            # resumes normal round-robin — including this bucket once it is
+            # the best candidate again.
+            self._enter_cooldown(state, now, kind)
         self._notify_observer(state, ok, kind, retry_after_s)
+
+    def _enter_cooldown(self, state: EgressState, now: float, kind: str) -> None:
+        """Demote a bucket for a short window without leaving rotation.
+
+        The cooldown grows with the consecutive-failure streak so a leg that
+        is genuinely down stops being the first pick (one header deadline
+        per turn), while a one-off blip costs exactly one demotion. It is
+        capped well below the cordon window: this is a preference hint, not
+        a health verdict.
+        """
+
+        streak = max(1, state.failures)
+        seconds = min(
+            self._cooldown_s * streak,
+            self._cooldown_max_s,
+        )
+        state.cooldown_until = max(state.cooldown_until, now + seconds)
+        logger.info(
+            "egress demoted (cooldown, still in rotation)",
+            extra={
+                "egress": state.spec.name,
+                "reason": kind,
+                "count": streak,
+                "elapsed_s": round(seconds, 1),
+            },
+        )
+        EVENTS.emit(
+            "egress_cooldown",
+            egress=state.spec.name,
+            reason=kind,
+            count=streak,
+            elapsed_s=round(seconds, 1),
+        )
 
     def abandon(self, lease: Lease) -> None:
         """Drop a lease with NO verdict about the bucket.

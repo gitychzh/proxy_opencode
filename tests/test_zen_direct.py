@@ -17,6 +17,7 @@ from proxy_opencode.egress.pool import EgressSpec, EgressState, Lease
 from proxy_opencode.upstreams import zen as zen_direct
 from proxy_opencode.upstreams.openai_http import StreamRelay
 from proxy_opencode.upstreams.zen import ZenDirectAdapter
+from proxy_opencode.upstreams.zen_bun_transport import BunTransportError
 
 
 def make_settings(**kw: Any) -> Settings:
@@ -1765,3 +1766,82 @@ async def test_retry_after_alone_is_not_a_pool_wide_blackout() -> None:
     assert route.call_count == 1
     assert result["__status__"] == 429
     assert "__quota_blackout_s__" not in result
+
+
+# ------------------------------------- per-bucket header deadline (0.8.5)
+
+
+class _RecordingBun:
+    """BunTransport stand-in that records the ttfb_s of every attempt."""
+
+    def __init__(self) -> None:
+        self.ttfb: list[float | None] = []
+        self.proxies: list[str | None] = []
+
+    async def post(self, **kw: Any) -> Any:
+        self.ttfb.append(kw.get("ttfb_s"))
+        self.proxies.append(kw.get("proxy_url"))
+        raise BunTransportError("stop here")
+
+
+@pytest.mark.asyncio
+async def test_header_deadline_shortens_only_for_a_demoted_bucket() -> None:
+    """A bucket that just failed gets a much shorter header deadline.
+
+    Owner requirement 2026-10-29 ("让用户拥有好的体验"): a healthy bucket may
+    take up to ZEN_TTFB_S to produce its first byte — a legitimately slow turn
+    must never be cut — but once a leg has failed, waiting a second full
+    minute for it is the bad experience the cooldown exists to prevent.
+    """
+
+    adapter = ZenDirectAdapter(
+        make_settings(zen_ttfb_s=60.0, zen_ttfb_demoted_s=15.0)
+    )
+    bun = _RecordingBun()
+    adapter._bun = bun  # type: ignore[assignment]  # noqa: SLF001 - transport seam
+
+    state = EgressState(spec=EgressSpec("bucket-a", "http://agent:10001"))
+    state.healthy = True
+    lease = Lease(state)
+
+    # clean record -> full window
+    await _attempt_ttfb(adapter, bun, lease)
+    assert adapter._header_deadline_s(lease) == 60.0  # noqa: SLF001
+
+    # demoted (one recent failure) -> short window
+    state.cooldown_until = time.monotonic() + 30
+    await _attempt_ttfb(adapter, bun, lease)
+    assert adapter._header_deadline_s(lease) == 15.0  # noqa: SLF001
+
+    # the value actually reaches the transport for both attempts
+    assert bun.ttfb == [60.0, 15.0]
+
+    # 0 disables the distinction entirely
+    off = ZenDirectAdapter(make_settings(zen_ttfb_s=60.0, zen_ttfb_demoted_s=0.0))
+    assert off._header_deadline_s(lease) == 60.0  # noqa: SLF001
+    await _attempt_ttfb(off, bun, lease)
+    assert bun.ttfb[-1] == 60.0
+
+
+async def _attempt_ttfb(
+    adapter: ZenDirectAdapter, bun: _RecordingBun, lease: Lease
+) -> None:
+    """Drive one attempt, swallowing the stand-in's deliberate abort."""
+
+    adapter._bun = bun  # type: ignore[assignment]  # noqa: SLF001 - transport seam
+    with pytest.raises(ConnectionError):
+        await adapter._exchange_via_bun(  # noqa: SLF001 - transport seam
+            bun, {}, {}, "m", False, lease
+        )
+
+
+@pytest.mark.asyncio
+async def test_header_deadline_never_exceeds_the_full_window() -> None:
+    """A misconfigured demoted value can only shorten, never extend."""
+
+    adapter = ZenDirectAdapter(
+        make_settings(zen_ttfb_s=20.0, zen_ttfb_demoted_s=45.0)
+    )
+    state = EgressState(spec=EgressSpec("bucket-a", "http://agent:10001"))
+    state.cooldown_until = time.monotonic() + 30
+    assert adapter._header_deadline_s(Lease(state)) == 20.0  # noqa: SLF001

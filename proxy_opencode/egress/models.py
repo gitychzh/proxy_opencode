@@ -97,6 +97,20 @@ class EgressState:
     last_error_at: float = 0.0
     cordoned_until: float = 0.0
     cordon_reason: str = ""
+    # Short demotion after a transport-class failure. Owner decision
+    # 2026-10-29: a bucket that fails once must NOT leave rotation — the
+    # backup chain answers that single request and the very next request
+    # resumes normal round-robin, including this bucket. Removing it turned
+    # one flaky leg into a pool-wide outage: with three of four buckets
+    # cordoned the pool drained and `request_on_cordoned_bucket` fired 114
+    # times in a day, i.e. selection was forced to use the very buckets it
+    # had benched. So a first failure only sinks the bucket to the BACK of
+    # the pick order for `cooldown_s` (selection still considers it, so it
+    # keeps serving when it is the only candidate); the escalating cooldown
+    # below is what stops a genuinely dead leg from eating a timeout on
+    # every turn, and three consecutive failures still trigger a real
+    # cordon.
+    cooldown_until: float = 0.0
     healthy: bool = False
     # P5 rotation: true while the ONT reboot orchestrator drives this egress
     # ("selection skips it; in-flight requests finish or die").
@@ -118,8 +132,21 @@ class EgressState:
     def cordoned(self, now: float) -> bool:
         return self.cordoned_until > now
 
+    def cooling_down(self, now: float) -> bool:
+        """True while this bucket is demoted (still usable, picked last)."""
+
+        return self.cooldown_until > now
+
+    def available(self, now: float) -> bool:
+        """Eligible for selection at all (not cordoned, not mid-rotation)."""
+
+        return not self.cordoned(now) and not self.rotating
+
     def cordon_remaining_s(self, now: float) -> float:
         return max(0.0, self.cordoned_until - now)
+
+    def cooldown_remaining_s(self, now: float) -> float:
+        return max(0.0, self.cooldown_until - now)
 
     def snapshot(self, now: float) -> dict[str, object]:
         return {
@@ -129,6 +156,8 @@ class EgressState:
             "cordoned": self.cordoned(now),
             "cordon_reason": self.cordon_reason,
             "cordon_remaining_s": round(self.cordon_remaining_s(now), 1),
+            "cooldown": self.cooling_down(now),
+            "cooldown_remaining_s": round(self.cooldown_remaining_s(now), 1),
             "inflight": self.inflight,
             "total": self.total,
             "failures": self.failures,

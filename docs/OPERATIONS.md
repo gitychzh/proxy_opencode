@@ -159,9 +159,19 @@ ZEN_MARKER_MODE=full           # bridge 注记过不了 body 门
 PUBLIC_MODELS=deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle
 ZEN_EGRESS_ROTATE_MIN_INTERVAL_S=1800   # 硬 429 换 IP 下限，防轮换风暴
 ZEN_TTFB_S=60                  # 响应头超时（只约束首字节，默认 60s）
+ZEN_TTFB_DEMOTED_S=15          # 降权桶的响应头超时（只缩短，0=关闭分级）
+ZEN_EGRESS_COOLDOWN_S=20       # 单次失败→降权秒数（×连续次数，不再移出轮换）
+ZEN_EGRESS_COOLDOWN_MAX_S=60   # 降权上限，必须小于 ZEN_EGRESS_CORDON_S
 ZEN_FALLBACK_BASE_URL / _API_KEY / _MODEL_MAP / _DEFAULT_MODEL   # 备用链路，见 §3
 ZEN_FALLBACK_RECOVER_AFTER=2   # 主链路连续成功多少次才算恢复（防抖动）
 ```
+
+**单桶故障的语义（0.8.5 起，用户明确要求）**：一个桶失败一次**不会**离开轮换。
+该请求照旧交给备用链（proxy_ms 的 `DeepSeek-V4.1-Flash-1017`），这个桶只是排到
+选择顺序末尾（`egress_cooldown`，20s × 连续次数，上限 60s），下一请求正常回到
+轮询——包括它自己；成功一次立即恢复。连续 3 次失败才 escalate 到真 cordon
+（`ZEN_EGRESS_CORDON_S=300`），即「死腿」而非「抖动」。与此配套，处于降权状态的
+桶只拿到 `ZEN_TTFB_DEMOTED_S` 的首字节期限，避免同一个腿让用户连等两个满分钟。
 
 **EXPECT_PREFIX 是审计字段，不是可用性开关**（2026-10-25 起）：IP 一变即解除
 IP 域 cordon 并接受轮换结果，前缀不符只记 `prefix_mismatch` 事件 + WARNING。它

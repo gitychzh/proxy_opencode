@@ -211,6 +211,49 @@ def test_ttfb_deadline_default_and_env(monkeypatch):
     assert config.load_settings().zen_ttfb_s == 0.0
 
 
+def test_ttfb_demoted_is_shorter_than_the_full_deadline(monkeypatch):
+    """A demoted bucket gets a strict header deadline (owner 2026-10-29).
+
+    The full ZEN_TTFB_S protects a legitimately slow first attempt; a leg that
+    already failed must not be granted the same patience twice, or the user
+    waits a second minute before the backup chain answers.
+    """
+
+    monkeypatch.setenv("UPSTREAM_MODE", "zen-direct")
+    monkeypatch.delenv("ZEN_TTFB_S", raising=False)
+    monkeypatch.delenv("ZEN_TTFB_DEMOTED_S", raising=False)
+    s = config.load_settings()
+    assert s.zen_ttfb_demoted_s == 15.0
+    assert s.zen_ttfb_demoted_s < s.zen_ttfb_s
+
+    monkeypatch.setenv("ZEN_TTFB_DEMOTED_S", "8")
+    assert config.load_settings().zen_ttfb_demoted_s == 8.0
+    # 0 disables the distinction (every attempt uses ZEN_TTFB_S)
+    monkeypatch.setenv("ZEN_TTFB_DEMOTED_S", "0")
+    assert config.load_settings().zen_ttfb_demoted_s == 0.0
+    # never negative
+    monkeypatch.setenv("ZEN_TTFB_DEMOTED_S", "-5")
+    assert config.load_settings().zen_ttfb_demoted_s == 0.0
+
+
+def test_egress_cooldown_defaults_and_env(monkeypatch):
+    """Demotion window drives the "do not bench on one failure" rule."""
+
+    monkeypatch.setenv("UPSTREAM_MODE", "zen-direct")
+    monkeypatch.delenv("ZEN_EGRESS_COOLDOWN_S", raising=False)
+    monkeypatch.delenv("ZEN_EGRESS_COOLDOWN_MAX_S", raising=False)
+    s = config.load_settings()
+    assert s.zen_egress_cooldown_s == 20.0
+    assert s.zen_egress_cooldown_max_s == 60.0
+    assert s.zen_egress_cooldown_max_s < s.zen_egress_cordon_s
+
+    monkeypatch.setenv("ZEN_EGRESS_COOLDOWN_S", "7")
+    monkeypatch.setenv("ZEN_EGRESS_COOLDOWN_MAX_S", "9")
+    s = config.load_settings()
+    assert s.zen_egress_cooldown_s == 7.0
+    assert s.zen_egress_cooldown_max_s == 9.0
+
+
 def test_fallback_recover_after_floor(monkeypatch):
     monkeypatch.setenv("UPSTREAM_MODE", "zen-direct")
     monkeypatch.delenv("ZEN_FALLBACK_RECOVER_AFTER", raising=False)

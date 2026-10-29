@@ -771,9 +771,15 @@ async def test_probe_success_keeps_request_failure_streak(tmp_path) -> None:  # 
         await pool._probe_one(a)  # noqa: SLF001 - the 30s probe loop
         assert a.healthy is True
         assert a.failures == 2  # streak survives the probe
-        # no recovery event, no failure-wipe side effects (only the first
-        # egress_ip_observed from the probe learning the bucket's IP)
-        assert [e["event"] for e in read()] == ["egress_ip_observed"]
+        # The streak survives; each 'a' failure also emitted its demotion
+        # event (0.8.5: a failing bucket is demoted, never benched) — the
+        # probe itself must add nothing but the IP observation, and no
+        # recovery event / failure-wipe side effect.
+        assert [e["event"] for e in read() if e["egress"] == "a"] == [
+            "egress_cooldown",
+            "egress_cooldown",
+            "egress_ip_observed",
+        ]
         # ...and the third failure still cordons
         for _ in range(4):
             lease = await pool.acquire()
@@ -1128,3 +1134,121 @@ async def test_bucket_broken_at_startup_is_still_reported(tmp_path) -> None:  # 
         assert len([e for e in read() if e["event"] == "probe_failed"]) == 2
     finally:
         cleanup()
+
+
+# ------------------------------------------------- rotation resilience (0.8.5)
+
+
+@pytest.mark.asyncio
+async def test_single_failure_does_not_leave_rotation(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """One failure must DEMOTE a bucket, never bench it (owner 2026-10-29).
+
+    The reported defect: a bucket failed once, was cordoned, and the request
+    was silently answered by a *different* account. The owner's requirement is
+    the opposite: this request goes to the backup chain (proxy_ms) and the next
+    request comes back to the pool — including the very bucket that failed.
+
+    So after exactly one failure the bucket must still be selectable, still
+    appear in the snapshot as not-cordoned, and only lose the *tie-break* to a
+    healthy sibling.
+    """
+
+    pool = make_pool("a", "b", failure_threshold=3, cordon_s=120)
+    mark_healthy(pool)
+    a, b = pool._states
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        lease = await pool.acquire()
+        await pool.release(lease, ok=False, kind="transport")
+        failed = pool.find(lease.name)
+        assert failed is not None
+        failed_name = failed.spec.name
+        now = time.monotonic()
+        assert not failed.cordoned(now)          # still in rotation
+        assert failed.cooling_down(now)          # but demoted
+        snap = failed.snapshot(now)
+        assert snap["cordoned"] is False
+        assert snap["cooldown"] is True
+        assert snap["cooldown_remaining_s"] > 0
+        kinds = [e["event"] for e in read()]
+        assert "egress_cooldown" in kinds
+        assert "cordon" not in kinds
+
+        # The healthy sibling is preferred while the demoted one cools down...
+        for _ in range(4):
+            lease = await pool.acquire()
+            assert lease.name != failed_name
+            await pool.release(lease, ok=True)
+
+        # ...and one success on the demoted bucket returns it immediately.
+        failed.cooldown_until = 0.0
+        for _ in range(4):
+            lease = await pool.acquire()
+            await pool.release(lease, ok=True)
+        assert pool.find(failed_name).failures == 0  # type: ignore[union-attr]
+    finally:
+        cleanup()
+
+
+@pytest.mark.asyncio
+async def test_cooldown_bucket_serves_when_it_is_the_only_candidate() -> None:
+    """Demotion is a preference, not a ban: a lone cooling bucket still serves.
+
+    This is the difference between the old cordon (which drained the pool and
+    forced ``request_on_cordoned_bucket``) and the new cooldown: with the other
+    buckets unhealthy the demoted one must take the request instead of idling.
+    """
+
+    pool = make_pool("a", "b", failure_threshold=3, cordon_s=120)
+    a, b = pool._states
+    a.healthy = True
+    a.cooldown_until = time.monotonic() + 60
+    b.healthy = False
+
+    lease = await pool.acquire()
+    assert lease.name == "a"
+
+
+@pytest.mark.asyncio
+async def test_three_failures_still_cordon() -> None:
+    """Escalation is preserved: a genuinely dead leg is benched, not spun on."""
+
+    pool = make_pool("a", failure_threshold=3, cordon_s=120)
+    state = pool._states[0]
+    state.healthy = True
+    for _ in range(3):
+        lease = await pool.acquire()
+        assert lease.name == "a"
+        await pool.release(lease, ok=False, kind="transport")
+    now = time.monotonic()
+    assert state.cordoned(now)
+    assert "consecutive failures" in state.cordon_reason
+
+
+@pytest.mark.asyncio
+async def test_cooldown_escalates_with_streak_and_is_capped() -> None:
+    """Repeated failures widen the demotion but never exceed the cap."""
+
+    pool = make_pool("a", failure_threshold=10, cooldown_s=20, cooldown_max_s=50)
+    state = pool._states[0]
+    state.healthy = True
+    windows = []
+    for _ in range(3):
+        lease = await pool.acquire()
+        await pool.release(lease, ok=False, kind="transport")
+        windows.append(state.cooldown_remaining_s(time.monotonic()))
+    assert windows[0] < windows[1] < windows[2]
+    assert max(windows) <= 50.0
+
+
+@pytest.mark.asyncio
+async def test_cooldown_cleared_by_success() -> None:
+    pool = make_pool("a")
+    state = pool._states[0]
+    state.healthy = True
+    lease = await pool.acquire()
+    await pool.release(lease, ok=False, kind="transport")
+    assert state.cooling_down(time.monotonic())
+    lease = await pool.acquire()
+    await pool.release(lease, ok=True)
+    assert not state.cooling_down(time.monotonic())

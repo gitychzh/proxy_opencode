@@ -210,6 +210,24 @@ class Settings:
     # then a clear gap to the six 300s+ hangs. 60s keeps every healthy
     # request and still cuts a hung hop by 5x.
     zen_ttfb_s: float = 60
+    # Stricter response-header deadline for a bucket that just failed or is
+    # cooling down (owner requirement 2026-10-29: "让用户拥有好的体验").
+    #
+    # The 60s deadline above is calibrated for a FIRST attempt on a bucket
+    # with a clean record: the measured gap between a healthy first byte
+    # (p95 21s) and the six 300s+ hangs is wide, so waiting up to a minute
+    # once is the price of never cutting a legitimately slow turn. That
+    # reasoning does not hold twice in a row: once a leg has failed it is
+    # already demoted (egress cooldown), and letting it consume another full
+    # minute before the backup chain answers is exactly the "card 60s" UX
+    # the owner rejected. Attempts on a cooling bucket therefore use this
+    # much shorter deadline, so the fallback serves the turn in seconds.
+    #
+    # Measured 2026-10-29 (24h, 209 completions): p50 5.9s, p95 28.5s for
+    # the whole request; a healthy bucket's first byte is well inside 15s.
+    # 0 disables the distinction (every attempt uses ZEN_TTFB_S).
+    #   ZEN_TTFB_DEMOTED_S=15
+    zen_ttfb_demoted_s: float = 15.0
     # Stream stall watchdog: max tolerated silence between SSE body bytes
     # (covering both the first byte after the response headers and gaps
     # mid-stream) before StreamRelay stops waiting, synthesises a terminal
@@ -309,6 +327,23 @@ class Settings:
     #   ZEN_EGRESS_PROBE_FAIL_TOLERANCE=2
     zen_egress_probe_fail_tolerance: int = 1
     zen_egress_cordon_s: int = 300
+    # Demotion window after ONE failed attempt (owner decision 2026-10-29:
+    # "不要移出轮换"). A bucket is never benched for a single failure — that
+    # request goes to the backup chain, the bucket sinks to the back of the
+    # pick order for this many seconds and then serves again. The effective
+    # window is `ZEN_EGRESS_COOLDOWN_S * consecutive_failures`, capped by
+    # ZEN_EGRESS_COOLDOWN_MAX_S; a success clears it instantly, and three
+    # consecutive failures still escalate to a real cordon
+    # (ZEN_EGRESS_CORDON_S) because that leg is dead rather than flaky.
+    # Measured 2026-10-29: benching on the first failure drained the pool
+    # (114 `request_on_cordoned_bucket` in 24h, i.e. selection was forced
+    # back onto the buckets it had benched).
+    #   ZEN_EGRESS_COOLDOWN_S=20
+    zen_egress_cooldown_s: float = 20.0
+    # Upper bound on the escalated demotion (see above). Must stay below
+    # ZEN_EGRESS_CORDON_S: beyond that the escalating cordon takes over.
+    #   ZEN_EGRESS_COOLDOWN_MAX_S=60
+    zen_egress_cooldown_max_s: float = 60.0
     # Floor between two hard-429 rotations of the SAME bucket. A 429 is
     # ambiguous (transport gate / stale-prompt body gate / session reuse /
     # real per-IP quota all ship the same FreeUsageLimitError), and only the
@@ -644,6 +679,10 @@ def load_settings() -> Settings:
         zen_model_map=_model_map(os.environ.get("ZEN_MODEL_MAP", "")),
         zen_timeout_s=int(os.environ.get("OPENCODE_ZEN_TIMEOUT_S", "300")),
         zen_ttfb_s=float(os.environ.get("ZEN_TTFB_S", "60")),
+        # 0 disables the distinction: every attempt then uses ZEN_TTFB_S.
+        zen_ttfb_demoted_s=max(
+            0.0, float(os.environ.get("ZEN_TTFB_DEMOTED_S", "15"))
+        ),
         stream_stall_s=float(os.environ.get("STREAM_STALL_S", "60")),
         client_stall_s=float(os.environ.get("CLIENT_STALL_S", "60")),
         zen_proxy=os.environ.get("ZEN_PROXY", "").strip(),
@@ -675,6 +714,10 @@ def load_settings() -> Settings:
             1, int(os.environ.get("ZEN_EGRESS_PROBE_FAIL_TOLERANCE", "1"))
         ),
         zen_egress_cordon_s=int(os.environ.get("ZEN_EGRESS_CORDON_S", "300")),
+        zen_egress_cooldown_s=float(os.environ.get("ZEN_EGRESS_COOLDOWN_S", "20")),
+        zen_egress_cooldown_max_s=float(
+            os.environ.get("ZEN_EGRESS_COOLDOWN_MAX_S", "60")
+        ),
         zen_egress_rotate_min_interval_s=float(
             os.environ.get("ZEN_EGRESS_ROTATE_MIN_INTERVAL_S", "1800")
         ),

@@ -3,6 +3,45 @@
 语义化版本；格式遵循 [Keep a Changelog](https://keepachangelog.com/)。
 协议事实的权威表述在 [`AGENTS.md`](AGENTS.md) 硬约束 1，本文只记变更。
 
+## [0.8.5] - 2026-10-29
+
+### Fixed — 一次失败就把出口桶移出轮换（用户明确否决）
+
+演练里 10/10 全 200，但 cc9 在第一次传输失败后就被 cordon，直接从轮换里消失：
+该请求虽然走了 proxy_ms，**这个桶却在 300 秒内不再接任何请求**。用户要求的是
+「不要移出轮换，用备用链路 proxy_ms 的 deepseek v4.1 flash，然后再回到
+proxy_opencode」——即隔离桶不是正确语义。
+
+后果量化（2026-10-29 当日账本）：4 个桶里有 2 个日配额 cordon、2 个交付
+cordon，池子被排空，`request_on_cordoned_bucket` 触发 **114 次**——选择逻辑
+被迫用回它刚隔离掉的桶，隔离本身没有产生任何保护。
+
+现在：
+* **单次失败 = 降权，不是隔离**。该请求照旧交给备用链（0.8.4 的行为），
+  这个桶只是排到选择顺序末尾（`egress cooldown`，默认 20s × 连续失败次数，
+  上限 60s），**仍然留在轮换里**——它是唯一可用候选时立刻继续服务。
+* **成功一次立即恢复**：`release(ok=True)` 清空 cooldown，下一个请求就回到
+  正常轮次。
+* **连续 3 次失败仍 escalate 到真 cordon**（`ZEN_EGRESS_CORDON_S`）：那是
+  死腿，不是抖动，继续拿它吃首字节期限才是坏体验。
+* 新事件 `egress_cooldown`（带 `count` / `elapsed_s`）；`/admin/egresses`
+  快照新增 `cooldown` / `cooldown_remaining_s`，与 `cordoned` 互斥可读。
+* 新配置：`ZEN_EGRESS_COOLDOWN_S`（默认 20）、`ZEN_EGRESS_COOLDOWN_MAX_S`
+  （默认 60，必须小于 `ZEN_EGRESS_CORDON_S`）。
+
+### Changed — 首字节期限按桶分级，不再让降权桶吃掉第二个满分钟
+
+`ZEN_TTFB_S=60` 是给**首次尝试**的耐心额度（健康桶首字节 p95 实测 21s，砍掉
+会误伤合法慢请求）。但演练里「第 5 个请求耗时 61 秒」正是这个额度的代价：
+一个刚失败过的桶又被观察了整整一分钟，之后才轮到备用链。
+
+现在新增 `ZEN_TTFB_DEMOTED_S`（默认 15s）：处于 cooldown 的桶，其尝试使用
+这个短期限，备用链在秒级接住。它**只能缩短不能延长**（配置比 `ZEN_TTFB_S`
+大时取小值），`0` 表示关闭分级、全部用 `ZEN_TTFB_S`。bun 传输层对应新增
+逐次 `ttfb_s` 覆盖（`ZEN_BUN_TTFB_MS` 与 python 侧 META 等待同步收紧），
+httpx 路径把同一期限加在**响应头阶段**（不含正文读取，正文静默仍由
+`STREAM_STALL_S` 管）。
+
 ## [0.8.4] - 2026-10-29
 
 ### Fixed — 单账号故障被兄弟桶吞掉，没走备用链
