@@ -92,7 +92,7 @@ class EgressPool:
         failure_threshold: int = 3,
         cooldown_s: float = 20.0,
         cooldown_max_s: float = 300.0,
-        quota_cordon_max_s: float = 1800.0,
+        quota_cordon_max_s: float = 600.0,
         probe_fail_tolerance: int = 1,
         observer: ReleaseObserver | None = None,
         last_resort: frozenset[str] = frozenset(),
@@ -162,7 +162,7 @@ class EgressPool:
             # No `or` default here: 0 is a meaningful value (disable the
             # ceiling and fall back to "benched until the window reset").
             quota_cordon_max_s=float(
-                getattr(settings, "zen_quota_cordon_max_s", 1800.0)
+                getattr(settings, "zen_quota_cordon_max_s", 600.0)
             ),
             probe_fail_tolerance=int(
                 getattr(settings, "zen_egress_probe_fail_tolerance", 1) or 1

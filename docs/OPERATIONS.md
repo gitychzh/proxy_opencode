@@ -183,7 +183,7 @@ rollback 镜像；③上传包用完即删，部署树里不许出现 `__pycache
 
 ```
 ZEN_EGRESS_PROXIES / ZEN_EGRESS_EXPECT_PREFIX / ZEN_EGRESS_ROTATION   # 三处桶清单必须同步
-ZEN_QUOTA_CORDON_MAX_S=1800    # 429 硬隔离封顶（0=隔离到日界；见 §4.1 结尾）
+ZEN_QUOTA_CORDON_MAX_S=600     # 429 硬隔离封顶（0=隔离到日界；见 §4.1 结尾）
 ZEN_EGRESS_TOKEN_ROTATION      # 主触发：每桶每窗口估算 prompt tokens 上限（生产 1.2M，见下）
 ZEN_ROTATE_ON_HARD_429=true    # 硬 429 = IP 配额判决 → 立即换 IP（0.8.6 起生产开启）
 ZEN_BUN_TRANSPORT=1            # 传输栈门：生产必须走 bun
@@ -333,7 +333,8 @@ telecom/cc9 继续 42 发全 200（额度按 IP 计）；cc9 实弹换 IP
 2026-10-29 实测：`owin10-mobile` 的 `36.149.54.10` 在 12:34:55 UTC 被判
 `free_quota_exhausted`（`Retry-After=41106s`），12:47:05 **同一个 IP** 回来
 200；`cc9` 同样在 12:01 判隔离、12:47 恢复。所以 0.8.7 起隔离时长封顶
-`ZEN_QUOTA_CORDON_MAX_S`（默认 1800s），到期自动回轮换，任意一次 200 立即
+`ZEN_QUOTA_CORDON_MAX_S`（默认 600s，2026-10-29 晚实测 1800s 在整池同时被
+短窗限流时把故障拉长到 30 分钟；实测恢复 ~12 分钟，故收紧），到期自动回轮换，任意一次 200 立即
 解除——429 不烧额度，重试是免费的。看到 `cordon` 事件里
 `capped_from_window_s` 远大于 `cordon_s` 就是这个封顶在生效。
 **判据**：若某桶被隔离后一直不回来，先看 `cordon_remaining_s` 是否还有几十秒
