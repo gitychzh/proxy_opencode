@@ -80,6 +80,12 @@ class EgressPool:
     _IP_SCOPED_CORDON_REASONS = frozenset(
         {"free_quota_exhausted", "free_tier_rejected"}
     )
+    # Cordon verdicts a *completed request* disproves (see
+    # ``_lift_cordon_on_success``). The soft throttle is included: a 200
+    # while benched for a short Retry-After means the throttle is gone.
+    _SUCCESS_LIFTABLE_CORDON_REASONS = frozenset(
+        {"free_quota_exhausted", "free_quota_soft", "free_tier_rejected"}
+    )
 
     def __init__(
         self,
@@ -411,6 +417,14 @@ class EgressPool:
             # demotion immediately so the bucket returns to its normal share
             # of rotation on the very next pick.
             state.cooldown_until = 0.0
+            # Same proof applies to an IP-scoped cordon: the cap in
+            # ZEN_QUOTA_CORDON_MAX_S exists so an expired verdict gets
+            # re-tested, and the re-test answering 200 must end the bench
+            # right there. Without this the capped window ran to its full
+            # length even after the leg demonstrably worked — OPERATIONS
+            # §4.1 and the 0.8.7 changelog both promise "任意一次 200 立即
+            # 解除" (a 429 costs no quota, so the retry is free).
+            self._lift_cordon_on_success(state, now)
             # The ok path used to return before the observer ran, which
             # meant counters.record() never saw a single completed request
             # and the rotation threshold could not fire (found 2026-10-17:
@@ -680,6 +694,41 @@ class EgressPool:
                         "probe failed unexpectedly", extra={"egress": state.spec.name}
                     )
             await asyncio.sleep(self._probe_interval_s)
+
+    def _lift_cordon_on_success(self, state: EgressState, now: float) -> None:
+        """End an IP-scoped cordon the moment a request on it answers 200.
+
+        The cordon is a verdict about the *egress IP* ("do not send here
+        again"), and a completed request is direct counter-evidence. This
+        matters because acquire() deliberately falls back to cordoned
+        buckets when nothing else is left (queue upstream beats inventing a
+        502), so such a re-test does happen and its result must count.
+        Combined with the ZEN_QUOTA_CORDON_MAX_S cap this makes the bench
+        self-correcting: expire, re-test for free, clear on first success.
+
+        Scope: IP-scoped verdicts only (quota exhaustion, soft throttle and
+        the free-tier gate). Any other cordon reason is either already
+        cleared on the rotation path or is not something a single 200
+        disproves.
+        """
+
+        if not state.cordoned(now):
+            return
+        reason = state.cordon_reason.split(" (", 1)[0]
+        if reason not in self._SUCCESS_LIFTABLE_CORDON_REASONS:
+            return
+        state.cordoned_until = 0.0
+        state.cordon_reason = ""
+        logger.info(
+            "cordon lifted: the bucket answered a request after the verdict",
+            extra={"egress": state.spec.name, "cordon_reason": reason},
+        )
+        EVENTS.emit(
+            "cordon_lifted",
+            egress=state.spec.name,
+            cordon_reason=reason,
+            reason="request_ok",
+        )
 
     def _lift_ip_scoped_cordon(self, state: EgressState, new_ip: str) -> None:
         """Undo cordons whose reason was a verdict about the previous IP.

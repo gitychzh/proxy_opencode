@@ -5,6 +5,29 @@
 
 ## [Unreleased]
 
+### Fixed — 自查扫描修四处缺陷（0.8.10，2026-10-30）
+
+系统性代码自查（全模块走读 + 门禁）发现并修复四处，全部配回归测试：
+
+1. **日志字段被静默丢弃**（`logsetup.py`）：`egress/rotate.py` 等处
+   `extra={"ip": …, "previous_ip": …, "route": …, "zen_bun_bin": …}` 等 9 个
+   字段未登记进 `FIELDS` 白名单，JSON 格式化器按白名单过滤时直接丢掉——
+   换 IP 审计（旧→新 IP 对照）在日志里失明。全部登记并加防回归测试。
+2. **「一次 200 立即解除隔离」未实现**（`egress/pool.py`）：CHANGELOG 0.8.7 与
+   OPERATIONS §4.1 都承诺 cordon 后一次 200 即解除（429 不烧额度、重试免费），
+   但 `release(ok=True)` 只清降权、不动 `cordoned_until`——隔离一律等满
+   封顶时长。现成功即清零 cordon，与文档语义对齐。
+3. **`ZEN_QUOTA_CORDON_MAX_S` 默认值漂移**（`config.py`）：`d2edb7e` 把
+   1800→600 时只改了 pool.py/env.example/文档，漏改 config.py 的 dataclass
+   默认值与 env 回退值两处——不设该环境变量时实际仍是 1800，与「Default and
+   docs now match」的提交声明相悖。统一为 600 并加三方一致性测试
+   （Settings 默认 = load_settings 默认 = EgressPool 构造值）。
+4. **非整数 `max_tokens` 原样透传上游**（`upstreams/zen/policy.py`）：
+   `_apply_output_budget` 遇到字符串 `'8000'`/bool/非整浮点时返回 budget 用于
+   上报，但 body 里的非法值原样发往上游——Applied 报告与实际请求不一致，
+   且字符串/bool 可能触发上游 400。现数字字符串与整浮点规范为 int 回写，
+   不可解析值替换为 budget（`clamped=true`，Applied 与 body 一致）。
+
 ### Fixed — edge 不再透传备用链自身的 billing 死亡应答（0.8.9，2026-10-29）
 
 **事故**：22:15-22:28 部署 0.8.8 时按旧流程 `docker rm -f zen-gw` 先停主链再

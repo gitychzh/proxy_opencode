@@ -97,6 +97,33 @@ def test_fallback_provenance_fields_are_rendered():
     assert parsed["blocked_s"] == 61.2
 
 
+def test_every_logged_extra_is_whitelisted():
+    """Guard the whitelist against drift.
+
+    A call site can only pass an `extra` key that FIELDS knows about —
+    anything else is silently dropped by both formatters. That has bitten
+    this project three times (key_id/ttl_hours/path, then fallback_*,
+    then the whole rotation/IP story: ip, previous_ip, current_ip,
+    matches_prefix, rotations, cap, original_trigger, route, zen_bun_*).
+    Scanning the package for literal `extra={"name": ...}` keys keeps the
+    next one from vanishing for months.
+    """
+    import re
+    from pathlib import Path
+
+    from proxy_opencode.logsetup import FIELDS
+
+    package = Path(__file__).resolve().parent.parent / "proxy_opencode"
+    missing: dict[str, set[str]] = {}
+    for path in package.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for block in re.finditer(r"extra=\{([^}]*)\}", text, re.S):
+            for key in re.finditer(r'"([a-z_][a-z0-9_]*)"\s*:', block.group(1)):
+                if key.group(1) not in FIELDS:
+                    missing.setdefault(key.group(1), set()).add(path.name)
+    assert not missing, f"extras missing from logsetup.FIELDS: {missing}"
+
+
 def test_setup_logging_env_json(monkeypatch):
     monkeypatch.setenv("LOG_FORMAT", "json")
     setup_logging()

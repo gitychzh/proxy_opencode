@@ -87,6 +87,25 @@ FIELDS = (
     "tokens",
     "token_budget",
     "unit",
+    # IP-identity provenance (egress/pool ip_changed, rotate prefix_mismatch,
+    # counters.record) — the whole rotation story is "which IP did we leave,
+    # which did we land on, does it match EXPECT_PREFIX". Without these the
+    # line only says "rotated" and the ISP re-issuing the SAME address (the
+    # 2026-10-25 lock-up) is invisible.
+    "ip",
+    "previous_ip",
+    "current_ip",
+    "matches_prefix",
+    # Rotation-cap refusal (rotate.request_rotation) and retry re-arming.
+    "rotations",
+    "cap",
+    "original_trigger",
+    # Edge primary/fallback routing (edge/app): which leg actually served.
+    "route",
+    # bun transport resolution (upstreams/zen_bun_transport): which binary /
+    # helper script was picked, so a wrong-path misconfig is diagnosable.
+    "zen_bun_bin",
+    "zen_bun_script",
 )
 
 _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"

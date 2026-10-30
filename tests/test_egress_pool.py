@@ -727,6 +727,77 @@ async def test_hard_429_cordon_is_capped_by_quota_cordon_max() -> None:
 
 
 @pytest.mark.asyncio
+async def test_hard_429_cordon_lifts_on_the_first_200() -> None:
+    """A re-tested bucket that answers 200 loses its cordon immediately.
+
+    The cap only exists so an expired verdict gets re-tested; acquire()
+    deliberately serves from a cordoned bucket when nothing else is left,
+    so that re-test happens and its 200 is direct counter-evidence against
+    the verdict. OPERATIONS §4.1 and the 0.8.7 changelog promise
+    "任意一次 200 立即解除" — before this the bench ran its full capped
+    length even after the leg demonstrably worked.
+    """
+
+    pool = make_pool("a", quota_cordon_max_s=1800.0)
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    lease = await pool.acquire()
+    await pool.release(lease, ok=False, kind="http_429", retry_after_s=41106.0)
+    assert state.cordoned(time.monotonic()) is True
+
+    retest = await pool.acquire()  # falls back to the cordoned bucket
+    assert retest.name == "a"
+    await pool.release(retest, ok=True)
+
+    assert state.cordoned(time.monotonic()) is False
+    assert state.cordon_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_soft_throttle_cordon_lifts_on_200(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A short-Retry-After throttle is also cleared by a 200, and says so."""
+
+    pool = make_pool("a")
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    lease = await pool.acquire()
+    await pool.release(lease, ok=False, kind="http_429", retry_after_s=30.0)
+    assert state.cordon_reason.startswith("free_quota_soft")
+
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        retest = await pool.acquire()
+        await pool.release(retest, ok=True)
+        lifted = [e for e in read() if e["event"] == "cordon_lifted"]
+        assert lifted and lifted[0]["reason"] == "request_ok"
+        assert lifted[0]["cordon_reason"] == "free_quota_soft"
+    finally:
+        cleanup()
+
+
+@pytest.mark.asyncio
+async def test_success_does_not_lift_a_non_ip_cordon() -> None:
+    """Only IP-scoped verdicts are lifted by a 200.
+
+    A failure-streak cordon (and the legacy generic reason) must keep its
+    deadline: one successful request does not undo "this leg was dying",
+    it only resets the streak that led there.
+    """
+
+    pool = make_pool("a")
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    state.cordoned_until = time.monotonic() + 120.0
+    state.cordon_reason = "repeated failures"
+
+    lease = await pool.acquire()
+    await pool.release(lease, ok=True)
+
+    assert state.cordoned(time.monotonic()) is True
+    assert state.cordon_reason == "repeated failures"
+
+
+@pytest.mark.asyncio
 async def test_quota_cordon_cap_zero_restores_window_length() -> None:
     """ZEN_QUOTA_CORDON_MAX_S=0 keeps the historical end-of-window bench."""
 

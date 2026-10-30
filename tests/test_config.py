@@ -256,6 +256,31 @@ def test_egress_cooldown_defaults_and_env(monkeypatch):
     assert s.zen_egress_cooldown_max_s == 9.0
 
 
+def test_quota_cordon_cap_defaults_match_the_pool(monkeypatch):
+    """The 429 bench cap must default to 600 everywhere it is declared.
+
+    Regression: ``Settings`` defaulted to 1800 (and load_settings read "1800"
+    from the environment) while ``EgressPool`` defaulted to 600 and the docs
+    plus ``deploy/ecs/env.example`` had already retired 1800 — a deployment
+    that simply never set ZEN_QUOTA_CORDON_MAX_S ran the value the post-mortem
+    had rejected (on 2026-10-29 a pool-wide short-window throttle stretched
+    ~12 minutes of outage into 30 minutes of 503s).
+    """
+
+    from proxy_opencode.egress.pool import EgressPool, EgressSpec
+
+    spec = EgressSpec("a", "http://a:10001")
+    monkeypatch.setenv("UPSTREAM_MODE", "zen-direct")
+    monkeypatch.delenv("ZEN_QUOTA_CORDON_MAX_S", raising=False)
+    s = config.load_settings()
+    assert s.zen_quota_cordon_max_s == 600.0
+    assert s.zen_quota_cordon_max_s == config.Settings().zen_quota_cordon_max_s
+    assert EgressPool([spec])._quota_cordon_max_s == 600.0  # noqa: SLF001
+
+    monkeypatch.setenv("ZEN_QUOTA_CORDON_MAX_S", "0")
+    assert config.load_settings().zen_quota_cordon_max_s == 0.0
+
+
 def test_fallback_recover_after_floor(monkeypatch):
     monkeypatch.setenv("UPSTREAM_MODE", "zen-direct")
     monkeypatch.delenv("ZEN_FALLBACK_RECOVER_AFTER", raising=False)

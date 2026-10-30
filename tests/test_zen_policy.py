@@ -117,6 +117,39 @@ def test_smaller_client_budget_is_left_alone():
     assert applied.clamped is False
 
 
+def test_numeric_string_budget_is_normalised_to_int():
+    body = _body(max_tokens="8000")
+    applied = apply_request_policy(body, profile=BIG_PICKLE)
+    assert body["max_tokens"] == 8_000
+    assert isinstance(body["max_tokens"], int)
+    assert applied.max_tokens == 8_000
+    assert applied.clamped is False
+
+
+def test_numeric_string_budget_above_budget_is_clamped():
+    body = _body(max_tokens="800000")
+    applied = apply_request_policy(body, profile=BIG_PICKLE)
+    assert body["max_tokens"] == 32_000
+    assert applied.clamped is True
+
+
+def test_uninterpretable_budget_is_replaced_with_the_budget():
+    for garbage in (True, "8e3", 8000.5, ["8000"]):
+        body = _body(max_tokens=garbage)
+        applied = apply_request_policy(body, profile=BIG_PICKLE)
+        assert body["max_tokens"] == 32_000, garbage
+        assert applied.max_tokens == 32_000
+        assert applied.clamped is True, garbage
+
+
+def test_integral_float_budget_is_normalised_to_int():
+    body = _body(max_tokens=512.0)
+    applied = apply_request_policy(body, profile=BIG_PICKLE)
+    assert body["max_tokens"] == 512
+    assert isinstance(body["max_tokens"], int)
+    assert applied.clamped is False
+
+
 def test_max_completion_tokens_is_the_field_that_gets_fitted():
     body = _body(max_completion_tokens=999_999)
     apply_request_policy(body, profile=BIG_PICKLE)

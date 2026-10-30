@@ -146,6 +146,26 @@ def _apply_reasoning_policy(
 # ------------------------------------------------------------ output budget
 
 
+def _coerce_output_int(value: Any) -> int | None:
+    """Normalise a client-supplied output budget to ``int``.
+
+    ``None`` means uninterpretable (bool, non-numeric string, container…).
+    """
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 def _apply_output_budget(
     body: dict[str, Any],
     profile: ModelProfile,
@@ -170,9 +190,17 @@ def _apply_output_budget(
             return None, False
         body[field] = budget
         return budget, False
-    if not isinstance(current, int) or isinstance(current, bool):
-        return budget, False
+    current = _coerce_output_int(current)
+    if current is None:
+        # An uninterpretable budget ('"8000"', true, …) would be rejected
+        # upstream, and the Applied report must match what actually goes
+        # out — replace it with the budget rather than passing it through.
+        body[field] = budget
+        return budget, True
     if current <= budget:
+        # Write back so coerced values ('8000' -> 8000) reach the upstream
+        # as the number it expects; a plain int is rewritten unchanged.
+        body[field] = current
         return current, False
     body[field] = budget
     return budget, True

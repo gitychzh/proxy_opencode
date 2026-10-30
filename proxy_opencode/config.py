@@ -356,8 +356,17 @@ class Settings:
     # of balance every request in between became a hard 503. Capping the
     # bench makes an expired verdict get re-tested, and one 200 lifts it
     # (a 429 costs no quota, so the retry is free). 0 = old behaviour.
-    #   ZEN_QUOTA_CORDON_MAX_S=1800
-    zen_quota_cordon_max_s: float = 1800.0
+    #
+    # 600, not 1800: on the evening of 2026-10-29 the whole pool hit a
+    # short-window throttle at once and an 1800s cap stretched that ~12-minute
+    # outage into 30 minutes of 503s. Since a re-test is free, the tighter cap
+    # only costs extra probes. This default must stay in step with
+    # ``EgressPool(quota_cordon_max_s=...)`` and ``deploy/ecs/env.example`` —
+    # they had drifted (config 1800 / pool 600 / docs 600), so any deployment
+    # that never set the variable silently ran the value the docs had already
+    # retired.
+    #   ZEN_QUOTA_CORDON_MAX_S=600
+    zen_quota_cordon_max_s: float = 600.0
     # Floor between two hard-429 rotations of the SAME bucket. A 429 is
     # ambiguous (transport gate / stale-prompt body gate / session reuse /
     # real per-IP quota all ship the same FreeUsageLimitError), and only the
@@ -733,7 +742,7 @@ def load_settings() -> Settings:
             os.environ.get("ZEN_EGRESS_COOLDOWN_MAX_S", "300")
         ),
         zen_quota_cordon_max_s=float(
-            os.environ.get("ZEN_QUOTA_CORDON_MAX_S", "1800")
+            os.environ.get("ZEN_QUOTA_CORDON_MAX_S", "600")
         ),
         zen_egress_rotate_min_interval_s=float(
             os.environ.get("ZEN_EGRESS_ROTATE_MIN_INTERVAL_S", "1800")
