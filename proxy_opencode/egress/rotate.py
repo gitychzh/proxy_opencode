@@ -313,7 +313,9 @@ class EgressRotator:
         outcome = await self._rotate_flow(state.spec, trigger)
         outcome.elapsed_s = time.monotonic() - started
         if outcome.ok:
-            self._pool.apply_rotation_success(name, outcome.ip_to or "")
+            self._pool.apply_rotation_success(
+                name, outcome.ip_to or "", ip_from=outcome.ip_from
+            )
             # New IP = fresh quota bucket: restart the counter inside the
             # current window, so the *new* address gets its own threshold.
             self._counters.reset(name)

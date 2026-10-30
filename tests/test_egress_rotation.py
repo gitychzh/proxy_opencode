@@ -22,6 +22,7 @@ from fastapi import FastAPI
 from proxy_opencode.auth.keystore import KeyStore
 from proxy_opencode.config import Settings, _parse_kv_int
 from proxy_opencode.egress.counters import HARD_QUOTA_RETRY_AFTER_S, EgressCounters
+from proxy_opencode.egress.eventlog import EVENTS
 from proxy_opencode.egress.pool import EgressPool, EgressSpec, EgressState, Lease
 from proxy_opencode.egress.rotate import EgressRotator
 from proxy_opencode.routes.admin import make_router
@@ -481,6 +482,46 @@ async def test_quota_cordon_cleared_by_rotation_success() -> None:
     assert state.cordoned_until == 0.0
     assert state.healthy is True
     assert state.egress_ip == NEW_IP
+
+
+@pytest.mark.asyncio
+async def test_rotation_applied_event_carries_rotator_source_ip(
+    tmp_path # type: ignore[no-untyped-def]
+) -> None:
+    """``rotation_applied`` must carry the rotator's captured source IP.
+
+    The probe loop usually lands the new IP before the rotator's poll
+    returns (production 2026-10-30 02:52:50 probe vs 02:53:09 poll), so
+    ``state.egress_ip`` at apply time already IS the new address; falling
+    back to it made the ledger show ``ip_from == ip_to`` — a phantom
+    "same-IP rotation" that cost a real audit investigation.
+    """
+
+    ledger = tmp_path / "events.jsonl"
+    EVENTS.configure(str(ledger))
+    try:
+        pool = make_pool("a")
+        mark_healthy_with_ip(pool)
+        lease = await pool.acquire()
+        await pool.release(lease, ok=False, kind="http_429")
+        state = pool.find("a")
+        assert state is not None
+        # The probe loop lands the fresh IP first (mid-reboot recovery):
+        state.egress_ip = NEW_IP
+        assert pool.apply_rotation_success("a", NEW_IP, "t1", ip_from=OLD_IP)
+        rows = [
+            json.loads(line)
+            for line in ledger.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        applied = [r for r in rows if r["event"] == "rotation_applied"]
+        assert applied == [
+            {"ts": applied[0]["ts"], "event": "rotation_applied",
+             "egress": "a", "ip_from": OLD_IP, "ip_to": NEW_IP}
+        ]
+        assert state.cordoned_until == 0.0
+    finally:
+        EVENTS.configure("")
 
 
 @respx.mock

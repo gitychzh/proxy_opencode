@@ -352,14 +352,20 @@ class EgressPool:
         state.rotating = bool(rotating)
         return True
 
-    def apply_rotation_success(self, name: str, ip: str, ip_at: str = "") -> bool:
+    def apply_rotation_success(
+        self, name: str, ip: str, ip_at: str = "", ip_from: str | None = None
+    ) -> bool:
         """Fold a verified rotation outcome into the egress state.
 
         The new IP was observed on ``/healthz`` inside the bucket prefix by
         the rotator, so the state is trustworthy here: clear any cordon
         (including the per-IP daily-quota one — the fresh IP has its own
         fresh quota) and mark the egress healthy immediately, without
-        waiting for the next slow probe.
+        waiting for the next slow probe. ``ip_from`` is the address the
+        rotator captured *before* the attempt; the probe loop often lands
+        the new IP first (measured 2026-10-30 02:52:50 vs 02:53:09), so
+        ``state.egress_ip`` at apply time already IS the new address and
+        would make the audit event read as a no-op "same-IP rotation".
         """
 
         state = self.find(name)
@@ -384,7 +390,7 @@ class EgressPool:
         EVENTS.emit(
             "rotation_applied",
             egress=name,
-            ip_from=previous,
+            ip_from=ip_from if ip_from is not None else previous,
             ip_to=ip,
         )
         return True

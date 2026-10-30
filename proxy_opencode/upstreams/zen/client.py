@@ -223,7 +223,12 @@ class ZenDirectAdapter:
                     # answers it. This is the last resort — a healthy
                     # sibling is always tried first (see __init__ note).
                     raise _transport_error(exc) from exc
-                _log_failover(kind=kind, remaining=attempts, detail=str(exc)[:120])
+                _log_failover(
+                    kind=kind,
+                    remaining=attempts,
+                    detail=str(exc)[:120],
+                    egress=lease.name,
+                )
                 lease = await _acquire()
                 continue
             except BaseException:
@@ -260,6 +265,7 @@ class ZenDirectAdapter:
                         kind="http_429_quota",
                         remaining=attempts,
                         detail=f"egress={lease.name}",
+                        egress=lease.name,
                     )
                     lease = await _acquire()
                     continue
@@ -287,7 +293,9 @@ class ZenDirectAdapter:
                 attempts -= 1
                 if attempts <= 0:
                     return result
-                _log_failover(kind=f"http_{status}", remaining=attempts)
+                _log_failover(
+                    kind=f"http_{status}", remaining=attempts, egress=lease.name
+                )
                 lease = await _acquire()
                 continue
             if (
@@ -302,7 +310,11 @@ class ZenDirectAdapter:
                 attempts -= 1
                 if attempts <= 0:
                     return self._egress_gate_answer(result)
-                _log_failover(kind="http_403_free_tier", remaining=attempts)
+                _log_failover(
+                    kind="http_403_free_tier",
+                    remaining=attempts,
+                    egress=lease.name,
+                )
                 lease = await _acquire()
                 continue
             # 200 body, or a request-level 4xx: final for this request.
@@ -666,19 +678,26 @@ class ZenDirectAdapter:
         return applied
 
 
-def _log_failover(*, kind: str, remaining: int, detail: str = "") -> None:
+def _log_failover(
+    *, kind: str, remaining: int, detail: str = "", egress: str = ""
+) -> None:
     """Record one upstream failure handed to the bucket-failover loop.
 
     Counts live in the message body (they are not whitelisted extras); never
     any request content. ``detail`` carries the transport failure
     class/message — without it a 300s header stall on a dead tunnel left no
-    trace at all (2026-10-25).
+    trace at all (2026-10-25). ``egress`` names the bucket that failed:
+    24h of production logs (2026-10-30) carried 351 of these lines with no
+    bucket attribution, and correlating the ECONNRESET storm back to its
+    source required fragile timestamp joins against ``bun upstream
+    attempt`` lines. The field is whitelisted in logsetup.FIELDS.
     """
 
     suffix = f" [{detail}]" if detail else ""
     logger.warning(
         f"egress failover: upstream {kind} on one bucket, "
-        f"retrying on another ({remaining} attempt(s) left){suffix}"
+        f"retrying on another ({remaining} attempt(s) left){suffix}",
+        extra={"egress": egress} if egress else None,
     )
 
 

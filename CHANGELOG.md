@@ -5,6 +5,27 @@
 
 ## [Unreleased]
 
+### Fixed — 生产日志深挖修两处审计缺陷（0.8.11，2026-10-30）
+
+从 ECS 生产日志 + 出口账本（0.8.9 时代分段）反推，归因链全部落到代码后修复两处，
+各配回归测试；核查确认传输层、池语义、轮换语义无行为缺陷：
+
+1. **故障转移日志不带桶名**（`zen/client.py`）：`_log_failover` 四个调用点全部
+   补 `egress` extra（白名单已有）。2026-10-30 生产 24h 内 351 条
+   `retrying on another` 无桶归属，ECONNRESET 风暴归因只能靠时间戳脆弱关联
+   （实测 349/351 来自 esp32 死桶）。
+2. **`rotation_applied` 事件的 `ip_from` 是探针已更新的现值**（`egress/pool.py`
+   + `egress/rotate.py`）：探针循环先于 rotator 落新 IP 时（实测 02:52:50 vs
+   02:53:09），事件读作 `ip_from == ip_to` 的"同 IP 轮换"幻象；改为显式传
+   rotator 捕获的源 IP，缺省回退旧值。
+   另在 `counters.py` 的 `window_rollover` 处注明 `ended_window` 承载的是
+   窗口**起点** epoch（审计误读为"滞后一天的旧窗口"）。
+
+核查结论（勿翻案）：0.8.9 时代账本不变量全部成立——cordon 桶 0 请求、
+78/78 cordon_s=600 封顶生效、rotations=7>5 系 0.8.8 时代持久化遗留计数且
+0.8.9 cap 正确拒绝；win107 探针死亡仍被选中属 tier-5 兜底设计
+（"queueing upstream beats inventing a 502"）。
+
 ### Fixed — 自查扫描修四处缺陷（0.8.10，2026-10-30）
 
 系统性代码自查（全模块走读 + 门禁）发现并修复四处，全部配回归测试：

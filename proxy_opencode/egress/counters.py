@@ -532,6 +532,11 @@ class EgressCounters:
             # Daily rollover at 08:00: every counter restarts from zero.
             # The burst cannot span the reset (it is metered per-IP and the
             # upstream resets its own counters at UTC 00:00 anyway).
+            #
+            # Field note for the audit trail: ``ended_window`` carries the
+            # window's *start* epoch (kept stable for report consumers),
+            # so the window it names is the one ending 24h later — not a
+            # stale window discovered a day late (2026-10-30 misread).
             EVENTS.emit(
                 "window_rollover",
                 egress=name,

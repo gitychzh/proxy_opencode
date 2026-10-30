@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 from typing import Any
@@ -1233,6 +1234,52 @@ async def test_chat_429_retries_on_a_sibling_before_the_backup() -> None:
         ("bucket-a", False, "http_429"),
         ("bucket-b", True, ""),
     ]
+    await a.aclose()
+    await b.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_transport_failover_log_names_the_failed_bucket(caplog) -> None: # type: ignore[no-untyped-def]
+    """The failover warning must attribute the failure to its bucket.
+
+    24h of production logs (2026-10-30) carried 351 ``retrying on another``
+    lines with no bucket name; attributing the ECONNRESET storm to the dead
+    esp32 adapter required a fragile timestamp join against ``bun upstream
+    attempt`` lines. ``egress`` is whitelisted in logsetup.FIELDS, so the
+    record carries it as a structured extra.
+    """
+
+    seq = {"n": 0}
+
+    def _upstream(request: httpx.Request) -> httpx.Response:
+        if seq["n"] == 0:
+            seq["n"] += 1
+            raise httpx.ConnectError("reset by peer")
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_SSE_OK
+        )
+
+    respx.post("https://opencode.ai/zen/v1/chat/completions").mock(
+        side_effect=_upstream
+    )
+    a, b = httpx.AsyncClient(), httpx.AsyncClient()
+    pool = _RollingStubPool({"bucket-a": a, "bucket-b": b})
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    with caplog.at_level(logging.WARNING, logger="proxy_opencode.zen"):
+        result = await adapter.chat(
+            {
+                "model": "opencode/big-pickle",
+                "messages": [{"role": "user", "content": "q"}],
+            }
+        )
+    assert result["choices"][0]["message"]["content"] == "ok"
+    records = [
+        r for r in caplog.records if "retrying on another" in r.getMessage()
+    ]
+    assert len(records) == 1
+    assert getattr(records[0], "egress", "") == "bucket-a"
     await a.aclose()
     await b.aclose()
     await adapter.aclose()
