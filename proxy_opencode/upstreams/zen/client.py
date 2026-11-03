@@ -57,8 +57,10 @@ logger = logging.getLogger("proxy_opencode.zen")
 
 # Bucket-failover cap for 429 / 5xx / free-tier 403 / transport retries. A
 # fully-drained pool must still surface its last upstream error instead of
-# looping until the client times out.
-FAILOVER_MAX_ATTEMPTS = 3
+# looping until the client times out. 4 consecutive bucket failures before
+# the backup chain may engage (ops decision 2026-11-04: three was too eager
+# to hand hermes-shaped traffic to the truncating backup).
+FAILOVER_MAX_ATTEMPTS = 4
 
 # StreamRelay close-hook outcome -> (pool release ok, kind).
 #

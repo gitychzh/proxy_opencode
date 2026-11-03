@@ -1385,6 +1385,34 @@ async def test_chat_429_walk_is_bounded_without_backup() -> None:
 
 @respx.mock
 @pytest.mark.asyncio
+async def test_chat_backup_needs_four_consecutive_bucket_failures() -> None:
+    """Ops decision 2026-11-04: the backup chain engages only after FOUR
+    consecutive bucket failures (FAILOVER_MAX_ATTEMPTS = 4).
+
+    A 5-bucket pool yields attempts = min(5, 4) = 4: exactly four upstream
+    hits, none of them the fifth bucket, and (with no wrapper here) the last
+    429 surfaces to the client afterwards.
+    """
+
+    route = respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=429, json={"error": {"message": "FreeUsageLimitError"}}
+    )
+    clients = {f"bucket-{i}": httpx.AsyncClient() for i in range(5)}
+    pool = _RollingStubPool(clients)
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+    assert result["__status__"] == 429
+    assert route.call_count == 4
+    assert [r[0] for r in pool.releases] == [f"bucket-{i}" for i in range(4)]
+    for client in clients.values():
+        await client.aclose()
+    await adapter.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
 async def test_chat_transport_failure_walks_siblings_even_with_backup() -> None:
     """A transport failure is retried on a sibling BEFORE the backup chain.
 
@@ -1880,7 +1908,7 @@ async def test_retry_after_alone_is_not_a_pool_wide_blackout() -> None:
         {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
     )
 
-    assert route.call_count == 3
+    assert route.call_count == 4  # FAILOVER_MAX_ATTEMPTS = 4 (2026-11-04)
     assert result["__status__"] == 429
     assert "__quota_blackout_s__" not in result
 
