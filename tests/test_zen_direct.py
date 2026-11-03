@@ -104,10 +104,11 @@ async def test_headers_reconstruct_captured_protocol() -> None:
         "opencode/1.19.5 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4"
     )
     assert headers["x-opencode-client"] == "cli"
-    # The genuine 1.19.4 client sends a 40-hex workspace hash here (never
-    # the legacy "global" literal); the gateway mirrors it with a fixed
-    # instance-level sha1 when OPENCODE_ZEN_PROJECT_ID is unset.
-    assert re.fullmatch(r"[0-9a-f]{40}", headers["x-opencode-project"])
+    # The live 1.19.5 client sends the literal "global" when workspace-less
+    # (capture 2026-11-03); the gateway mirrors that by default. A fixed
+    # 40-hex would be a cross-IP trackable identity; pin one only via
+    # OPENCODE_ZEN_PROJECT_ID.
+    assert headers["x-opencode-project"] == "global"
     # The captured shape carries the minted session id TWICE and never the
     # legacy `x-session-id` stable header nor a duplicated request id.
     assert headers["x-opencode-session-id"] == headers["x-opencode-session"]

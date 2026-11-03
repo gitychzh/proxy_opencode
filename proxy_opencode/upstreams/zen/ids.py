@@ -56,11 +56,13 @@ def is_valid_opencode_id(value: str, prefix: str) -> bool:
 
 
 def project_hash() -> str:
-    """Fixed 40-hex workspace hash for ``x-opencode-project``.
+    """Fixed 40-hex workspace hash (1.19.4-era ``x-opencode-project`` shape).
 
-    The genuine client derives it from the workspace directory (sha1). The
-    gateway has no single workspace, so a backend-stable constant keeps the
-    header byte-stable without pretending to be one real directory.
+    The 1.19.4 client derived it from the workspace directory (sha1); the
+    1.19.5 client sends the literal ``global`` when workspace-less (capture
+    2026-11-03), so the header default moved to ``protocol.PROJECT_ANONYMOUS``.
+    Kept for the capture-audit tooling and as the shape reference for a
+    configured ``OPENCODE_ZEN_PROJECT_ID``.
     """
 
     return hashlib.sha1(b"opencode-gateway-workspace").hexdigest()

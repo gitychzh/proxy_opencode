@@ -269,9 +269,9 @@ class Settings:
     # so the gateway does not either. Reading this env has no effect since
     # 0.7.6.
     zen_session_id: str = ""
-    # 2026-10-24 mirror note: the live 1.19.4 client no longer sends
-    # `x-session-id` at all; it sends a 40-hex workspace hash in
-    # `x-opencode-project`. Empty -> a fixed instance-level hash is used;
+    # 2026-11-03 mirror note: the live 1.19.5 client sends the literal
+    # "global" in `x-opencode-project` when workspace-less (1.19.4 sent a
+    # 40-hex workspace hash). Empty -> "global" (protocol.PROJECT_ANONYMOUS);
     # set OPENCODE_ZEN_PROJECT_ID to pin a specific captured value.
     zen_project_id: str = ""
     zen_client_version: str = DEFAULT_ZEN_CLIENT_VERSION

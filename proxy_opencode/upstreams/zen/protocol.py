@@ -6,7 +6,12 @@ AGENTS.md 硬约束 1):
 * ``User-Agent: opencode/<ver> ai-sdk/provider-utils/<pv> runtime/bun/<bv>``
   (the value is not itself sensitive, but keep the mirror);
 * ``x-opencode-client: cli``;
-* ``x-opencode-project``: 40-hex workspace hash;
+* ``x-opencode-project``: the genuine 1.19.5 client sends the literal
+  ``global`` when run outside a workspace (verified against a live capture
+  2026-11-03); 1.19.4 sent a 40-hex workspace hash. The gateway mirrors the
+  current client shape by default (``PROJECT_ANONYMOUS``); a fixed 40-hex
+  value would also be a cross-IP trackable identity, which the literal
+  ``global`` is not (every workspace-less opencode user shares it).
 * ``x-opencode-session`` **and** ``x-opencode-session-id`` carry the SAME
   freshly minted descending session id — the session is single-use upstream,
   so headers must be built inside the per-attempt loop;
@@ -19,11 +24,15 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Mapping
 
-from .ids import opencode_id, project_hash
+from .ids import opencode_id
 
 CLIENT_HEADER = "cli"
 PROVIDER_UTILS_VERSION = "4.0.23"
 ANONYMOUS_BEARER = "Bearer public"
+# 1.19.5 wire fact (live capture 2026-11-03): workspace-less clients send
+# this literal; it is the safest default because upstream cannot aggregate
+# per-client identity on a value every anonymous user shares.
+PROJECT_ANONYMOUS = "global"
 
 
 def user_agent(client_version: str, bun_version: str) -> str:
@@ -53,7 +62,7 @@ def build_headers(
         "Content-Type": "application/json",
         "User-Agent": user_agent(client_version, bun_version),
         "x-opencode-client": CLIENT_HEADER,
-        "x-opencode-project": project_id or project_hash(),
+        "x-opencode-project": project_id or PROJECT_ANONYMOUS,
         "x-opencode-session": session,
         "x-opencode-session-id": session,
         # The genuine client sends the well-known anonymous bearer; a
@@ -67,8 +76,8 @@ def build_headers(
 
 __all__ = [
     "ANONYMOUS_BEARER",
+    "PROJECT_ANONYMOUS",
     "build_headers",
-    "project_hash",
     "retry_after_seconds",
     "user_agent",
 ]

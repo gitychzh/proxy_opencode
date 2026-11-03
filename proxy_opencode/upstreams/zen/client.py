@@ -108,9 +108,9 @@ class ZenDirectAdapter:
             trust_env=settings.upstream_trust_env,
         )
         self._auth_free = not settings.zen_api_key
-        # 40-hex workspace hash for x-opencode-project; a captured genuine
-        # value can be pinned via OPENCODE_ZEN_PROJECT_ID, else a fixed sha1
-        # keeps the header byte-stable.
+        # x-opencode-project: "global" by default (1.19.5 wire fact, capture
+        # 2026-11-03); a captured value can be pinned via
+        # OPENCODE_ZEN_PROJECT_ID.
         self._project_id = settings.zen_project_id
         self._builtin_tools = builtin_tools()
         self._bun = BunTransport.from_settings(settings)

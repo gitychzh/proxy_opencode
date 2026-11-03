@@ -44,7 +44,9 @@ opencode 1.19.4 客户端协议）；另保留 `opencode-serve`（驱动本机�
   （`~((ms<<12)+counter)&0xFFFFFFFFFFFF`，同毫秒 counter < 64）；ascending 恒定
   403。`x-opencode-request`（`msg_`）仍 ascending。1.19.4 实发双头
   `x-opencode-session` + `x-opencode-session-id`（同值），**不发** legacy
-  `x-session-id`，不重复 `x-opencode-request-id`；`x-opencode-project` 为 40-hex。
+  `x-session-id`，不重复 `x-opencode-request-id`；`x-opencode-project` 为
+  字面量 `global`（1.19.5 实发，2026-11-03 抓包；1.19.4 曾发 40-hex，已废弃），
+  固定 40-hex 是跨 IP 可追踪身份，不得作为默认值。
 - **body 门（快照新鲜度）**：上游校验请求体是否"本请求的现场渲染"。同 IP、同
   bun、同样新 mint session 的 2×2 对照：官方客户端 200 / 网关 429；UA、工具集、
   AGENTS 附录单独都不是判别项，**`Today's date:` 停在抓包当天就 429，刷成当天即
