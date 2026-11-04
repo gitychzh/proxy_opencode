@@ -558,6 +558,15 @@ class EgressPool:
             self._cooldown_s * streak,
             self._cooldown_max_s,
         )
+        # Beyond the flat cap, double the window per 5 further consecutive
+        # failures (hard cap 3600s). A leg still failing after the flat cap is
+        # almost certainly dead hardware, not a blip — the esp32 tunnel
+        # measured 1961 cooldowns in 8h at the flat 300s (2026-11-04), taxing
+        # every request on the retry chain with a doomed CONNECT first.
+        if self._cooldown_s * streak >= self._cooldown_max_s:
+            flat_streak = self._cooldown_max_s / self._cooldown_s
+            doublings = min(3, max(0, int((streak - flat_streak) // 5)))
+            seconds = min(self._cooldown_max_s * (2**doublings), 3600.0)
         state.cooldown_until = max(state.cooldown_until, now + seconds)
         logger.info(
             "egress demoted (cooldown, still in rotation)",

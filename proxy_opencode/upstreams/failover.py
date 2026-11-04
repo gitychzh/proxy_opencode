@@ -253,6 +253,58 @@ class FailoverAdapter:
         self._first_chunk_timeout_s = max(
             0.0, float(settings.zen_fallback_first_chunk_timeout_s)
         )
+        # Daily backup budget (UTC day, 0 = unlimited). The backup chain is
+        # PAID per token; during a CGNAT-wide burnout every request otherwise
+        # lands on it and bills real money (2026-11-04: 662 fallbacks in one
+        # evening). Counted per successful backup answer; once spent, the
+        # primary's own failure is relayed to the client untouched and the
+        # budget resets at the next UTC midnight.
+        self._daily_max = max(0, int(getattr(settings, "zen_fallback_daily_max", 0)))
+        self._budget_day = ""
+        self._budget_used = 0
+
+    # ------------------------------------------------------------- budget
+
+    def _budget_blocked(self) -> bool:
+        """True once today's backup budget is spent (0 = unlimited)."""
+
+        if self._daily_max <= 0:
+            return False
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        if day != self._budget_day:
+            self._budget_day = day
+            self._budget_used = 0
+        return self._budget_used >= self._daily_max
+
+    def _budget_exhausted_relay(self, note: str) -> dict[str, Any]:
+        """Gateway-owned retryable 503 for requests refused by the budget."""
+
+        return {
+            "__status__": 503,
+            "content": {
+                "error": {
+                    "message": (
+                        "primary upstream unavailable and the backup chain's "
+                        f"daily budget is spent ({self._budget_used}/"
+                        f"{self._daily_max} requests served today); {note}"
+                    ),
+                    "type": "api_error",
+                    "param": None,
+                    "code": "fallback_budget_exhausted",
+                }
+            },
+        }
+
+    def _note_backup_served(self) -> None:
+        """Charge one served backup answer against today's budget."""
+
+        if self._daily_max <= 0:
+            return
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        if day != self._budget_day:
+            self._budget_day = day
+            self._budget_used = 0
+        self._budget_used += 1
 
     # ------------------------------------------------------------ status
 
@@ -265,6 +317,11 @@ class FailoverAdapter:
             "model": str(self._default_model or ""),
             "hold_remaining_s": round(remaining, 1) if remaining > 0 else 0,
             "scope": "request" if self._request_scoped else "hold",
+            "daily_budget": {
+                "max": self._daily_max,
+                "used": self._budget_used,
+                "day": self._budget_day,
+            },
         }
 
     # ------------------------------------------------------------- proxy
@@ -281,6 +338,24 @@ class FailoverAdapter:
         _MARKER.set(None)
         if time.monotonic() < self._fallback_until:
             # Breaker open: skip the (recently failed) primary entirely.
+            if self._budget_blocked():
+                logger.error(
+                    "FALLBACK BUDGET EXHAUSTED: backup gateway %s capped at "
+                    "%d requests today; refusing to serve the open breaker "
+                    "from the paid backup (primary blackout continues)",
+                    FALLBACK_NAME,
+                    self._daily_max,
+                )
+                EVENTS.emit(
+                    "fallback_budget_exhausted",
+                    severity="incident",
+                    primary=self.name,
+                    used=self._budget_used,
+                    daily_max=self._daily_max,
+                )
+                return self._budget_exhausted_relay(
+                    "the primary is in a quota blackout"
+                )
             return await self._via_secondary(payload, "hold window")
         try:
             result = await self._call_primary(payload)
@@ -294,6 +369,23 @@ class FailoverAdapter:
             # route answers 400 with its own code (context_length_exceeded).
             raise
         except Exception as exc:  # transport, timeout, adapter fault
+            if self._budget_blocked():
+                logger.error(
+                    "FALLBACK BUDGET EXHAUSTED: primary transport failure "
+                    "(%s) NOT relayed to the paid backup; surfacing the "
+                    "primary error instead (%d/%d today)",
+                    _describe(exc)[:120],
+                    self._budget_used,
+                    self._daily_max,
+                )
+                EVENTS.emit(
+                    "fallback_budget_exhausted",
+                    severity="incident",
+                    primary=self.name,
+                    used=self._budget_used,
+                    daily_max=self._daily_max,
+                )
+                raise
             return await self._trip(payload, _describe(exc))
         status = result.get("__status__") if _is_error_relay(result) else None
         if isinstance(status, int) and status >= 400:
@@ -308,6 +400,27 @@ class FailoverAdapter:
             blackout = (
                 result.get("__quota_blackout_s__") if _is_error_relay(result) else None
             )
+            if self._budget_blocked():
+                # Budget spent: relay the PRIMARY's own error untouched. The
+                # client (and its retry policy) sees the real upstream state
+                # instead of a paid, truncated backup answer.
+                logger.error(
+                    "FALLBACK BUDGET EXHAUSTED: primary HTTP %s NOT relayed "
+                    "to the paid backup; relaying the primary error as-is "
+                    "(%d/%d today)",
+                    status,
+                    self._budget_used,
+                    self._daily_max,
+                )
+                EVENTS.emit(
+                    "fallback_budget_exhausted",
+                    severity="incident",
+                    primary=self.name,
+                    used=self._budget_used,
+                    daily_max=self._daily_max,
+                    upstream_status=status,
+                )
+                return result
             return await self._trip(
                 payload, f"upstream HTTP {status}", blackout_s=blackout
             )
@@ -540,6 +653,7 @@ class FailoverAdapter:
             )
             self._fallback_until = 0.0
             return _backup_error_relay(status, self._secondary_name, reason)
+        self._note_backup_served()
         return result
 
     def _announce_recovery(self) -> None:

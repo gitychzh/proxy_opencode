@@ -243,6 +243,39 @@ async def test_three_consecutive_failures_demote_but_never_cordon() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cooldown_doubles_past_the_flat_cap() -> None:
+    """Exponential backoff beyond the flat cap (esp32 tunnel, 2026-11-04).
+
+    A leg that keeps failing at the flat cap was re-probed every five minutes
+    — the esp32 tunnel measured 1961 doomed cooldowns in 8h, each taxing every
+    request on the retry chain with a CONNECT that could not succeed. Past the
+    cap the window doubles per 5 further consecutive failures (doublings
+    capped at 3), and one success resets the streak (existing lift rule).
+    """
+
+    pool = make_pool("a")
+    state = pool._states[0]
+    state.healthy = True
+
+    async def fail_n(n: int) -> float:
+        for _ in range(n):
+            lease = await pool.acquire()
+            await pool.release(lease, ok=False, kind="transport")
+        return state.cooldown_until - time.monotonic()
+
+    w15 = await fail_n(15)   # reaches the flat cap: 20s * 15 = 300s
+    assert 295 <= w15 <= 301
+    w20 = await fail_n(5)    # 5 more -> one doubling: 600s
+    assert 595 <= w20 <= 601
+    w25 = await fail_n(5)    # 5 more -> two doublings: 1200s
+    assert 1195 <= w25 <= 1201
+    w30 = await fail_n(5)    # 5 more -> three doublings (capped): 2400s
+    assert 2395 <= w30 <= 2401
+    w45 = await fail_n(15)   # far past: doublings stay capped at 3
+    assert w45 <= 2401
+
+
+@pytest.mark.asyncio
 async def test_429_cordons_until_next_window_reset_when_cap_is_off() -> None:
     """ZEN_QUOTA_CORDON_MAX_S=0: the bench runs to the 08:00 CST window reset.
 

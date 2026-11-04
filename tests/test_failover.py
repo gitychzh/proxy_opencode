@@ -797,3 +797,71 @@ async def test_quota_blackout_hold_is_capped_at_one_day() -> None:
     await adapter.chat({"model": "m1"})
 
     assert adapter.fallback_status()["hold_remaining_s"] <= 86400.0
+
+
+async def test_fallback_daily_budget_relays_primary_error_after_cap() -> None:
+    """2026-11-04: the paid backup (proxy_ms) must not be burnable unbound.
+
+    After ``zen_fallback_daily_max`` successful backup answers, the primary's
+    own error is relayed untouched (client sees the REAL upstream state) and
+    the secondary is never called again until the next UTC day.
+    """
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary, zen_fallback_daily_max=1)
+    secondary.outcomes = [{"id": "ok-backup"}]
+
+    # 1) first 429 -> backup engaged and charged (1/1)
+    primary.outcomes = [relay(429)]
+    first = await adapter.chat({"model": "big-pickle"})
+    assert first == {"id": "ok-backup"}
+    assert len(secondary.calls) == 1
+    budget = adapter.fallback_status()["daily_budget"]
+    assert budget["used"] == 1 and budget["max"] == 1
+
+    # 2) second 429 -> budget spent, primary error relayed as-is
+    primary.outcomes = [relay(429)]
+    second = await adapter.chat({"model": "big-pickle"})
+    assert second["__status__"] == 429
+    assert "__fallback_budget_exhausted__" not in str(second)
+    assert len(secondary.calls) == 1
+
+    # 3) primary transport failure with a spent budget -> raises (no backup)
+    primary.outcomes = [ConnectionError("boom")]
+    with pytest.raises(ConnectionError):
+        await adapter.chat({"model": "big-pickle"})
+    assert len(secondary.calls) == 1
+
+
+async def test_fallback_daily_budget_refuses_open_breaker() -> None:
+    """Hold window open + budget spent -> gateway-owned 503, no backup call."""
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary, zen_fallback_daily_max=1)
+    blackout = relay(429)
+    blackout["__quota_blackout_s__"] = 600.0
+    primary.outcomes = [blackout]
+    secondary.outcomes = [{"id": "ok-backup"}]
+
+    served = await adapter.chat({"model": "big-pickle"})
+    assert served == {"id": "ok-backup"}  # breaker open + one charged answer
+    assert adapter.fallback_status()["engaged"] is True
+
+    refused = await adapter.chat({"model": "big-pickle"})
+    assert refused["__status__"] == 503
+    assert refused["content"]["error"]["code"] == "fallback_budget_exhausted"
+    assert len(secondary.calls) == 1
+
+
+async def test_fallback_daily_budget_zero_is_unlimited() -> None:
+    """Default (0) keeps the old behaviour: every failure may fall back."""
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary)  # daily_max unset -> 0
+    for _ in range(5):
+        primary.outcomes = [relay(429)]
+        secondary.outcomes = [{"id": "ok"}]
+        result = await adapter.chat({"model": "big-pickle"})
+        assert result == {"id": "ok"}
+    assert len(secondary.calls) == 5
+    assert adapter.fallback_status()["daily_budget"]["max"] == 0

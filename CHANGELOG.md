@@ -5,6 +5,20 @@
 
 ## [Unreleased]
 
+### Added — 付费备用链日预算闸 + 传输失败指数退避（0.8.14，2026-11-04）
+
+11-03 晚 CGNAT 全段烧穿的系统性处置（用户令：proxy_ms 是收费的，不许再无界烧）：
+
+1. **`ZEN_FALLBACK_DAILY_MAX`（`failover.py`，默认 0=不限）**：备用链每 UTC 日
+   成功应答次数预算。超限后主链自身错误**原样**直达客户端（429/异常不再改投
+   proxy_ms），breaker 打开时回 gateway-owned 503
+   `fallback_budget_exhausted`；`/healthz` fallback 块带 `daily_budget` 用量。
+   背景：16:50Z 起三桶轮换全部成功但新 IP 秒 429（CGNAT 预烧），cap 30 打满
+   后 66 分钟内 662 次 fallback 全落收费链。
+2. **cooldown 封顶后指数退避（`egress/pool.py`）**：连续失败越过 flat cap
+   （300s）后每 +5 次翻倍（封顶 3 次翻倍 → 2400s）。esp32 死隧道实测 8h
+   1961 次 cooldown、60% 失败率——flat cap 让它每 5 分钟白吃一次重试链。
+
 ### Changed — 池内重试 4 连败才允许备用链接管（0.8.13，2026-11-04）
 
 - `FAILOVER_MAX_ATTEMPTS` 3 → 4（`zen/client.py`）：4 次连续桶失败才 fallback

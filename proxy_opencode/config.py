@@ -450,6 +450,12 @@ class Settings:
     # (the public alias deepseek-ai/deepseek-v4.1-flash arrives as big-pickle),
     # so map keys must be the resolved upstream ids, not the public ones.
     zen_fallback_default_model: str = ""
+    # Daily cap on requests the backup chain may serve (UTC day, 0 = off).
+    # The backup is PAID per token (proxy_ms): an unbounded fallback during a
+    # CGNAT-wide burnout (2026-11-04: 662 fallbacks in one evening) bills real
+    # money for truncated answers. Past the cap the primary's own error is
+    # relayed to the client untouched instead.
+    zen_fallback_daily_max: int = 0
 
     @property
     def dev_open(self) -> bool:
@@ -780,4 +786,7 @@ def load_settings() -> Settings:
         zen_fallback_default_model=os.environ.get(
             "ZEN_FALLBACK_DEFAULT_MODEL", ""
         ).strip(),
+        zen_fallback_daily_max=max(
+            0, int(os.environ.get("ZEN_FALLBACK_DAILY_MAX", "0") or "0")
+        ),
     )
