@@ -738,6 +738,40 @@ async def test_late_hard_429_does_not_shorten_a_live_cordon() -> None:
 
 
 @pytest.mark.asyncio
+async def test_release_emits_per_request_ledger_event(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Every release writes an ``egress_request`` row with bucket + egress_ip.
+
+    AGENTS.md requires per-bucket traffic (success/failure incl. 429/5xx/
+    timeouts) to be readable from the JSONL event stream; until 0.8.24 the
+    ledger only carried cordon/fallback events, so per-bucket traffic stats
+    died with the in-memory counters on every restart (found 2026-11-04
+    while auditing the four-bucket traffic for the day).
+    """
+
+    pool = make_pool("a")
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    state.egress_ip = "9.9.9.9"
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        lease = await pool.acquire()
+        await pool.release(lease, ok=True)
+        lease = await pool.acquire()
+        await pool.release(lease, ok=False, kind="http_429", retry_after_s=45.0)
+        rows = [e for e in read() if e["event"] == "egress_request"]
+        assert len(rows) == 2
+        assert rows[0]["egress"] == "a"
+        assert rows[0]["egress_ip"] == "9.9.9.9"
+        assert rows[0]["ok"] is True
+        assert rows[0]["kind"] == "ok"
+        assert rows[1]["ok"] is False
+        assert rows[1]["kind"] == "http_429"
+        assert rows[1]["retry_after_s"] == 45.0
+    finally:
+        cleanup()
+
+
+@pytest.mark.asyncio
 async def test_hard_429_cordon_is_capped_by_quota_cordon_max() -> None:
     """A hard 429 benches the bucket for the cap, not until the window reset.
 
@@ -944,7 +978,9 @@ async def test_probe_success_keeps_request_failure_streak(tmp_path) -> None:  # 
         # probe itself must add nothing but the IP observation, and no
         # recovery event / failure-wipe side effect.
         assert [e["event"] for e in read() if e["egress"] == "a"] == [
+            "egress_request",
             "egress_cooldown",
+            "egress_request",
             "egress_cooldown",
             "egress_ip_observed",
         ]

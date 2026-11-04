@@ -5,6 +5,15 @@
 
 ## [Unreleased]
 
+### Added — 逐请求出口流量账本事件（0.8.24，2026-11-04）
+
+四桶流量审计（2026-11-04 晚）发现：`egress_events.jsonl` 只有 cordon/fallback/probe 事件，**没有逐请求成败记录**——按桶统计流量只能靠 `admin/egresses` 的内存计数（容器重启即失忆），违反 AGENTS.md「统计各桶请求量（成功/失败，含 429/5xx/超时）从 JSONL 事件读取，且必须带 bucket_name + egress_ip」。
+
+- `EgressPool.release()` 现在每次记账都发射 `egress_request` 事件：`egress`（桶名）+ `egress_ip` + `ok` + `kind`（`http_429`/`transport`/`stream_stalled`/…）+ `retry_after_s`。成功与失败（含 429）全覆盖，一次上游尝试一行。
+- 同日铁律裁决：低谷期（17:15–18:25 CST）四桶 429 用受控实验复核——同桶同 IP 同代码，小请求 200、14K token 大请求亦 200（低谷已过），代码变量排除；429 归因为上游按 IP+token 慢回填的余量低谷，非代码 BUG。CLI 200 而网关大请求 429 的差异是请求 token 体量（CLI ~200 token vs 业务 20K），不是传输/body/session 路径问题。
+
+门禁：pytest 510 passed，ruff clean，mypy clean。
+
 ### Fixed — 删除池级「配额 blackout 连坐」：一条 429 不再让所有新会话陪葬（0.8.21，2026-11-04）
 
 用户报 win107 的 hermes「新会话也根本不能用」。完整输出证据：hermes `-z` 跑满 7 分钟零回答（SSH 超时 124）；ECS 日志 `egress pool in quota blackout; skipping upstream` 连续 585s 直接跳过主链，备用链 proxy_ms 回 `all upstream keys for group 'ms' are cooling down; retry in 300s` → 503 → hermes 重试等 300s。

@@ -602,6 +602,20 @@ class EgressPool:
         lease.released = True
         state.inflight = max(0, state.inflight - 1)
         state.total += 1
+        # Per-request ledger event (AGENTS.md: bucket traffic must be
+        # readable from the JSONL event stream with bucket_name + egress_ip;
+        # until 0.8.24 only cordon/fallback events existed, so per-bucket
+        # traffic stats died with the in-memory counters on every restart).
+        EVENTS.emit(
+            "egress_request",
+            egress=state.spec.name,
+            egress_ip=state.egress_ip,
+            ok=ok,
+            kind=kind if kind else ("ok" if ok else "error"),
+            retry_after_s=round(retry_after_s, 1)
+            if retry_after_s is not None
+            else None,
+        )
         now = time.monotonic()
         if ok:
             state.failures = 0
