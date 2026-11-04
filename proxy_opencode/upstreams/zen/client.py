@@ -48,7 +48,6 @@ from .body import build_body
 from .errors import (
     egress_unavailable_result,
     is_free_tier_rejection,
-    quota_exhausted_result,
 )
 from .policy import Applied, apply_request_policy
 from .protocol import build_headers, retry_after_seconds
@@ -185,19 +184,6 @@ class ZenDirectAdapter:
             )
             return self._egress_gate_answer(result)
 
-        # Pool-wide quota blackout: the allowance is account-scoped, so a
-        # fresh IP cannot rescue it. Answering here costs milliseconds and
-        # hands the request to the fallback chain at once, instead of walking
-        # every benched bucket (one upstream RTT each, ~1s apiece).
-        blackout_probe = getattr(self._pool, "quota_blackout_s", None)
-        blackout = float(blackout_probe()) if callable(blackout_probe) else 0.0
-        if blackout > 0:
-            logger.warning(
-                "egress pool in quota blackout; skipping upstream",
-                extra={"blackout_s": round(blackout, 1)},
-            )
-            return quota_exhausted_result(blackout)
-
         attempts = min(self._pool.size, FAILOVER_MAX_ATTEMPTS)
 
         # Conversation fingerprint for egress affinity (2026-11-04): system
@@ -275,18 +261,8 @@ class ZenDirectAdapter:
                 # with the SAME model and a 429 burns no quota, so walking
                 # the pool is strictly better than the backup chain (which
                 # serves a different model — or, out of balance, a 503).
-                # The walk is bounded: each 429 cordons its bucket, and the
-                # blackout check below stops the sweep once every bucket is
-                # benched.
-                blackout = (
-                    float(blackout_probe()) if callable(blackout_probe) else 0.0
-                )
-                if blackout > 0:
-                    logger.warning(
-                        "egress pool in quota blackout after 429; stopping retries",
-                        extra={"blackout_s": round(blackout, 1)},
-                    )
-                    return quota_exhausted_result(blackout)
+                # The walk is bounded by ``exclude`` (every bucket is tried
+                # at most once per request), not by a pool-wide blackout.
                 if attempts > 0:
                     _log_failover(
                         kind="http_429_quota",

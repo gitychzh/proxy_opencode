@@ -1802,12 +1802,14 @@ async def test_relay_on_close_outcome_completed_when_finish_seen() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chat_answers_quota_blackout_without_touching_upstream() -> None:
-    """When every bucket is out of quota, skip the upstream entirely.
+async def test_chat_still_touches_upstream_despite_pool_blackout() -> None:
+    """0.8.21: a pool-wide blackout verdict must NEVER skip the upstream.
 
-    The allowance is account-scoped (verified 2026-10-29 with a freshly
-    rebooted MiFi IP), so walking the benched pool only added one upstream
-    round trip per bucket before the fallback chain took over.
+    Measured 2026-11-04: one oversized conversation 429'd on four DIFFERENT
+    IPs in 15s, the old code cordoned all four and then skipped every
+    upstream attempt for 585s, while a genuine CLI request on two of those
+    exact IPs answered 200 immediately. A 429 describes one request, not
+    the capacity of the whole pool.
     """
 
     class _BlackoutPool(_StubPool):
@@ -1822,31 +1824,32 @@ async def test_chat_answers_quota_blackout_without_touching_upstream() -> None:
     adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
 
     with respx.mock(assert_all_called=False) as mock:
-        route = mock.post("https://opencode.ai/zen/v1/chat/completions")
+        route = mock.post("https://opencode.ai/zen/v1/chat/completions").respond(
+            status_code=429, json={"error": {"message": "FreeUsageLimitError"}}
+        )
         result = await adapter.chat(
             {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
         )
-        assert route.call_count == 0, "no upstream attempt during a blackout"
+        assert route.call_count == 1, "blackout must never skip the upstream"
 
+    assert pool.called == 0, "the blackout probe is no longer consulted"
     assert result["__status__"] == 429
-    assert result["__quota_blackout_s__"] == 20893.0
-    assert result["content"]["error"]["code"] == "free_quota_exhausted"
+    await adapter.aclose()
 
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_chat_stops_retrying_once_a_429_tips_the_pool_into_blackout() -> None:
-    """The first request of an exhausted day must stop at the tipping 429.
+async def test_chat_keeps_walking_siblings_after_429_even_with_blackout() -> None:
+    """0.8.21: a 429 mid-walk no longer short-circuits on the pool blackout.
 
-    Before this, a fresh process (cordon state empty) walked every bucket —
-    four upstream round trips, 7.14s measured — before the fallback chain
-    could answer a 16-token prompt.
+    The walk is bounded only by FAILOVER_MAX_ATTEMPTS and the retry-walk
+    ``exclude`` set (0.8.19), never by a pool-wide capacity verdict.
     """
 
     class _TippingPool(_StubPool):
         @property
         def size(self) -> int:
-            return 4  # four benchable buckets in this scenario
+            return 4
 
         def __init__(self, client: httpx.AsyncClient) -> None:
             super().__init__(client)
@@ -1854,8 +1857,7 @@ async def test_chat_stops_retrying_once_a_429_tips_the_pool_into_blackout() -> N
 
         def quota_blackout_s(self) -> float:
             self.probes += 1
-            # 0 while the pre-loop check runs, then "everything is benched".
-            return 0.0 if self.probes == 1 else 20893.0
+            return 20893.0
 
     route = respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
         status_code=429,
@@ -1870,9 +1872,10 @@ async def test_chat_stops_retrying_once_a_429_tips_the_pool_into_blackout() -> N
         {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
     )
 
-    assert route.call_count == 1, "must not walk the rest of the dead pool"
+    assert route.call_count == 4, "the full bounded sibling walk still runs"
+    assert pool.probes == 0, "the blackout probe is no longer consulted"
     assert result["__status__"] == 429
-    assert result["__quota_blackout_s__"] == 20893.0
+    await adapter.aclose()
 
 
 @respx.mock

@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+### Fixed — 删除池级「配额 blackout 连坐」：一条 429 不再让所有新会话陪葬（0.8.21，2026-11-04）
+
+用户报 win107 的 hermes「新会话也根本不能用」。完整输出证据：hermes `-z` 跑满 7 分钟零回答（SSH 超时 124）；ECS 日志 `egress pool in quota blackout; skipping upstream` 连续 585s 直接跳过主链，备用链 proxy_ms 回 `all upstream keys for group 'ms' are cooling down; retry in 300s` → 503 → hermes 重试等 300s。
+
+根因是代码 BUG，不是配额：06:54:06–06:54:21 一条超大会话请求的 retry walk 在 **4 个不同出口 IP** 上各撞一次 429，旧代码把每个 429 都判成 `free_quota_exhausted` 并 cordon 600s，随后 `quota_blackout_s()` 让**之后每一条无关请求（包括全新会话）根本不发往上游**。金标准对照：被判「耗尽」的 mobile `223.68.24.212` 与 telecom `121.226.168.81`，同一时刻用本机 opencode CLI 单发均 **200 OK**——不存在耗尽。
+
+- `ZenDirectAdapter.chat()` 删除两处 blackout 早退（进入时 / 429 中途）；请求永远按正常选桶逻辑发往主链，429 只由 0.8.19 的 `exclude` 有界兄弟桶遍历处理，走完才交备用链。
+- `quota_blackout_s()` 保留为兼容探针但不再被客户端 consulted；池级容量判决彻底下线。
+- 两个回归测试反转为新契约：`test_chat_still_touches_upstream_despite_pool_blackout`、`test_chat_keeps_walking_siblings_after_429_even_with_blackout`。
+
+门禁：pytest 510 passed，ruff clean，mypy clean。
+
+
 ### Changed — 源头简化：删除指数退避补丁层，4 连败旅程内桶去重（0.8.19，2026-11-04）
 
 用户方向：故障是代码 BUG，从源头解决而不是堆积惩罚机制。理论上没有
