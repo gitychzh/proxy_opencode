@@ -5,6 +5,22 @@
 
 ## [Unreleased]
 
+### Fixed — cordon 的桶彻底静默：网关自己的撞击是 429 持续存在的原因（0.8.18，2026-11-04）
+
+用户金标准实验（同一 IP 上 CLI 对照）推翻了「免费日配额烧穿」的判读：
+上游显式回复 `free_quota_exhausted / reset_at 明天 08:00 CST` 的两个桶
+（mobile `36.149.54.32`、telecom `49.70.12.133`），**单发真实 CLI 请求当
+场 200**。不存在「耗尽等重置」——存在的是网关自己的高频撞击把上游按
+IP 的 token 桶（慢回填）持续抽干：0.8.17 把 cordon 桶排进第 3 层接真实
+流量后，4 分钟内 55 次撞击全 429。
+
+- cordon 桶不再获得任何 tier（回退 0.8.17）：静默让回填累积，cordon
+  到期后桶自动回 `ready`，第一发真实请求以 CLI 级速率重新试探；
+- 桶流量新秩序：ready → cooling-非LR → last-resort → cooling-LR →
+  probe 死腿 → 全部兜底；
+- 测试 `test_cordoned_buckets_stay_silent_while_others_serve` 钉住新语义
+  （cordon 期间永不选中 + 到期回轮换）。
+
 ### Fixed — cordon 的配额桶重新排在 last-resort 之前（0.8.17，2026-11-04）
 
 0.8.16 部署后 37 分钟生产实测暴露 tiers 漂移：docstring 说「cordon 桶是

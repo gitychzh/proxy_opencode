@@ -1540,11 +1540,14 @@ async def test_session_affinity_ttl_frees_the_slot() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cordoned_quota_buckets_outrank_last_resort() -> None:
-    """2026-11-04 regression: esp32 absorbed 237 of 286 upstream attempts
-    in 37 minutes (3-4 futile CONNECTs per request) because cordoned quota
-    buckets ranked BELOW the last-resort tier. Real capacity — a cordon
-    lifts with time — must outrank the weak uplink.
+async def test_cordoned_buckets_stay_silent_while_others_serve() -> None:
+    """0.8.18 regression (reversing 0.8.17): a cordoned bucket gets NO tier.
+
+    Measured 2026-11-04: the gateway's own bombardment keeps a cordoned IP
+    pinned at 429 — 55 requests hit cordoned buckets in 4 minutes, every one
+    429ing, while a SINGLE genuine CLI request through the very same cordoned
+    IPs answered 200. Silence lets the upstream token bucket refill; the
+    cordon expiry re-probes at CLI-like rate.
     """
 
     pool = make_pool("q1", "q2", "slow", last_resort=frozenset({"slow"}))
@@ -1558,14 +1561,12 @@ async def test_cordoned_quota_buckets_outrank_last_resort() -> None:
         lease = await pool.acquire()
         seen.append(lease.name)
         await pool.release(lease, ok=False, kind="upstream_429")
-    assert set(seen) == {"q1", "q2"}   # weak link untouched while quota exists
+    assert seen == ["slow"] * 4       # cordoned quota buckets never selected
 
-    # Once quota cordon is the only thing left AND nothing else serves,
-    # the pool still answers rather than inventing a 502.
-    for state in pool._states[:2]:
-        state.healthy = False
+    # Cordon expiry -> the bucket returns to rotation and re-probes.
+    pool._states[0].cordoned_until = 0.0  # noqa: SLF001
     lease = await pool.acquire()
-    assert lease.name == "slow"
+    assert lease.name == "q1"
     await pool.release(lease, ok=True)
 
 

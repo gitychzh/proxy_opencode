@@ -288,21 +288,23 @@ class EgressPool:
         before the stable least-inflight sort.
 
         Ordering (owner decision 2026-10-29 — a failing bucket must not
-        leave rotation; tier order re-measured 2026-11-04 after esp32
-        absorbed 237 of 286 attempts while the quota buckets sat cordoned):
+        leave rotation; re-measured 2026-11-04: cordoned buckets get NO
+        tier — the gateway's own bombardment keeps their upstream token
+        bucket empty, while a single CLI request through the same cordoned
+        IP answers 200. Silence refills them.):
 
           1. normal healthy buckets;
           2. buckets in a *cooldown* (one recent failure): still candidates,
              just picked after every healthy sibling, so the next request
              tries a different account first and this one serves again as
              soon as it is needed;
-          3. cordoned QUOTA buckets — real capacity whose upstream window
-             refills with time, so queueing upstream beats burning the
-             weak link;
-          4. last-resort buckets, withheld while any of the above can
+          3. last-resort buckets, withheld while any normal bucket can
              serve (a weak uplink that cannot meet the header deadline);
-          5. probe-dead legs (a dead link will not heal on its own, so
-             failing into it first would tax every request).
+          4. probe-dead legs (a dead link will not heal on its own, so
+             failing into it first would tax every request);
+          5. cordoned buckets only as the final catch-all (the pool-wide
+             blackout check upstream of acquire normally routes around
+             them first).
 
         The tiers are cumulative: a bucket appears in exactly one, and the
         first non-empty tier wins. This is why a single transport failure no
@@ -324,19 +326,16 @@ class EgressPool:
         # a 502. Rotating egresses stay excluded while any alternative
         # exists — their ONT is mid-reboot and every data connection they
         # accept dies with it.
-        # Buckets holding REAL upstream quota but benched right now: a quota
-        # cordon lifts with time (the upstream window refills), so these rank
-        # ABOVE the last-resort tier. 2026-11-04: benched used to mean only
-        # "unhealthy" and sat BELOW last-resort, which let esp32 — a weak
-        # uplink whose own free quota burns just the same — absorb 237 of
-        # 286 upstream attempts in 37 minutes (3-4 futile CONNECTs per
-        # request) while the three quota buckets sat cordoned.
-        cordoned_holders = [
-            s for s in self._states if s.healthy and s.cordoned(now)
-        ]
-        # Probe-dead legs keep ranking BELOW last-resort: a dead link will
-        # not heal on its own, so failing into it first just taxes every
-        # request with a futile CONNECT.
+        # CORDONED BUCKETS GET NO TIER ON PURPOSE (0.8.18, reversing 0.8.17):
+        # the upstream meters a token bucket with a slow refill per IP. The
+        # gateway's own bombardment is what keeps a cordoned IP pinned at 429
+        # — measured 2026-11-04 04:38-04:42Z: 55 requests hit cordoned buckets
+        # in 4 minutes, every one 429ing, while a SINGLE genuine CLI request
+        # through the very same cordoned IPs answered 200 (both mobile
+        # 36.149.54.32 and telecom 49.70.12.133). Silence lets the bucket
+        # refill; when the cordon expires the bucket returns to `ready` and
+        # the first real request re-probes it at CLI-like rate. There is no
+        # "exhausted quota" to wait out — only sustained self-inflicted 429s.
         dead_legs = [
             s
             for s in self._states
@@ -348,10 +347,14 @@ class EgressPool:
             # class, so it outranks a last-resort uplink that cannot meet the
             # header deadline anyway.
             [s for s in cooling if s.spec.name not in self._last_resort],
-            cordoned_holders,
             [s for s in normal if s.spec.name in self._last_resort],
             [s for s in cooling if s.spec.name in self._last_resort],
             dead_legs,
+            # Final catch-all (every tier above empty): hand out a lease even
+            # from a cordoned bucket rather than inventing a 502 — but this
+            # now only fires when literally nothing else exists, and the
+            # client-side pool-wide quota blackout check normally short-
+            # circuits into the fallback chain before acquire() is reached.
             list(self._states),
         ]
         usable = next((t for t in tiers if t), list(self._states))
