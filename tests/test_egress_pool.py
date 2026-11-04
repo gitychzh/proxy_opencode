@@ -1622,3 +1622,46 @@ async def test_acquire_exclude_skips_tried_buckets_and_raises() -> None:
     pool2._states[1].cordoned_until = time.monotonic() + 600.0  # noqa: SLF001
     with pytest.raises(PoolExhausted):
         await pool2.acquire(exclude=frozenset({"x"}))
+
+
+@pytest.mark.asyncio
+async def test_session_affinity_migrates_off_cooldown_bucket() -> None:
+    """0.8.19 regression: a bound bucket in cooldown (recent failure, but
+    still healthy=True — e.g. upstream RSTs) must release the session, or
+    the conversation stays pinned to a bucket that fails every turn
+    (2026-11-04 06:05: hermes turns all burned on one RSTing IP).
+    """
+
+    pool = make_pool("a", "b", affinity_ttl_s=600)
+    for st in pool._states:
+        st.healthy = True
+    s1 = await pool.acquire(session_key="k9")
+    pool.abandon(s1)
+    pool._states[0].cooldown_until = time.monotonic() + 300.0  # noqa: SLF001
+
+    s2 = await pool.acquire(session_key="k9")
+    assert s2.name != s1.name              # migrated off the cooling bucket
+    pool.abandon(s2)
+    s3 = await pool.acquire(session_key="k9")
+    assert s3.name == s2.name              # re-bound to the healthy sibling
+    pool.abandon(s3)
+
+
+@pytest.mark.asyncio
+async def test_binding_not_created_on_unhealthy_catchall_lease() -> None:
+    """A lease served from the dead-leg/cordon catch-all (start-up window,
+    before any probe lands) must not pin the session to an unproven bucket.
+    """
+
+    pool = make_pool("a", "b", affinity_ttl_s=600)
+    # NO mark_healthy: both buckets are healthy=False (fresh start-up).
+    lease = await pool.acquire(session_key="boot")
+    pool.abandon(lease)
+    assert pool._affinity.get("boot") is None   # no pinning on unproven legs
+
+    # Once probes land, binding works normally.
+    for st in pool._states:
+        st.healthy = True
+    lease2 = await pool.acquire(session_key="boot")
+    assert pool._affinity["boot"][0] == lease2.name
+    pool.abandon(lease2)

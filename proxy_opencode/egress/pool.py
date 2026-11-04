@@ -417,10 +417,20 @@ class EgressPool:
                 st = next(
                     (s for s in self._states if s.spec.name == name), None
                 )
-                if st is not None and st.available(now) and st.healthy and not st.cordoned(now):
+                if (
+                    st is not None
+                    and st.available(now)
+                    and st.healthy
+                    and not st.cordoned(now)
+                    and not st.cooling_down(now)
+                ):
                     sticky = st
                 else:
-                    # Unhealthy / cordoned / retired: release the binding.
+                    # Unhealthy / cordoned / cooling (a recent failure —
+                    # 2026-11-04: a bound bucket whose upstream RSTs every
+                    # connection stays healthy=True forever, so the session
+                    # pinned to it without this clause and burned every turn
+                    # on the same doomed IP) / retired: release the binding.
                     # The re-bind below logs the migration with the bucket
                     # the session actually lands on.
                     del self._affinity[session_key]
@@ -467,11 +477,16 @@ class EgressPool:
                 rotated = candidates
         state = min(rotated, key=lambda s: s.inflight)
         state.inflight += 1
-        if session_key:
-            bound = self._affinity.get(session_key)
+        if session_key and state.healthy and not state.cordoned(now):
             # (Re)bind the session to the bucket that actually served it:
             # first turns stick, migrated sessions re-bind to their new
-            # bucket, and every hit refreshes the idle clock.
+            # bucket, and every hit refreshes the idle clock. Healthy-only:
+            # a lease served from the dead-leg/cordon catch-all (e.g. the
+            # start-up window before the first probe lands, measured
+            # 2026-11-04 06:01 — three fresh sessions bound to the one
+            # bucket whose upstream RSTs everything) must NOT pin the
+            # conversation to a bucket that was never proven good.
+            bound = self._affinity.get(session_key)
             self._affinity[session_key] = (state.spec.name, time.monotonic())
             if bound is None or bound[0] != state.spec.name:
                 # New binding (or a migration onto a different bucket) — log
