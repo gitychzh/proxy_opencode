@@ -1066,56 +1066,6 @@ async def test_probe_tolerates_non_object_health_payload() -> None:
     assert state.healthy is False
 
 
-@pytest.mark.asyncio
-async def test_quota_blackout_requires_every_bucket_to_be_benched() -> None:
-    """Pool-wide blackout is an all-or-nothing verdict.
-
-    The allowance is metered per egress IP (settled 2026-10-29 09:15: mobile
-    hard-429'd while telecom/cc9 kept answering 200), so a single healthy
-    bucket means the pool can still serve and the blackout must read 0.
-
-    Runs with the cordon ceiling disabled so the "benched to the window reset"
-    shape is what gets asserted; with the capped default the blackout is
-    merely bounded (see test_hard_429_cordon_is_capped_by_quota_cordon_max).
-    """
-
-    pool = make_pool("a", "b", quota_cordon_max_s=0.0)
-    for state in pool._states:  # noqa: SLF001
-        state.healthy = True
-    assert pool.quota_blackout_s() == 0.0
-
-    lease = await pool.acquire()
-    await pool.release(lease, ok=False, kind="http_429", retry_after_s=27000.0)
-    # One dead, one alive: no blackout.
-    assert pool.quota_blackout_s() == 0.0
-
-    for _ in range(2):
-        try:
-            lease = await pool.acquire()
-        except PoolExhausted:
-            # 0.8.22: everything is benched — the pool refuses further
-            # leases instead of serving one from the cordon.
-            break
-        if not lease.state.cordoned(time.monotonic()):
-            await pool.release(lease, ok=False, kind="http_429", retry_after_s=27000.0)
-        else:
-            pool.abandon(lease)
-    blackout = pool.quota_blackout_s()
-    assert blackout > 3600.0, "both buckets benched for the daily window"
-
-
-@pytest.mark.asyncio
-async def test_quota_blackout_ignores_transport_cordons() -> None:
-    """A bench that is not a quota verdict must not fake a blackout."""
-
-    pool = make_pool("a")
-    state = pool._states[0]  # noqa: SLF001
-    state.healthy = True
-    state.cordoned_until = time.monotonic() + 300.0
-    state.cordon_reason = "3 consecutive failures (transport)"
-    assert pool.quota_blackout_s() == 0.0
-
-
 # ------------------------------------------- soft probe failures (tolerance)
 #
 # 2026-10-29 nightly review: the ledger held 26 probe_failed events in 5h,

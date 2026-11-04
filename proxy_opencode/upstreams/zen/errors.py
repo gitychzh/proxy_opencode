@@ -53,40 +53,9 @@ def egress_unavailable_result() -> dict[str, Any]:
     }
 
 
-def quota_exhausted_result(blackout_s: float) -> dict[str, Any]:
-    """Shape "every account in the pool is out of quota" without an upstream call.
-
-    Bucket model (owner decision 2026-10-29): the four egress buckets are
-    treated as four independent accounts. One account running dry only costs
-    that bucket — this *request* fails over to the backup chain and the next
-    request resumes round-robin on a sibling bucket. Only when **all** buckets
-    carry a quota verdict is there nothing left to rotate to; then a blackout
-    deadline is worth stamping so the caller can hold the backup for the
-    documented reset window instead of re-probing a dead pool every request.
-    """
-
-    return {
-        "__status__": 429,
-        "__quota_blackout_s__": blackout_s,
-        "content": {
-            "error": {
-                "message": (
-                    "The free-tier daily allowance for this account is used "
-                    "up; every egress is benched until it resets "
-                    f"({blackout_s / 3600.0:.1f}h)."
-                ),
-                "type": "insufficient_quota",
-                "param": None,
-                "code": "free_quota_exhausted",
-            }
-        },
-    }
-
-
 __all__ = [
     "EGRESS_UNAVAILABLE_MESSAGE",
     "FREE_TIER_ERROR",
     "egress_unavailable_result",
     "is_free_tier_rejection",
-    "quota_exhausted_result",
 ]

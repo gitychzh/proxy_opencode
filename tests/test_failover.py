@@ -763,40 +763,26 @@ async def test_invalid_request_also_skips_the_backup_chain() -> None:
     assert adapter.fallback_status()["engaged"] is False
 
 
-async def test_quota_blackout_holds_breaker_until_reset() -> None:
-    """A licensed-out account must not be re-probed every hold window.
+async def test_hard_429_never_holds_the_breaker() -> None:
+    """0.8.23: no relay hint can open the hold breaker anymore.
 
-    Measured 2026-10-29: the daily free-tier allowance is account-scoped, so
-    a 429 keeps failing for hours while the flat 120s hold expires every two
-    minutes — each expiry cost a dead-pool walk before the backup answered.
+    The removed ``__quota_blackout_s__`` hint held the backup for up to a
+    day on one hard 429 — while the 0.8.22 pool silence re-opens every
+    bucket within minutes of cordon expiry, so the hold only blinded the
+    chain to its own recovery (measured 2026-11-04: hours of dead-backup
+    503s while the primary could serve again).
     """
 
     primary = FakeAdapter()
     adapter, secondary = make_adapter(primary, zen_fallback_hold_s=120.0)
     secondary.outcomes = [{"id": "ok"}]
-    blackout = relay(429)
-    blackout["__quota_blackout_s__"] = 20000.0
-    primary.outcomes = [blackout]
+    primary.outcomes = [relay(429)]
 
     result = await adapter.chat({"model": "m1"})
 
     assert result == {"id": "ok"}
     status = adapter.fallback_status()
-    assert status["engaged"] is True
-    assert status["hold_remaining_s"] > 19000.0
-
-
-async def test_quota_blackout_hold_is_capped_at_one_day() -> None:
-    primary = FakeAdapter()
-    adapter, secondary = make_adapter(primary, zen_fallback_hold_s=120.0)
-    secondary.outcomes = [{"id": "ok"}]
-    blackout = relay(429)
-    blackout["__quota_blackout_s__"] = 10 * 24 * 3600.0
-    primary.outcomes = [blackout]
-
-    await adapter.chat({"model": "m1"})
-
-    assert adapter.fallback_status()["hold_remaining_s"] <= 86400.0
+    assert status["engaged"] is False, "request-scoped failover holds nothing"
 
 
 async def test_fallback_daily_budget_relays_primary_error_after_cap() -> None:
@@ -834,13 +820,17 @@ async def test_fallback_daily_budget_relays_primary_error_after_cap() -> None:
 
 
 async def test_fallback_daily_budget_refuses_open_breaker() -> None:
-    """Hold window open + budget spent -> gateway-owned 503, no backup call."""
+    """Hold window open + budget spent -> gateway-owned 503, no backup call.
+
+    0.8.23: the breaker only opens when request-scoped failover is disabled
+    by config (the quota-blackout hint that used to open it is gone).
+    """
 
     primary = FakeAdapter()
-    adapter, secondary = make_adapter(primary, zen_fallback_daily_max=1)
-    blackout = relay(429)
-    blackout["__quota_blackout_s__"] = 600.0
-    primary.outcomes = [blackout]
+    adapter, secondary = make_adapter(
+        primary, zen_fallback_daily_max=1, zen_fallback_request_scoped=False
+    )
+    primary.outcomes = [relay(429)]
     secondary.outcomes = [{"id": "ok-backup"}]
 
     served = await adapter.chat({"model": "big-pickle"})

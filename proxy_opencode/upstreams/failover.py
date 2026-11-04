@@ -27,11 +27,13 @@ Design:
     as independent accounts, so **one bucket failing costs one request**. That
     request is answered by the backup chain, the pool cordons the failing
     bucket, and the next request resumes normal round-robin on a sibling
-    bucket (``ZEN_FALLBACK_REQUEST_SCOPED``, default true). The circuit
-    breaker is then reserved for a genuine pool-wide verdict — a quota
-    blackout deadline from every account at once — and holds the backup for
-    ``ZEN_FALLBACK_HOLD_S`` (or the blackout deadline, capped at one day),
-    half-open probing afterwards and closing after
+    bucket (``ZEN_FALLBACK_REQUEST_SCOPED``, default true). The hold breaker
+    then only opens when request-scoped failover is disabled by config; it
+    holds for the flat ``ZEN_FALLBACK_HOLD_S`` — 0.8.23 removed the quota
+    blackout deadline entirely (a hard 429 used to hold the backup for up to
+    a day, blinding the chain to its own recovery, while the 0.8.22 pool
+    silence re-opens every bucket within minutes of cordon expiry) — and
+    half-open probing afterwards closes it after
     ``ZEN_FALLBACK_RECOVER_AFTER`` consecutive primary successes.
   * Prominent notifications (red-line compliant: no content, no keys):
       - the FIRST trip of an outage is a production incident: ERROR
@@ -73,11 +75,6 @@ logger = logging.getLogger("proxy_opencode.failover")
 # the request body (or the requested model id / key) is wrong, so another
 # vendor cannot serve it either.
 _PASSTHROUGH_STATUSES = frozenset({400, 401, 404, 422})
-
-# Upper bound on a quota-driven breaker hold. The free tier resets on a daily
-# window, so a Retry-After larger than a day is either a bug or a different
-# policy; never pin the chain to the backup longer than that.
-_QUOTA_HOLD_CAP_S = 24 * 3600.0
 
 # Client-visible provenance marker (owner requirement 2026-10-26: the
 # failover must be *noticeable*, not just present in the logs). Routes
@@ -242,7 +239,8 @@ class FailoverAdapter:
         self._last_trip_at = 0.0
         # Request-scoped failover (default on): a single bucket failure is
         # answered by the backup for that request only; the hold breaker is
-        # reserved for a pool-wide quota blackout (owner 2026-10-29).
+        # reserved for config-disabled request-scoped mode (0.8.23 removed
+        # the quota-blackout deadline that used to open it).
         self._request_scoped = bool(
             getattr(settings, "zen_fallback_request_scoped", True)
         )
@@ -391,15 +389,6 @@ class FailoverAdapter:
         if isinstance(status, int) and status >= 400:
             if status in _PASSTHROUGH_STATUSES:
                 return result
-            # A pool-wide quota blackout carries the time left until the
-            # allowance resets. Holding the breaker for the flat 120s window
-            # re-probed a primary that could not possibly serve for hours:
-            # every 2 minutes one unlucky request paid the dead-pool walk and
-            # was then answered by a different model anyway (measured 7.25s
-            # for a 16-token reply, 2026-10-29 02:10 CST).
-            blackout = (
-                result.get("__quota_blackout_s__") if _is_error_relay(result) else None
-            )
             if self._budget_blocked():
                 # Budget spent: relay the PRIMARY's own error untouched. The
                 # client (and its retry policy) sees the real upstream state
@@ -421,9 +410,7 @@ class FailoverAdapter:
                     upstream_status=status,
                 )
                 return result
-            return await self._trip(
-                payload, f"upstream HTTP {status}", blackout_s=blackout
-            )
+            return await self._trip(payload, f"upstream HTTP {status}")
         # The primary answered this request. Past the hold window that makes
         # this request a half-open probe; the breaker only closes once
         # ``_recover_after`` consecutive probes have succeeded.
@@ -489,22 +476,19 @@ class FailoverAdapter:
         self,
         payload: dict[str, Any],
         reason: str,
-        *,
-        blackout_s: float | None = None,
     ) -> Any:
         hold_s = self._hold_s
-        if blackout_s is not None:
-            # Cap so a bogus Retry-After cannot pin the chain to the backup
-            # for days; the free tier's window is at most a day.
-            hold_s = max(hold_s, min(float(blackout_s), _QUOTA_HOLD_CAP_S))
         # Request-scoped failover (owner decision 2026-10-29, buckets are four
         # independent accounts): the failure of ONE bucket must not park the
-        # client on the backup. Only a pool-wide verdict — every account out
-        # of quota, reported as a blackout deadline — is worth a hold; a
-        # single-account fault is answered from the backup for THIS request
-        # and the next request goes back to the pool's round-robin (which
-        # already skips the cordoned bucket).
-        hold_open = blackout_s is not None or not self._request_scoped
+        # client on the backup. The hold breaker only opens when
+        # request-scoped failover is disabled by config; a single-account
+        # fault is answered from the backup for THIS request and the next
+        # request goes back to the pool's round-robin (which already skips
+        # the cordoned bucket). 0.8.23 removed the quota-blackout deadline
+        # that used to extend this hold: with the pool's own cordon silence
+        # (0.8.22) every bucket re-opens within minutes, so a long hold only
+        # blinded the chain to its own recovery.
+        hold_open = not self._request_scoped
         if hold_open:
             self._fallback_until = time.monotonic() + hold_s
         self._primary_streak = 0
@@ -563,7 +547,10 @@ class FailoverAdapter:
             primary=self.name,
             reason=reason[:120],
             hold_s=hold_s if hold_open else 0.0,
-            quota_blackout=blackout_s is not None,
+            # Ledger schema compatibility: the quota-blackout deadline was
+            # removed in 0.8.23, the field stays constant False so existing
+            # consumers keep parsing.
+            quota_blackout=False,
             request_scoped=not hold_open,
             secondary=self._secondary_name,
             model=self._map_model(str(payload.get("model") or "")),

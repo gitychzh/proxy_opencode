@@ -38,7 +38,6 @@ from urllib.parse import quote_plus, urlparse
 import httpx
 
 from ...config import Settings
-from ...egress.models import HARD_QUOTA_RETRY_AFTER_S
 from ...egress.pool import EgressPool, Lease, PoolExhausted
 from ...model_profile import profile as model_profile
 from ..openai_http import ResponseLike, StreamRelay, _raw_relay_body
@@ -307,34 +306,22 @@ class ZenDirectAdapter:
                     except PoolExhausted:
                         # Every sibling is either tried or benched: hand the
                         # 429 to the backup chain now instead of re-walking.
-                        hinted = result.pop("__quota_blackout_s__", None)
                         logger.warning(
                             "quota verdict on every usable bucket; handing "
                             "this request to the backup chain",
-                            extra={
-                                "egress": lease.name if lease else "",
-                                "retry_after_s": round(float(hinted), 1)
-                                if isinstance(hinted, (int, float))
-                                else None,
-                            },
+                            extra={"egress": lease.name if lease else ""},
                         )
                         return result
                     continue
                 # Every attempt burned: request-scoped handoff to the
-                # backup chain. The single-account hint must NOT become a
-                # blackout deadline — strip it so the failover wrapper
-                # treats this as a request-scoped failure instead of
-                # holding the backup for the window.
-                hinted = result.pop("__quota_blackout_s__", None)
+                # backup chain. The failover wrapper treats this as a
+                # request-scoped failure — no deadline hint exists anymore
+                # (0.8.23 removed the blackout machinery), so the next
+                # request retries the pool after the flat hold.
                 logger.warning(
                     "quota verdict on every usable bucket; handing this "
                     "request to the backup chain",
-                    extra={
-                        "egress": lease.name,
-                        "retry_after_s": round(float(hinted), 1)
-                        if isinstance(hinted, (int, float))
-                        else None,
-                    },
+                    extra={"egress": lease.name},
                 )
                 return result
             if isinstance(status, int) and status >= 500:
@@ -540,17 +527,11 @@ class ZenDirectAdapter:
 
         if status == 429:
             hard_after = retry_after_seconds(headers)
-            if (
-                hard_after is not None
-                and hard_after > HARD_QUOTA_RETRY_AFTER_S
-                and isinstance(result, dict)
-            ):
-                # The definitive per-response evidence of a daily-quota
-                # verdict: a Retry-After beyond the throttle boundary. Stamp
-                # it on the relay so the caller can hand the fallback chain a
-                # real deadline even when the attempt budget ran out before
-                # every bucket had been tried (3 attempts, 4 buckets).
-                result["__quota_blackout_s__"] = float(hard_after)
+            # 0.8.23: the Retry-After no longer graduates into any relay
+            # hint. The pool's own per-bucket cordon (capped by
+            # ZEN_QUOTA_CORDON_MAX_S) is the only consumer of the verdict;
+            # the failover hold stays flat so the chain always re-probes
+            # the primary after ZEN_FALLBACK_HOLD_S.
             await self._release(
                 lease,
                 ok=False,

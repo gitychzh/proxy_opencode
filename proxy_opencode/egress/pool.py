@@ -43,12 +43,6 @@ from .models import (
 
 logger = logging.getLogger("proxy_opencode.egress")
 
-# Cordon verdicts that mean "this account's allowance is gone", as opposed to
-# a broken tunnel. When every bucket carries one of these, the pool is in a
-# blackout: no attempt can succeed, so selection short-circuits instead of
-# paying an RTT per dead egress.
-_QUOTA_REASONS = frozenset({"free_quota_exhausted", "free_quota_soft"})
-
 
 class PoolExhausted(Exception):
     """No bucket outside ``exclude`` can serve this attempt.
@@ -526,31 +520,6 @@ class EgressPool:
         """Register the release observer (builders wire the rotator late)."""
 
         self._observer = observer
-
-    def quota_blackout_s(self, now: float | None = None) -> float:
-        """Seconds of *pool-wide* quota blackout, or 0 when any bucket can serve.
-
-        The free tier meters each egress IP separately (settled 2026-10-29
-        09:15: mobile hard-429'd while telecom/cc9 answered 42 requests with
-        200s, and cc9 recovered right after an IP change; the earlier
-        "account-scoped" reading is retired). When *every* bucket carries a
-        quota verdict there is nothing left to try: the caller should answer
-        429 immediately and let the fallback chain take over instead of paying
-        one upstream RTT per dead bucket. The reported duration is bounded by
-        ZEN_QUOTA_CORDON_MAX_S like the cordons themselves, so a blackout is
-        re-tested instead of being trusted for the rest of the day.
-        """
-
-        now = time.monotonic() if now is None else now
-        if not self._states:
-            return 0.0
-        remaining: list[float] = []
-        for state in self._states:
-            core = state.cordon_reason.split(" (", 1)[0]
-            if not state.cordoned(now) or core not in _QUOTA_REASONS:
-                return 0.0
-            remaining.append(state.cordon_remaining_s(now))
-        return min(remaining)
 
     def find(self, name: str) -> EgressState | None:
         return next((s for s in self._states if s.spec.name == name), None)

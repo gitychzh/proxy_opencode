@@ -1807,25 +1807,22 @@ async def test_relay_on_close_outcome_completed_when_finish_seen() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chat_still_touches_upstream_despite_pool_blackout() -> None:
-    """0.8.21: a pool-wide blackout verdict must NEVER skip the upstream.
+async def test_chat_touches_upstream_with_no_pool_wide_verdict() -> None:
+    """0.8.23: no pool-wide verdict machinery exists anymore — the walk is
+    bounded only by FAILOVER_MAX_ATTEMPTS and the retry-walk exclude set.
 
     Measured 2026-11-04: one oversized conversation 429'd on four DIFFERENT
-    IPs in 15s, the old code cordoned all four and then skipped every
-    upstream attempt for 585s, while a genuine CLI request on two of those
-    exact IPs answered 200 immediately. A 429 describes one request, not
-    the capacity of the whole pool.
+    IPs in 15s; the old blackout machinery then skipped every upstream
+    attempt for 585s while a genuine CLI request on two of those exact IPs
+    answered 200 immediately. A 429 describes one request, not the capacity
+    of the whole pool.
     """
 
-    class _BlackoutPool(_StubPool):
+    class _PlainPool(_StubPool):
         called = 0
 
-        def quota_blackout_s(self) -> float:
-            type(self).called += 1
-            return 20893.0
-
     client = _leased_client()
-    pool = _BlackoutPool(client)
+    pool = _PlainPool(client)
     adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
 
     with respx.mock(assert_all_called=False) as mock:
@@ -1835,34 +1832,26 @@ async def test_chat_still_touches_upstream_despite_pool_blackout() -> None:
         result = await adapter.chat(
             {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
         )
-        assert route.call_count == 1, "blackout must never skip the upstream"
+        assert route.call_count == 1, "the upstream is always tried"
 
-    assert pool.called == 0, "the blackout probe is no longer consulted"
     assert result["__status__"] == 429
     await adapter.aclose()
 
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_chat_keeps_walking_siblings_after_429_even_with_blackout() -> None:
-    """0.8.21: a 429 mid-walk no longer short-circuits on the pool blackout.
+async def test_chat_keeps_walking_siblings_after_429() -> None:
+    """A 429 mid-walk walks the bounded sibling walk, nothing else.
 
     The walk is bounded only by FAILOVER_MAX_ATTEMPTS and the retry-walk
-    ``exclude`` set (0.8.19), never by a pool-wide capacity verdict.
+    ``exclude`` set (0.8.19); 0.8.23 removed the pool-wide blackout probe
+    the walk used to short-circuit on.
     """
 
-    class _TippingPool(_StubPool):
+    class _SizedPool(_StubPool):
         @property
         def size(self) -> int:
             return 4
-
-        def __init__(self, client: httpx.AsyncClient) -> None:
-            super().__init__(client)
-            self.probes = 0
-
-        def quota_blackout_s(self) -> float:
-            self.probes += 1
-            return 20893.0
 
     route = respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
         status_code=429,
@@ -1870,7 +1859,7 @@ async def test_chat_keeps_walking_siblings_after_429_even_with_blackout() -> Non
         json={"error": {"type": "FreeUsageLimitError", "message": "limit"}},
     )
     client = _leased_client()
-    pool = _TippingPool(client)
+    pool = _SizedPool(client)
     adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
 
     result = await adapter.chat(
@@ -1878,7 +1867,6 @@ async def test_chat_keeps_walking_siblings_after_429_even_with_blackout() -> Non
     )
 
     assert route.call_count == 4, "the full bounded sibling walk still runs"
-    assert pool.probes == 0, "the blackout probe is no longer consulted"
     assert result["__status__"] == 429
     await adapter.aclose()
 
@@ -1923,23 +1911,19 @@ async def test_all_cordoned_first_acquire_hands_to_backup_without_upstream() -> 
 
 @respx.mock
 @pytest.mark.asyncio
-async def test_retry_after_alone_is_not_a_pool_wide_blackout() -> None:
+async def test_hard_retry_after_leaves_no_hint_in_the_relay() -> None:
     """A single account's Retry-After must not pin the backup for hours.
 
-    The deadline is only meaningful when the *pool* reports every account
-    benched. Stamping it from one response turned one dead account into a
-    chain-wide hold (2026-10-29), so the hint is stripped here and the
-    failover wrapper treats the fault as request-scoped. With the sibling
-    walk enabled the walk itself is bounded (min(size, 3) attempts).
+    0.8.23: the relay hint is gone entirely — a hard Retry-After feeds only
+    the bucket's own cordon (capped by ZEN_QUOTA_CORDON_MAX_S), and the
+    failover hold stays flat. With the sibling walk enabled the walk itself
+    is bounded (min(size, 3) attempts).
     """
 
-    class _NeverBlackoutPool(_StubPool):
+    class _SizedPool(_StubPool):
         @property
         def size(self) -> int:
             return 4
-
-        def quota_blackout_s(self) -> float:
-            return 0.0
 
     route = respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
         status_code=429,
@@ -1947,7 +1931,7 @@ async def test_retry_after_alone_is_not_a_pool_wide_blackout() -> None:
         json={"error": {"type": "FreeUsageLimitError", "message": "limit"}},
     )
     client = _leased_client()
-    pool = _NeverBlackoutPool(client)
+    pool = _SizedPool(client)
     adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
 
     result = await adapter.chat(
