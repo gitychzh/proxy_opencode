@@ -211,7 +211,36 @@ class ZenDirectAdapter:
         # times per request).
         tried: set[str] = set()
 
-        lease = await _acquire()
+        try:
+            lease = await _acquire()
+        except PoolExhausted:
+            # 0.8.22: every bucket was already cordoned/benched before this
+            # request even started. Touching a cordoned IP would keep its
+            # 429 alive (the gateway's own bombardment IS the throttle —
+            # measured twice on 2026-11-04), so stay silent and hand the
+            # request to the backup chain as a request-scoped 429 relay.
+            # No blackout hint: a single verdict must never become a
+            # chain-wide deadline (same rule as the walk handoff below).
+            logger.warning(
+                "every egress bucket is cordoned; handing this request to "
+                "the backup chain without touching upstream",
+                extra={"session": session_key},
+            )
+            return {
+                "__status__": 429,
+                "content": {
+                    "error": {
+                        "message": (
+                            "all egress buckets are under upstream quota "
+                            "cordons; the gateway stayed silent so the "
+                            "per-IP token buckets can refill"
+                        ),
+                        "type": "quota_cordoned",
+                        "param": None,
+                        "code": "all_egress_cordoned",
+                    }
+                },
+            }
         while True:
             try:
                 result = await self._exchange(

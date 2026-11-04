@@ -675,8 +675,11 @@ async def test_repeated_429_reports_one_cordon_transition(tmp_path) -> None:  # 
     state.egress_ip = "3.3.3.3"
     read, cleanup = _capture_events(tmp_path)
     try:
-        for _ in range(5):
-            lease = await pool.acquire()
+        # 0.8.22: the leases are all taken before the verdict lands (the
+        # mid-flight race is the only way repeated 429s hit one bucket now
+        # that acquire() refuses to serve a cordoned bucket).
+        leases = [await pool.acquire() for _ in range(5)]
+        for lease in leases:
             await pool.release(lease, ok=False, kind="http_429", retry_after_s=27000.0)
         cordons = [e for e in read() if e["event"] == "cordon"]
         assert len(cordons) == 1
@@ -723,11 +726,13 @@ async def test_late_hard_429_does_not_shorten_a_live_cordon() -> None:
     pool = make_pool("a")
     state = pool._states[0]  # noqa: SLF001
     state.healthy = True
-    lease = await pool.acquire()
-    await pool.release(lease, ok=False, kind="http_429", retry_after_s=27000.0)
+    # 0.8.22: both leases pre-date the verdicts (mid-flight race — acquire()
+    # itself never serves a cordoned bucket anymore).
+    first = await pool.acquire()
+    late = await pool.acquire()
+    await pool.release(first, ok=False, kind="http_429", retry_after_s=27000.0)
     before = state.cordoned_until
-    lease = await pool.acquire()
-    await pool.release(lease, ok=False, kind="http_429", retry_after_s=30.0)
+    await pool.release(late, ok=False, kind="http_429", retry_after_s=30.0)
     assert state.cordoned_until == before
     assert state.cordon_reason.startswith("free_quota_exhausted")
 
@@ -760,23 +765,22 @@ async def test_hard_429_cordon_is_capped_by_quota_cordon_max() -> None:
 async def test_hard_429_cordon_lifts_on_the_first_200() -> None:
     """A re-tested bucket that answers 200 loses its cordon immediately.
 
-    The cap only exists so an expired verdict gets re-tested; acquire()
-    deliberately serves from a cordoned bucket when nothing else is left,
-    so that re-test happens and its 200 is direct counter-evidence against
-    the verdict. OPERATIONS §4.1 and the 0.8.7 changelog promise
-    "任意一次 200 立即解除" — before this the bench ran its full capped
-    length even after the leg demonstrably worked.
+    0.8.7 changelog and OPERATIONS §4.1 promise "任意一次 200 立即解除".
+    Since 0.8.22 acquire() never serves a live-cordoned bucket, so the
+    production path for this lift is the mid-flight race: the verdict
+    lands (probe or a sibling request) while a real request is already
+    running on that bucket, and its 200 is direct counter-evidence
+    against the verdict.
     """
 
     pool = make_pool("a", quota_cordon_max_s=1800.0)
     state = pool._states[0]  # noqa: SLF001
     state.healthy = True
-    lease = await pool.acquire()
-    await pool.release(lease, ok=False, kind="http_429", retry_after_s=41106.0)
+    verdict = await pool.acquire()
+    retest = await pool.acquire()
+    await pool.release(verdict, ok=False, kind="http_429", retry_after_s=41106.0)
     assert state.cordoned(time.monotonic()) is True
 
-    retest = await pool.acquire()  # falls back to the cordoned bucket
-    assert retest.name == "a"
     await pool.release(retest, ok=True)
 
     assert state.cordoned(time.monotonic()) is False
@@ -790,13 +794,13 @@ async def test_soft_throttle_cordon_lifts_on_200(tmp_path) -> None:  # type: ign
     pool = make_pool("a")
     state = pool._states[0]  # noqa: SLF001
     state.healthy = True
-    lease = await pool.acquire()
-    await pool.release(lease, ok=False, kind="http_429", retry_after_s=30.0)
+    verdict = await pool.acquire()
+    retest = await pool.acquire()
+    await pool.release(verdict, ok=False, kind="http_429", retry_after_s=30.0)
     assert state.cordon_reason.startswith("free_quota_soft")
 
     read, cleanup = _capture_events(tmp_path)
     try:
-        retest = await pool.acquire()
         await pool.release(retest, ok=True)
         lifted = [e for e in read() if e["event"] == "cordon_lifted"]
         assert lifted and lifted[0]["reason"] == "request_ok"
@@ -817,10 +821,12 @@ async def test_success_does_not_lift_a_non_ip_cordon() -> None:
     pool = make_pool("a")
     state = pool._states[0]  # noqa: SLF001
     state.healthy = True
+    lease = await pool.acquire()
+    # The verdict lands while the request is in flight (0.8.22: acquire()
+    # itself never serves a live-cordoned bucket anymore).
     state.cordoned_until = time.monotonic() + 120.0
     state.cordon_reason = "repeated failures"
 
-    lease = await pool.acquire()
     await pool.release(lease, ok=True)
 
     assert state.cordoned(time.monotonic()) is True
@@ -1084,7 +1090,12 @@ async def test_quota_blackout_requires_every_bucket_to_be_benched() -> None:
     assert pool.quota_blackout_s() == 0.0
 
     for _ in range(2):
-        lease = await pool.acquire()
+        try:
+            lease = await pool.acquire()
+        except PoolExhausted:
+            # 0.8.22: everything is benched — the pool refuses further
+            # leases instead of serving one from the cordon.
+            break
         if not lease.state.cordoned(time.monotonic()):
             await pool.release(lease, ok=False, kind="http_429", retry_after_s=27000.0)
         else:
@@ -1622,6 +1633,33 @@ async def test_acquire_exclude_skips_tried_buckets_and_raises() -> None:
     pool2._states[1].cordoned_until = time.monotonic() + 600.0  # noqa: SLF001
     with pytest.raises(PoolExhausted):
         await pool2.acquire(exclude=frozenset({"x"}))
+
+
+@pytest.mark.asyncio
+async def test_all_cordoned_pool_raises_instead_of_serving_a_cordon() -> None:
+    """0.8.22 regression: when EVERY bucket is cordoned, acquire() must
+    raise PoolExhausted instead of handing out a lease from the old
+    full-state catch-all. Measured 2026-11-04 07:28-07:42Z: each client
+    request still hammered a cordoned IP through that catch-all and, with
+    the cordon cap at 10s, re-hit all four every few seconds — the pool
+    stayed pinned at 429 for hours while a single CLI request through the
+    same IPs answered 200. Silence refills the token buckets.
+    """
+
+    pool = make_pool("q1", "q2")
+    mark_healthy(pool)
+    for state in pool._states:
+        state.cordoned_until = time.monotonic() + 600.0  # noqa: SLF001
+        state.cordon_reason = "free_quota_exhausted"  # noqa: SLF001
+
+    with pytest.raises(PoolExhausted):
+        await pool.acquire()
+
+    # Cordon expiry re-admits the bucket; the next request re-probes it.
+    pool._states[0].cordoned_until = 0.0  # noqa: SLF001
+    lease = await pool.acquire()
+    assert lease.name == "q1"
+    await pool.release(lease, ok=True)
 
 
 @pytest.mark.asyncio

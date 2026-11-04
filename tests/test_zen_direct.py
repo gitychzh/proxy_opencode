@@ -14,7 +14,12 @@ import pytest
 import respx
 
 from proxy_opencode.config import Settings
-from proxy_opencode.egress.pool import EgressSpec, EgressState, Lease
+from proxy_opencode.egress.pool import (
+    EgressSpec,
+    EgressState,
+    Lease,
+    PoolExhausted,
+)
 from proxy_opencode.upstreams import zen as zen_direct
 from proxy_opencode.upstreams.openai_http import StreamRelay
 from proxy_opencode.upstreams.zen import ZenDirectAdapter
@@ -1874,6 +1879,44 @@ async def test_chat_keeps_walking_siblings_after_429_even_with_blackout() -> Non
 
     assert route.call_count == 4, "the full bounded sibling walk still runs"
     assert pool.probes == 0, "the blackout probe is no longer consulted"
+    assert result["__status__"] == 429
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_all_cordoned_first_acquire_hands_to_backup_without_upstream() -> None:
+    """0.8.22: an all-cordoned pool must not be bombarded at request start.
+
+    Measured 2026-11-04 07:28-07:42Z: with every bucket cordoned, the old
+    full-state catch-all handed each client request a lease from a cordoned
+    IP, and that stream of futile upstream hits (plus a 10s cordon cap)
+    kept the whole pool pinned at 429 for hours — while a single CLI
+    request through the same IPs answered 200. The adapter now relays a
+    request-scoped 429 without touching the upstream, so the failover
+    wrapper engages the backup chain and the cordons can actually expire.
+    """
+
+    class _CordonedPool(_StubPool):
+        def acquire(
+            self,
+            session_key: str = "",
+            exclude: frozenset[str] = frozenset(),
+        ) -> Lease:
+            raise PoolExhausted("every bucket benched")
+
+    route = respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+        status_code=200,
+        json={"choices": [{"message": {"role": "assistant", "content": "hi"}}]},
+    )
+    client = _leased_client()
+    pool = _CordonedPool(client)
+    adapter = ZenDirectAdapter(make_settings(), pool=pool)  # type: ignore[arg-type]
+
+    result = await adapter.chat(
+        {"model": "opencode/big-pickle", "messages": [{"role": "user", "content": "q"}]}
+    )
+
+    assert route.call_count == 0, "a cordoned pool must stay silent"
     assert result["__status__"] == 429
     await adapter.aclose()
 

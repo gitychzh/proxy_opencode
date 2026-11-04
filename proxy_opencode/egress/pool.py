@@ -323,9 +323,19 @@ class EgressPool:
              serve (a weak uplink that cannot meet the header deadline);
           4. probe-dead legs (a dead link will not heal on its own, so
              failing into it first would tax every request);
-          5. cordoned buckets only as the final catch-all (the pool-wide
-             blackout check upstream of acquire normally routes around
-             them first).
+          5. nothing — a cordoned bucket is NEVER selectable (0.8.22).
+             When every bucket is cordoned (or excluded by the walk),
+             acquire raises :class:`PoolExhausted` and the request hands
+             to the backup chain with zero upstream attempts. The 0.7.x
+             full-state catch-all that used to sit here kept bombardment
+             alive: measured 2026-11-04 07:28-07:42Z, once the pool went
+             all-cordoned every client request still hit one cordoned IP
+             through the catch-all and — with the cordon cap briefly at
+             10s — re-hit all four every few seconds, which pinned the
+             pool at 429 for hours while single CLI requests through the
+             very same IPs answered 200. Silence refills the token
+             buckets; cordon expiry re-admits the bucket to tier 1 and
+             the next real request re-probes it at CLI-like rate.
 
         The tiers are cumulative: a bucket appears in exactly one, and the
         first non-empty tier wins. This is why a single transport failure no
@@ -370,34 +380,34 @@ class EgressPool:
             [s for s in cooling if s.spec.name not in self._last_resort],
             [s for s in normal if s.spec.name in self._last_resort],
             [s for s in cooling if s.spec.name in self._last_resort],
-                dead_legs,
-            # Final catch-all (every tier above empty): hand out a lease even
-            # from a cordoned bucket rather than inventing a 502 — but this
-            # now only fires when literally nothing else exists, and the
-            # client-side pool-wide quota blackout check normally short-
-            # circuits into the fallback chain before acquire() is reached.
-            list(self._states),
+            dead_legs,
         ]
         if exclude:
-            # Retry-walk semantics: filtered tiers WITHOUT the cordoned
-            # catch-all — a walk that has burned its buckets must hand the
-            # request to the backup chain, not start bombarding cordoned
-            # IPs (that bombardment is what keeps their 429 alive).
+            # Retry-walk semantics (0.8.19): a walk that has burned its
+            # buckets must hand the request to the backup chain, not re-fail
+            # the same bucket four times (measured 38 esp32 attempts for 10
+            # client requests).
             tiers = [
                 [s for s in tier if s.spec.name not in exclude]
-                for tier in tiers[:-1]
+                for tier in tiers
             ]
-            usable = next((t for t in tiers if t), None)
-            if usable is None:
-                # Every selectable bucket was already tried by this request's
-                # walk: stop the caller from re-failing the same bucket
-                # (measured 38 esp32 attempts for 10 client requests).
-                raise PoolExhausted(
-                    "every bucket is either excluded by this request's "
-                    "retry walk or benched"
-                )
-        else:
-            usable = next((t for t in tiers if t), list(self._states))
+        usable = next((t for t in tiers if t), None)
+        if usable is None:
+            # 0.8.22: nothing selectable — every bucket is cordoned, or the
+            # walk has burned them all. Raising here (instead of serving a
+            # lease from the old full-state catch-all) is what restores the
+            # 0.8.18 silence: measured 2026-11-04 07:28-07:42Z, once the
+            # pool went all-cordoned every client request still hammered a
+            # cordoned IP via the catch-all and, with the cordon cap at 10s,
+            # re-hit all four every few seconds — the bombardment kept the
+            # pool pinned at 429 while single CLI requests through the same
+            # IPs answered 200. The caller hands the request to the backup
+            # chain; when a cordon expires the bucket re-enters `ready` and
+            # the next real request re-probes it at CLI-like rate.
+            raise PoolExhausted(
+                "every bucket is either excluded by this request's "
+                "retry walk or benched"
+            )
 
         # Session affinity: a bound, still-usable bucket wins outright — the
         # conversation keeps its IP and its serial stream looks exactly like
