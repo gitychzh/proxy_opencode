@@ -57,6 +57,8 @@ FIELDS = (
     "retry_after_s",
     "count",
     "threshold",
+    "cap",
+    "wait_s",
     "trigger",
     "detail",
     "ok",

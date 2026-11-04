@@ -1425,3 +1425,52 @@ async def test_cooldown_cleared_by_success() -> None:
     lease = await pool.acquire()
     await pool.release(lease, ok=True)
     assert not state.cooling_down(time.monotonic())
+
+
+@pytest.mark.asyncio
+async def test_inflight_cap_queues_then_hands_out_slot() -> None:
+    """2026-11-04: per-bucket concurrency gate keeps our rate inside the
+    upstream's rolling window. With cap=1 and the single bucket busy, the
+    next acquire() WAITS for the release instead of bursting a second
+    upstream connection; after release the slot is handed out.
+    """
+
+    pool = make_pool("a", max_inflight=1, inflight_wait_s=3)
+    first = await pool.acquire()
+    assert first.name == "a"
+
+    async def grab_second() -> str:
+        second = await pool.acquire()
+        return second.name
+
+    task = asyncio.ensure_future(grab_second())
+    await asyncio.sleep(0.6)          # queued, still held by `first`
+    assert not task.done()
+    await pool.release(first, ok=True, kind="ok")
+    assert await asyncio.wait_for(task, timeout=3) == "a"
+    second_lease = await pool.acquire()
+    pool.abandon(second_lease)
+
+
+@pytest.mark.asyncio
+async def test_inflight_cap_expires_wait_and_exceeds_cap() -> None:
+    """A slot that never frees within inflight_wait_s is exceeded anyway:
+    a bounded stall beats an unbounded queue (the release hook may never
+    fire for a wedged lease)."""
+
+    pool = make_pool("a", max_inflight=1, inflight_wait_s=0.5)
+    first = await pool.acquire()
+    second = await pool.acquire()   # wait expires -> exceeds cap
+    assert second.name == "a"
+    pool.abandon(first)
+    pool.abandon(second)
+
+
+@pytest.mark.asyncio
+async def test_inflight_cap_zero_is_unlimited() -> None:
+    pool = make_pool("a")           # max_inflight unset -> 0
+    a = await pool.acquire()
+    b = await pool.acquire()
+    assert a.name == b.name == "a"
+    pool.abandon(a)
+    pool.abandon(b)

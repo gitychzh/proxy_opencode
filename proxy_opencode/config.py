@@ -346,6 +346,19 @@ class Settings:
     # cordon length. A dead leg stops winning picks without being banned.
     #   ZEN_EGRESS_COOLDOWN_MAX_S=300
     zen_egress_cooldown_max_s: float = 300.0
+    # Per-bucket in-flight cap (0 = unlimited). Upstream meters a ROLLING
+    # WINDOW per network segment (live A/B 2026-11-04: a fresh rotated IP
+    # 429s within seconds under burst load and fully recovers ~8 minutes
+    # later, while serial low-rate traffic never trips it). Capping each
+    # bucket's concurrency keeps the gateway's own rate inside the window;
+    # excess requests queue (bounded) instead of burning the window and
+    # sweeping the pool into the paid backup.
+    #   ZEN_EGRESS_MAX_INFLIGHT=2
+    zen_egress_max_inflight: int = 0
+    # How long acquire() may wait for an in-flight slot before exceeding
+    # the cap anyway (bounded stall beats a guaranteed 429 storm).
+    #   ZEN_EGRESS_INFLIGHT_WAIT_S=20
+    zen_egress_inflight_wait_s: float = 20.0
     # Ceiling on a hard-429 cordon. A 429 carrying "Retry-After > 1h" is read
     # as a burned per-IP daily allowance and used to bench the bucket until
     # the upstream window reset (up to ~12h). That is too long: the verdict's
@@ -746,6 +759,12 @@ def load_settings() -> Settings:
         zen_egress_cooldown_s=float(os.environ.get("ZEN_EGRESS_COOLDOWN_S", "20")),
         zen_egress_cooldown_max_s=float(
             os.environ.get("ZEN_EGRESS_COOLDOWN_MAX_S", "300")
+        ),
+        zen_egress_max_inflight=max(
+            0, int(os.environ.get("ZEN_EGRESS_MAX_INFLIGHT", "0") or "0")
+        ),
+        zen_egress_inflight_wait_s=float(
+            os.environ.get("ZEN_EGRESS_INFLIGHT_WAIT_S", "20")
         ),
         zen_quota_cordon_max_s=float(
             os.environ.get("ZEN_QUOTA_CORDON_MAX_S", "600")

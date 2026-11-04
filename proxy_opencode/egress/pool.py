@@ -102,6 +102,8 @@ class EgressPool:
         probe_fail_tolerance: int = 1,
         observer: ReleaseObserver | None = None,
         last_resort: frozenset[str] = frozenset(),
+        max_inflight: int = 0,
+        inflight_wait_s: float = 20.0,
     ) -> None:
         if not specs:
             raise ValueError("EgressPool requires at least one egress spec")
@@ -129,6 +131,18 @@ class EgressPool:
         # the bucket before the first failure", which is the same as 1.
         self._probe_fail_tolerance = max(1, probe_fail_tolerance)
         self._observer = observer
+        # Per-bucket in-flight cap (2026-11-04). Upstream meters a ROLLING
+        # WINDOW per network segment: a fresh rotated IP 429s within seconds
+        # under the gateway's own burst load and fully recovers ~8 minutes
+        # later, while serial low-rate traffic never trips it (live A/B
+        # 2026-11-04 10:22-10:31). The gateway itself was the main window
+        # burner — hermes-shaped concurrency saturated every rotated IP, then
+        # the cordon cycle swept the whole pool into the paid backup. Capping
+        # each bucket's concurrent requests keeps our own rate inside the
+        # window; excess requests QUEUE here (bounded by inflight_wait_s)
+        # instead of detonating the pool. 0 disables the cap.
+        self._max_inflight = max(0, int(max_inflight))
+        self._inflight_wait_s = max(0.0, float(inflight_wait_s))
         # Buckets that may only absorb overflow (see ZEN_EGRESS_LAST_RESORT).
         # Unknown names are ignored so a retired bucket cannot silently make
         # the whole pool last-resort.
@@ -164,6 +178,12 @@ class EgressPool:
             ),
             cooldown_max_s=float(
                 getattr(settings, "zen_egress_cooldown_max_s", 300) or 300
+            ),
+            max_inflight=int(
+                getattr(settings, "zen_egress_max_inflight", 0) or 0
+            ),
+            inflight_wait_s=float(
+                getattr(settings, "zen_egress_inflight_wait_s", 20) or 20
             ),
             # No `or` default here: 0 is a meaningful value (disable the
             # ceiling and fall back to "benched until the window reset").
@@ -288,6 +308,32 @@ class EgressPool:
         usable = next((t for t in tiers if t), list(self._states))
         offset = next(self._rr) % len(usable)
         rotated = usable[offset:] + usable[:offset]
+        # Per-bucket concurrency gate: only buckets with spare in-flight
+        # slots are handed out; when none has one, the caller WAITS (bounded)
+        # for a release instead of bursting another upstream connection into
+        # an already-saturated rate window.
+        if self._max_inflight > 0:
+            candidates = [s for s in rotated if s.inflight < self._max_inflight]
+            if not candidates:
+                logger.info(
+                    "egress inflight cap reached; queueing for a slot",
+                    extra={"cap": self._max_inflight, "wait_s": self._inflight_wait_s},
+                )
+                deadline = time.monotonic() + self._inflight_wait_s
+                while time.monotonic() < deadline:
+                    await asyncio.sleep(0.25)
+                    candidates = [s for s in rotated if s.inflight < self._max_inflight]
+                    if candidates:
+                        break
+                if candidates:
+                    rotated = candidates
+                else:
+                    logger.warning(
+                        "inflight wait expired; exceeding cap to avoid a stall",
+                        extra={"cap": self._max_inflight},
+                    )
+            else:
+                rotated = candidates
         state = min(rotated, key=lambda s: s.inflight)
         state.inflight += 1
         if state.cordoned(now):
