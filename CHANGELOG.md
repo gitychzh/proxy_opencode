@@ -5,6 +5,20 @@
 
 ## [Unreleased]
 
+### Fixed — cordon 的配额桶重新排在 last-resort 之前（0.8.17，2026-11-04）
+
+0.8.16 部署后 37 分钟生产实测暴露 tiers 漂移：docstring 说「cordon 桶是
+排队候选」，实现里 `available()` 把 cordon 桶排除出 healthy/benched 列表，
+它们只在最后一层兜底出现——结果 esp32（last-resort，自身免费配额同样
+在烧）吸收了 237/286 次上游尝试（每条请求 3-4 次徒劳 CONNECT，每次
+ECONNRESET 耗数秒），三个配额桶全程 cordon。
+
+- 新 tier 顺序：ready → cooling-非LR → **cordon 的配额桶** → last-resort
+  → cooling-LR → probe 死腿 → 全部。cordon 随时间解除（上游窗口回填），
+  是真容量；probe 死腿不会自愈，保持在 LR 之后（旧语义保留）。
+- 新建会话绑定打 INFO 日志（`session affinity bound`），迁移日志改由
+  重绑点统一发射（迁移事实 = 会话实际落到的桶），命中保持静默。
+
 ### Added — 会话粘性：一个会话固定一个桶（0.8.16，2026-11-04）
 
 用户提案（模拟真实 opencode CLI 的会话-出口绑定）：真实客户端是**一个会话 =

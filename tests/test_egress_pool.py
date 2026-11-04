@@ -1537,3 +1537,53 @@ async def test_session_affinity_ttl_frees_the_slot() -> None:
     assert s3.name in ("a", "b")
     pool.abandon(s3)
     assert pool._affinity["old"][0] == s3.name
+
+
+@pytest.mark.asyncio
+async def test_cordoned_quota_buckets_outrank_last_resort() -> None:
+    """2026-11-04 regression: esp32 absorbed 237 of 286 upstream attempts
+    in 37 minutes (3-4 futile CONNECTs per request) because cordoned quota
+    buckets ranked BELOW the last-resort tier. Real capacity — a cordon
+    lifts with time — must outrank the weak uplink.
+    """
+
+    pool = make_pool("q1", "q2", "slow", last_resort=frozenset({"slow"}))
+    mark_healthy(pool)
+    for state in pool._states[:2]:
+        state.cordoned_until = time.monotonic() + 600.0  # noqa: SLF001
+        state.cordon_reason = "free_quota_exhausted"  # noqa: SLF001
+
+    seen = []
+    for _ in range(4):
+        lease = await pool.acquire()
+        seen.append(lease.name)
+        await pool.release(lease, ok=False, kind="upstream_429")
+    assert set(seen) == {"q1", "q2"}   # weak link untouched while quota exists
+
+    # Once quota cordon is the only thing left AND nothing else serves,
+    # the pool still answers rather than inventing a 502.
+    for state in pool._states[:2]:
+        state.healthy = False
+    lease = await pool.acquire()
+    assert lease.name == "slow"
+    await pool.release(lease, ok=True)
+
+
+@pytest.mark.asyncio
+async def test_dead_legs_still_rank_below_last_resort() -> None:
+    """A probe-dead link will not heal on its own: failing into it first
+    would tax every request with a futile CONNECT, so it stays below the
+    last-resort uplink (pre-2026-11-04 behaviour preserved for this case).
+    """
+
+    pool = make_pool("a", "dead", "slow", last_resort=frozenset({"slow"}))
+    mark_healthy(pool)
+    pool._states[0].healthy = False  # noqa: SLF001
+    pool._states[1].healthy = False  # noqa: SLF001
+    seen = set()
+    for _ in range(3):
+        lease = await pool.acquire()
+        seen.add(lease.name)
+        await pool.release(lease, ok=True)
+    assert "slow" in seen            # last-resort still serves the overflow
+    assert "dead" not in seen        # probe-dead leg stays benched

@@ -288,17 +288,21 @@ class EgressPool:
         before the stable least-inflight sort.
 
         Ordering (owner decision 2026-10-29 — a failing bucket must not
-        leave rotation):
+        leave rotation; tier order re-measured 2026-11-04 after esp32
+        absorbed 237 of 286 attempts while the quota buckets sat cordoned):
 
           1. normal healthy buckets;
           2. buckets in a *cooldown* (one recent failure): still candidates,
              just picked after every healthy sibling, so the next request
              tries a different account first and this one serves again as
              soon as it is needed;
-          3. last-resort buckets, withheld while any normal bucket can
+          3. cordoned QUOTA buckets — real capacity whose upstream window
+             refills with time, so queueing upstream beats burning the
+             weak link;
+          4. last-resort buckets, withheld while any of the above can
              serve (a weak uplink that cannot meet the header deadline);
-          4. cordoned buckets, only when nothing else is left (queueing
-             upstream beats inventing a 502).
+          5. probe-dead legs (a dead link will not heal on its own, so
+             failing into it first would tax every request).
 
         The tiers are cumulative: a bucket appears in exactly one, and the
         first non-empty tier wins. This is why a single transport failure no
@@ -320,16 +324,34 @@ class EgressPool:
         # a 502. Rotating egresses stay excluded while any alternative
         # exists — their ONT is mid-reboot and every data connection they
         # accept dies with it.
-        benched = [s for s in self._states if s.available(now)]
+        # Buckets holding REAL upstream quota but benched right now: a quota
+        # cordon lifts with time (the upstream window refills), so these rank
+        # ABOVE the last-resort tier. 2026-11-04: benched used to mean only
+        # "unhealthy" and sat BELOW last-resort, which let esp32 — a weak
+        # uplink whose own free quota burns just the same — absorb 237 of
+        # 286 upstream attempts in 37 minutes (3-4 futile CONNECTs per
+        # request) while the three quota buckets sat cordoned.
+        cordoned_holders = [
+            s for s in self._states if s.healthy and s.cordoned(now)
+        ]
+        # Probe-dead legs keep ranking BELOW last-resort: a dead link will
+        # not heal on its own, so failing into it first just taxes every
+        # request with a futile CONNECT.
+        dead_legs = [
+            s
+            for s in self._states
+            if not s.healthy and not s.cordoned(now)
+        ]
         tiers = [
             ready,
             # A cooling bucket is still a healthy sibling of the same speed
             # class, so it outranks a last-resort uplink that cannot meet the
             # header deadline anyway.
             [s for s in cooling if s.spec.name not in self._last_resort],
+            cordoned_holders,
             [s for s in normal if s.spec.name in self._last_resort],
-            cooling,
-            benched,
+            [s for s in cooling if s.spec.name in self._last_resort],
+            dead_legs,
             list(self._states),
         ]
         usable = next((t for t in tiers if t), list(self._states))
@@ -355,12 +377,10 @@ class EgressPool:
                 if st is not None and st.available(now) and st.healthy and not st.cordoned(now):
                     sticky = st
                 else:
-                    # Unhealthy / cordoned / retired: migrate the session.
+                    # Unhealthy / cordoned / retired: release the binding.
+                    # The re-bind below logs the migration with the bucket
+                    # the session actually lands on.
                     del self._affinity[session_key]
-                    logger.info(
-                        "egress affinity migrated",
-                        extra={"session": session_key, "egress": name},
-                    )
 
         if sticky is not None:
             rotated = [sticky]
@@ -405,10 +425,21 @@ class EgressPool:
         state = min(rotated, key=lambda s: s.inflight)
         state.inflight += 1
         if session_key:
+            bound = self._affinity.get(session_key)
             # (Re)bind the session to the bucket that actually served it:
             # first turns stick, migrated sessions re-bind to their new
             # bucket, and every hit refreshes the idle clock.
             self._affinity[session_key] = (state.spec.name, time.monotonic())
+            if bound is None or bound[0] != state.spec.name:
+                # New binding (or a migration onto a different bucket) — log
+                # it so session->bucket mapping stays observable; steady hits
+                # stay silent.
+                logger.info(
+                    "session affinity bound"
+                    if bound is None
+                    else "egress affinity migrated",
+                    extra={"session": session_key, "egress": state.spec.name},
+                )
         if state.cordoned(now):
             logger.warning(
                 "no healthy egress; using cordoned bucket",
