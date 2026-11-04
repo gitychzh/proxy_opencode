@@ -50,6 +50,18 @@ logger = logging.getLogger("proxy_opencode.egress")
 _QUOTA_REASONS = frozenset({"free_quota_exhausted", "free_quota_soft"})
 
 
+class PoolExhausted(Exception):
+    """No bucket outside ``exclude`` can serve this attempt.
+
+    Raised from ``acquire`` when the in-request retry walk has already
+    tried every selectable bucket: the client should hand the request to
+    the backup chain instead of re-acquiring a bucket it just failed
+    (2026-11-04: the esp32 tunnel measured 38 upstream attempts for 10
+    client requests because each retry walk re-picked the same — only —
+    non-cordoned bucket four times).
+    """
+
+
 class ReleaseObserver(Protocol):
     """Hook invoked by ``EgressPool.release`` after each lease release.
 
@@ -267,8 +279,17 @@ class EgressPool:
 
     # -------------------------------------------------------------- leasing
 
-    async def acquire(self, session_key: str = "") -> Lease:
+    async def acquire(
+        self,
+        session_key: str = "",
+        exclude: frozenset[str] = frozenset(),
+    ) -> Lease:
         """Pick the healthy egress with the least in-flight work.
+
+        ``exclude`` lists buckets this request's retry walk has already
+        tried: they are removed from every tier, and when nothing remains
+        :class:`PoolExhausted` is raised so the caller hands the request to
+        the backup chain instead of re-failing the same bucket.
 
         With ``session_key`` set, the pool first honours SESSION AFFINITY:
         the same conversation keeps hitting the same bucket (same IP), which
@@ -349,7 +370,7 @@ class EgressPool:
             [s for s in cooling if s.spec.name not in self._last_resort],
             [s for s in normal if s.spec.name in self._last_resort],
             [s for s in cooling if s.spec.name in self._last_resort],
-            dead_legs,
+                dead_legs,
             # Final catch-all (every tier above empty): hand out a lease even
             # from a cordoned bucket rather than inventing a 502 — but this
             # now only fires when literally nothing else exists, and the
@@ -357,7 +378,26 @@ class EgressPool:
             # circuits into the fallback chain before acquire() is reached.
             list(self._states),
         ]
-        usable = next((t for t in tiers if t), list(self._states))
+        if exclude:
+            # Retry-walk semantics: filtered tiers WITHOUT the cordoned
+            # catch-all — a walk that has burned its buckets must hand the
+            # request to the backup chain, not start bombarding cordoned
+            # IPs (that bombardment is what keeps their 429 alive).
+            tiers = [
+                [s for s in tier if s.spec.name not in exclude]
+                for tier in tiers[:-1]
+            ]
+            usable = next((t for t in tiers if t), None)
+            if usable is None:
+                # Every selectable bucket was already tried by this request's
+                # walk: stop the caller from re-failing the same bucket
+                # (measured 38 esp32 attempts for 10 client requests).
+                raise PoolExhausted(
+                    "every bucket is either excluded by this request's "
+                    "retry walk or benched"
+                )
+        else:
+            usable = next((t for t in tiers if t), list(self._states))
 
         # Session affinity: a bound, still-usable bucket wins outright — the
         # conversation keeps its IP and its serial stream looks exactly like
@@ -704,6 +744,13 @@ class EgressPool:
         per turn), while a one-off blip costs exactly one demotion. It is
         capped well below the cordon window: this is a preference hint, not
         a health verdict.
+
+        Simplified 0.8.19 (owner direction — fix the bug, not stack
+        penalties): the exponential-doubling layer added in 0.8.14 existed
+        only to stop a dead leg from being re-picked four times inside one
+        request's retry walk. That walk now excludes tried buckets
+        outright, so a linear streak up to ``_cooldown_max_s`` is all the
+        preference a demoted bucket needs.
         """
 
         streak = max(1, state.failures)
@@ -711,15 +758,6 @@ class EgressPool:
             self._cooldown_s * streak,
             self._cooldown_max_s,
         )
-        # Beyond the flat cap, double the window per 5 further consecutive
-        # failures (hard cap 3600s). A leg still failing after the flat cap is
-        # almost certainly dead hardware, not a blip — the esp32 tunnel
-        # measured 1961 cooldowns in 8h at the flat 300s (2026-11-04), taxing
-        # every request on the retry chain with a doomed CONNECT first.
-        if self._cooldown_s * streak >= self._cooldown_max_s:
-            flat_streak = self._cooldown_max_s / self._cooldown_s
-            doublings = min(3, max(0, int((streak - flat_streak) // 5)))
-            seconds = min(self._cooldown_max_s * (2**doublings), 3600.0)
         state.cooldown_until = max(state.cooldown_until, now + seconds)
         logger.info(
             "egress demoted (cooldown, still in rotation)",

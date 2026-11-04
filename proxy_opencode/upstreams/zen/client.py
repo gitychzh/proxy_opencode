@@ -39,7 +39,7 @@ import httpx
 
 from ...config import Settings
 from ...egress.models import HARD_QUOTA_RETRY_AFTER_S
-from ...egress.pool import EgressPool, Lease
+from ...egress.pool import EgressPool, Lease, PoolExhausted
 from ...model_profile import profile as model_profile
 from ..openai_http import ResponseLike, StreamRelay, _raw_relay_body
 from ..zen_bun_transport import BunTransport, BunTransportError
@@ -207,14 +207,23 @@ class ZenDirectAdapter:
         # can migrate after a failure.
         session_key = _session_fingerprint(payload)
 
-        async def _acquire(sticky: bool = True) -> Lease:
+        async def _acquire(
+            sticky: bool = True, exclude: frozenset[str] = frozenset()
+        ) -> Lease:
             """Acquire a bucket and stamp this request's token estimate."""
 
             held = await self._pool.acquire(  # type: ignore[union-attr]
-                session_key=session_key if sticky else ""
+                session_key=session_key if sticky else "",
+                exclude=exclude,
             )
             held.tokens = estimated
             return held
+
+        # Buckets this request's retry walk has already failed on: the walk
+        # must never re-pick one (measured 38 esp32 attempts for 10 client
+        # requests when the only non-cordoned bucket was re-acquired four
+        # times per request).
+        tried: set[str] = set()
 
         lease = await _acquire()
         while True:
@@ -241,7 +250,13 @@ class ZenDirectAdapter:
                     detail=str(exc)[:120],
                     egress=lease.name,
                 )
-                lease = await _acquire(sticky=False)
+                tried.add(lease.name)
+                try:
+                    lease = await _acquire(
+                        sticky=False, exclude=frozenset(tried)
+                    )
+                except PoolExhausted:
+                    raise _transport_error(exc) from exc
                 continue
             except BaseException:
                 # Cancellation (client hung up before any byte) or an
@@ -279,7 +294,26 @@ class ZenDirectAdapter:
                         detail=f"egress={lease.name}",
                         egress=lease.name,
                     )
-                    lease = await _acquire(sticky=False)
+                    tried.add(lease.name)
+                    try:
+                        lease = await _acquire(
+                            sticky=False, exclude=frozenset(tried)
+                        )
+                    except PoolExhausted:
+                        # Every sibling is either tried or benched: hand the
+                        # 429 to the backup chain now instead of re-walking.
+                        hinted = result.pop("__quota_blackout_s__", None)
+                        logger.warning(
+                            "quota verdict on every usable bucket; handing "
+                            "this request to the backup chain",
+                            extra={
+                                "egress": lease.name if lease else "",
+                                "retry_after_s": round(float(hinted), 1)
+                                if isinstance(hinted, (int, float))
+                                else None,
+                            },
+                        )
+                        return result
                     continue
                 # Every attempt burned: request-scoped handoff to the
                 # backup chain. The single-account hint must NOT become a
@@ -308,7 +342,13 @@ class ZenDirectAdapter:
                 _log_failover(
                     kind=f"http_{status}", remaining=attempts, egress=lease.name
                 )
-                lease = await _acquire(sticky=False)
+                tried.add(lease.name)
+                try:
+                    lease = await _acquire(
+                        sticky=False, exclude=frozenset(tried)
+                    )
+                except PoolExhausted:
+                    return result
                 continue
             if (
                 self._auth_free
@@ -327,7 +367,13 @@ class ZenDirectAdapter:
                     remaining=attempts,
                     egress=lease.name,
                 )
-                lease = await _acquire(sticky=False)
+                tried.add(lease.name)
+                try:
+                    lease = await _acquire(
+                        sticky=False, exclude=frozenset(tried)
+                    )
+                except PoolExhausted:
+                    return self._egress_gate_answer(result)
                 continue
             # 200 body, or a request-level 4xx: final for this request.
             return result
