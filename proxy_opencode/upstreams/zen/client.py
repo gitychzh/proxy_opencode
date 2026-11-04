@@ -28,6 +28,7 @@ Authority for every rule above: AGENTS.md 硬约束 1.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -199,10 +200,19 @@ class ZenDirectAdapter:
 
         attempts = min(self._pool.size, FAILOVER_MAX_ATTEMPTS)
 
-        async def _acquire() -> Lease:
+        # Conversation fingerprint for egress affinity (2026-11-04): system
+        # message + first user message identify one hermes/CLI session; the
+        # same conversation keeps ONE egress (one IP) like a genuine client,
+        # while retries inside this request pass NO key so the sibling walk
+        # can migrate after a failure.
+        session_key = _session_fingerprint(payload)
+
+        async def _acquire(sticky: bool = True) -> Lease:
             """Acquire a bucket and stamp this request's token estimate."""
 
-            held = await self._pool.acquire()  # type: ignore[union-attr]
+            held = await self._pool.acquire(  # type: ignore[union-attr]
+                session_key=session_key if sticky else ""
+            )
             held.tokens = estimated
             return held
 
@@ -231,7 +241,7 @@ class ZenDirectAdapter:
                     detail=str(exc)[:120],
                     egress=lease.name,
                 )
-                lease = await _acquire()
+                lease = await _acquire(sticky=False)
                 continue
             except BaseException:
                 # Cancellation (client hung up before any byte) or an
@@ -269,7 +279,7 @@ class ZenDirectAdapter:
                         detail=f"egress={lease.name}",
                         egress=lease.name,
                     )
-                    lease = await _acquire()
+                    lease = await _acquire(sticky=False)
                     continue
                 # Every attempt burned: request-scoped handoff to the
                 # backup chain. The single-account hint must NOT become a
@@ -298,7 +308,7 @@ class ZenDirectAdapter:
                 _log_failover(
                     kind=f"http_{status}", remaining=attempts, egress=lease.name
                 )
-                lease = await _acquire()
+                lease = await _acquire(sticky=False)
                 continue
             if (
                 self._auth_free
@@ -317,7 +327,7 @@ class ZenDirectAdapter:
                     remaining=attempts,
                     egress=lease.name,
                 )
-                lease = await _acquire()
+                lease = await _acquire(sticky=False)
                 continue
             # 200 body, or a request-level 4xx: final for this request.
             return result
@@ -678,6 +688,28 @@ class ZenDirectAdapter:
                 },
             )
         return applied
+
+
+def _session_fingerprint(payload: Mapping[str, Any]) -> str:
+    """Stable conversation key for egress affinity (16 hex chars).
+
+    One conversation = system message + first user message: identical across
+    every turn of the same session, different across sessions. Only a prefix
+    of each content is hashed (cheap and content-free at the log layer — the
+    hash itself is all that ever leaves this function).
+    """
+
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return ""
+    head: list[str] = []
+    for msg in messages[:2]:
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            head.append(str(content)[:256] if content is not None else "")
+        else:
+            head.append("")
+    return hashlib.sha1("\x00".join(head).encode("utf-8", "ignore")).hexdigest()[:16]
 
 
 def _log_failover(

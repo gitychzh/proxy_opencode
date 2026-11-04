@@ -1474,3 +1474,66 @@ async def test_inflight_cap_zero_is_unlimited() -> None:
     assert a.name == b.name == "a"
     pool.abandon(a)
     pool.abandon(b)
+
+
+
+
+@pytest.mark.asyncio
+async def test_session_affinity_pins_one_session_to_one_bucket() -> None:
+    """2026-11-04: the same conversation fingerprint keeps ONE egress, like
+    a genuine CLI session (single serial stream over a single IP); a new
+    session prefers an unbound bucket; the binding refreshes on each hit.
+    """
+
+    pool = make_pool("a", "b", affinity_ttl_s=600)
+    for st in pool._states:
+        st.healthy = True
+    s1 = await pool.acquire(session_key="sess-1")
+    s1b = await pool.acquire(session_key="sess-1")
+    assert s1.name == s1b.name == "a"      # pinned
+    pool.abandon(s1)
+    pool.abandon(s1b)
+
+    s2 = await pool.acquire(session_key="sess-2")
+    assert s2.name != s1.name              # new session -> the free bucket
+    pool.abandon(s2)
+
+    s1c = await pool.acquire(session_key="sess-1")
+    assert s1c.name == "a"                 # still its bucket
+    pool.abandon(s1c)
+
+
+@pytest.mark.asyncio
+async def test_session_affinity_migrates_off_cordoned_bucket() -> None:
+    pool = make_pool("a", "b", affinity_ttl_s=600)
+    for st in pool._states:
+        st.healthy = True
+    s1 = await pool.acquire(session_key="k1")
+    pool.abandon(s1)
+    pool._states[0].healthy = False        # bucket a dies
+    s2 = await pool.acquire(session_key="k1")
+    assert s2.name == "b"                  # migrated
+    pool.abandon(s2)
+    pool._states[0].healthy = True
+    s3 = await pool.acquire(session_key="k1")
+    assert s3.name == "b"                  # binding was re-written to b
+    pool.abandon(s3)
+
+
+@pytest.mark.asyncio
+async def test_session_affinity_ttl_frees_the_slot() -> None:
+    pool = make_pool("a", "b", affinity_ttl_s=600)
+    for st in pool._states:
+        st.healthy = True
+    s1 = await pool.acquire(session_key="old")
+    pool.abandon(s1)
+    # age the binding out beyond the TTL
+    pool._affinity["old"] = (s1.name, pool._affinity["old"][1] - 700.0)
+    s2 = await pool.acquire(session_key="new")
+    pool.abandon(s2)
+    s3 = await pool.acquire(session_key="old")
+    # the expired binding no longer pins: the re-entry is allocated by the
+    # normal selection (either bucket is a valid fresh binding)
+    assert s3.name in ("a", "b")
+    pool.abandon(s3)
+    assert pool._affinity["old"][0] == s3.name

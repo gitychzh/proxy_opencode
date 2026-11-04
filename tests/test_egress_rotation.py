@@ -1066,7 +1066,7 @@ async def test_zen_429_release_carries_retry_after() -> None:
         def size(self) -> int:
             return 1
 
-        async def acquire(self) -> Lease:
+        async def acquire(self, session_key: str = "") -> Lease:
             state = EgressState(spec=EgressSpec("bucket-a", "http://agent:10001"))
             state.client = httpx.AsyncClient()
             state.inflight += 1

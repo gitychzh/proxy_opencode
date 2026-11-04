@@ -991,7 +991,7 @@ class _StubPool:
     def size(self) -> int:
         return 1
 
-    async def acquire(self) -> Lease:
+    async def acquire(self, session_key: str = "") -> Lease:
         state = EgressState(spec=EgressSpec("bucket-a", "http://agent:10001"))
         state.client = self._client
         state.inflight += 1
@@ -1168,7 +1168,7 @@ class _RollingStubPool:
     def size(self) -> int:
         return len(self._names)
 
-    async def acquire(self) -> Lease:
+    async def acquire(self, session_key: str = "") -> Lease:
         name = self._names[self._i % len(self._names)]
         self._i += 1
         state = EgressState(spec=EgressSpec(name, "http://agent:10001"))

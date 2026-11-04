@@ -59,6 +59,7 @@ FIELDS = (
     "threshold",
     "cap",
     "wait_s",
+    "session",
     "trigger",
     "detail",
     "ok",

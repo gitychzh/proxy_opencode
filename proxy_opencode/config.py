@@ -359,6 +359,12 @@ class Settings:
     # the cap anyway (bounded stall beats a guaranteed 429 storm).
     #   ZEN_EGRESS_INFLIGHT_WAIT_S=20
     zen_egress_inflight_wait_s: float = 20.0
+    # Session affinity TTL (seconds, 0 = off). A conversation fingerprint
+    # (system + first user message) pins its requests to ONE bucket for this
+    # long, mirroring the genuine client's one-session-one-egress serial
+    # shape; an idle expiry frees the bucket slot for a new session.
+    #   ZEN_EGRESS_AFFINITY_TTL_S=600
+    zen_egress_affinity_ttl_s: float = 600.0
     # Ceiling on a hard-429 cordon. A 429 carrying "Retry-After > 1h" is read
     # as a burned per-IP daily allowance and used to bench the bucket until
     # the upstream window reset (up to ~12h). That is too long: the verdict's
@@ -765,6 +771,9 @@ def load_settings() -> Settings:
         ),
         zen_egress_inflight_wait_s=float(
             os.environ.get("ZEN_EGRESS_INFLIGHT_WAIT_S", "20")
+        ),
+        zen_egress_affinity_ttl_s=float(
+            os.environ.get("ZEN_EGRESS_AFFINITY_TTL_S", "600")
         ),
         zen_quota_cordon_max_s=float(
             os.environ.get("ZEN_QUOTA_CORDON_MAX_S", "600")

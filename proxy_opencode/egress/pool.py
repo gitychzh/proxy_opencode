@@ -104,6 +104,7 @@ class EgressPool:
         last_resort: frozenset[str] = frozenset(),
         max_inflight: int = 0,
         inflight_wait_s: float = 20.0,
+        affinity_ttl_s: float = 600.0,
     ) -> None:
         if not specs:
             raise ValueError("EgressPool requires at least one egress spec")
@@ -152,8 +153,21 @@ class EgressPool:
         self._probe_timeout = httpx.Timeout(10.0, connect=5.0)
         self._probe_client: httpx.AsyncClient | None = None
         self._closed = False
+        # Session→bucket affinity (see acquire). Key = conversation
+        # fingerprint; value = (bucket name, last-seen monotonic ts).
+        self._affinity: dict[str, tuple[str, float]] = {}
+        self._affinity_ttl_s = max(0.0, float(affinity_ttl_s))
         # Round-robin cursor for tie-breaking (see acquire).
         self._rr = itertools.count()
+
+    def _live_bindings(self, now: float) -> dict[str, int]:
+        """How many LIVE (non-expired) sessions are bound to each bucket."""
+
+        counts: dict[str, int] = {}
+        for name, seen in self._affinity.values():
+            if now - seen <= self._affinity_ttl_s:
+                counts[name] = counts.get(name, 0) + 1
+        return counts
 
     @classmethod
     def from_settings(cls, settings: object) -> "EgressPool | None":
@@ -184,6 +198,9 @@ class EgressPool:
             ),
             inflight_wait_s=float(
                 getattr(settings, "zen_egress_inflight_wait_s", 20) or 20
+            ),
+            affinity_ttl_s=float(
+                getattr(settings, "zen_egress_affinity_ttl_s", 600) or 600
             ),
             # No `or` default here: 0 is a meaningful value (disable the
             # ceiling and fall back to "benched until the window reset").
@@ -250,8 +267,18 @@ class EgressPool:
 
     # -------------------------------------------------------------- leasing
 
-    async def acquire(self) -> Lease:
+    async def acquire(self, session_key: str = "") -> Lease:
         """Pick the healthy egress with the least in-flight work.
+
+        With ``session_key`` set, the pool first honours SESSION AFFINITY:
+        the same conversation keeps hitting the same bucket (same IP), which
+        mirrors the genuine client — one opencode CLI session is a single
+        serial stream over ONE egress. A bound bucket that is unhealthy or
+        cordoned releases the session, which is then re-bound to whatever
+        the normal selection picks. Bindings idle for
+        ``_affinity_ttl_s`` (10 min) are dropped lazily, freeing the slot
+        for a new session. Retries inside one request pass an empty key on
+        purpose: after a failure the sibling walk must be free to migrate.
 
         Ties are the common case (sequential traffic leaves every bucket
         idle), and they are broken by rotation rather than by name — the
@@ -306,8 +333,49 @@ class EgressPool:
             list(self._states),
         ]
         usable = next((t for t in tiers if t), list(self._states))
-        offset = next(self._rr) % len(usable)
-        rotated = usable[offset:] + usable[:offset]
+
+        # Session affinity: a bound, still-usable bucket wins outright — the
+        # conversation keeps its IP and its serial stream looks exactly like
+        # one genuine CLI session. An unusable bound releases the session.
+        sticky: EgressState | None = None
+        if session_key and self._affinity_ttl_s > 0:
+            expired = [
+                k
+                for k, (_, seen) in self._affinity.items()
+                if now - seen > self._affinity_ttl_s
+            ]
+            for k in expired:
+                del self._affinity[k]
+            bound = self._affinity.get(session_key)
+            if bound is not None:
+                name, _seen = bound
+                st = next(
+                    (s for s in self._states if s.spec.name == name), None
+                )
+                if st is not None and st.available(now) and st.healthy and not st.cordoned(now):
+                    sticky = st
+                else:
+                    # Unhealthy / cordoned / retired: migrate the session.
+                    del self._affinity[session_key]
+                    logger.info(
+                        "egress affinity migrated",
+                        extra={"session": session_key, "egress": name},
+                    )
+
+        if sticky is not None:
+            rotated = [sticky]
+        else:
+            offset = next(self._rr) % len(usable)
+            rotated = usable[offset:] + usable[:offset]
+            # A NEW session prefers a bucket no other live session is bound
+            # to ("往下排"): ties in the normal tier are broken by (live
+            # bindings, in-flight) so four sessions spread across four
+            # buckets before any bucket hosts two.
+            if session_key:
+                live = self._live_bindings(now)
+                rotated.sort(
+                    key=lambda s: (live.get(s.spec.name, 0), s.inflight)
+                )
         # Per-bucket concurrency gate: only buckets with spare in-flight
         # slots are handed out; when none has one, the caller WAITS (bounded)
         # for a release instead of bursting another upstream connection into
@@ -336,6 +404,11 @@ class EgressPool:
                 rotated = candidates
         state = min(rotated, key=lambda s: s.inflight)
         state.inflight += 1
+        if session_key:
+            # (Re)bind the session to the bucket that actually served it:
+            # first turns stick, migrated sessions re-bind to their new
+            # bucket, and every hit refreshes the idle clock.
+            self._affinity[session_key] = (state.spec.name, time.monotonic())
         if state.cordoned(now):
             logger.warning(
                 "no healthy egress; using cordoned bucket",
