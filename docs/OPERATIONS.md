@@ -1,11 +1,16 @@
 # 运维手册（OPERATIONS）
 
-> 现状快照：2026-10-28（0.7.4，四桶现役）。本文只记**当前部署状态、常用操作、
+> 现状快照：2026-11-04（0.8.24，5 桶出口池）。本文只记**当前部署状态、常用操作、
 > 排障路径**与未解决风险；事故编年与已关闭问题看 §5 与
 > [`CHANGELOG.md`](../CHANGELOG.md)。拓扑/端口/池语义看
 > [`ARCHITECTURE.md`](ARCHITECTURE.md)；协议事实与红线看
 > [`AGENTS.md`](../AGENTS.md) 硬约束 1；模型参数看
 > [`MODEL_PROFILE.md`](MODEL_PROFILE.md)；凭据去向看 [`ACCESS.md`](ACCESS.md)。
+>
+> ⚠️ 版本分层：§2/§6 中标注 0.8.6~0.8.9 的策略（如 `ZEN_ROTATE_ON_HARD_429=true`
+> 自动轮换、单桶故障规则）是**当时实现，原文保留作变更史**；0.8.19 起生产已关闭
+> 429 自动轮换，0.8.22 起 cordon 桶零可达、全 cordon 直接交备用链。冲突时以
+> `CHANGELOG.md` 最新版本条目与 `.workbuddy/memory/MEMORY.md` 为准。
 
 ## 1. 现状（0.8.x 双容器）
 
