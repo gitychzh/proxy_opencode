@@ -43,6 +43,14 @@ from .models import (
 
 logger = logging.getLogger("proxy_opencode.egress")
 
+# Observation folding window (0.8.26): a mobile CGNAT can re-dial between
+# two addresses every probe round (win107, 2026-11-06: 111.55.74.15 <->
+# 111.55.74.254 hopping every 30-60s wrote 191 ``egress_ip_observed``
+# events in one day). The same before/after pair inside this window
+# updates the runtime state silently; the ledger event + INFO log are
+# recorded once and re-armed by a *different* pair or by window expiry.
+_IP_FLAP_SUPPRESS_S = 1800.0
+
 
 class PoolExhausted(Exception):
     """No bucket outside ``exclude`` can serve this attempt.
@@ -958,11 +966,19 @@ class EgressPool:
         after its rotate call was unreachable and the healthy new
         ``36.149.55.24`` stayed benched until the window reset.
 
-        Preconditions: the probe just succeeded (``ok``), the IP really
-        changed, and the cordon reason is one of the IP-scoped verdicts.
-        Anything else (transport streaks, plain cooldowns) keeps its
-        deadline; a fresh IP that is also exhausted will re-cordon on its
-        own first 429.
+        Preconditions: a live cordon, the probe just succeeded (``ok``),
+        the IP really changed, and the cordon reason is one of the
+        IP-scoped verdicts. Anything else (an expired cordon, transport
+        streaks, plain cooldowns) keeps its deadline; a fresh IP that is
+        also exhausted will re-cordon on its own first 429. The live-cordon
+        gate runs before the reason is even read: a cordon that expired on
+        its own leaves the stale reason string in place, and without the
+        gate a probe that happened to observe an IP change after expiry
+        still emitted ``cordon_lifted`` carrying the old reason (QA backlog
+        observation, 0.8.25 verification) — there was no live cordon left
+        to lift, so the event misdescribed the pool. Expired cordons are
+        already invisible to selection (``cordoned`` re-checks the clock),
+        so the early return changes no runtime verdict.
 
         ``expect_prefix`` is deliberately NOT a precondition here (it is an
         audit field, per ARCHITECTURE §6). Gating availability on a
@@ -973,6 +989,8 @@ class EgressPool:
         A mismatch is reported instead of enforced.
         """
 
+        if not state.cordoned(time.monotonic()):
+            return
         reason = state.cordon_reason.split(" (", 1)[0]
         if reason not in self._IP_SCOPED_CORDON_REASONS:
             return
@@ -1070,24 +1088,52 @@ class EgressPool:
             current_ip = ip
             ip_changed = ip != state.egress_ip
             if ip_changed:
-                logger.info(
-                    "egress ip changed",
-                    extra={
-                        "egress": state.spec.name,
-                        "previous": state.egress_ip,
-                        "current": ip,
-                    },
-                )
-                # The probe loop is the IPs' source of truth: any change
-                # (rotation, ISP re-issuing, the eth leg flapping) lands
-                # here with the before/after pair for the audit trail.
-                EVENTS.emit(
-                    "egress_ip_observed",
-                    egress=state.spec.name,
-                    previous=state.egress_ip,
-                    current=ip,
-                    matches_prefix=state.spec.matches_prefix(ip),
-                )
+                # Observation folding (0.8.26): a mobile CGNAT re-dials
+                # between the same two addresses every 30-60s (win107,
+                # 2026-11-06: 191 ``egress_ip_observed`` events in a day for
+                # one IP pair), so the same before/after pair inside the
+                # suppression window updates the runtime state silently and
+                # only the first occurrence reaches the ledger. The pair is
+                # the signature, so a genuinely new address (different pair)
+                # or an expired window re-arms full recording — long-term
+                # audit capability is kept. The first observation never
+                # folds (``egress_ip`` is still ``None`` then). Runtime
+                # semantics are untouched: health, cordon lifts and the
+                # ``egress_ip`` fields below update exactly as before.
+                signature = "|".join(sorted((state.egress_ip or "", ip)))
+                if (
+                    signature == state.ip_flap_signature
+                    and now - state.ip_flap_at < _IP_FLAP_SUPPRESS_S
+                ):
+                    logger.debug(
+                        "egress ip flap folded inside the suppression window",
+                        extra={
+                            "egress": state.spec.name,
+                            "previous": state.egress_ip,
+                            "current": ip,
+                        },
+                    )
+                else:
+                    state.ip_flap_signature = signature
+                    state.ip_flap_at = now
+                    logger.info(
+                        "egress ip changed",
+                        extra={
+                            "egress": state.spec.name,
+                            "previous": state.egress_ip,
+                            "current": ip,
+                        },
+                    )
+                    # The probe loop is the IPs' source of truth: any change
+                    # (rotation, ISP re-issuing, the eth leg flapping) lands
+                    # here with the before/after pair for the audit trail.
+                    EVENTS.emit(
+                        "egress_ip_observed",
+                        egress=state.spec.name,
+                        previous=state.egress_ip,
+                        current=ip,
+                        matches_prefix=state.spec.matches_prefix(ip),
+                    )
             state.egress_ip = ip
             state.egress_ip_at = str(payload.get("egress_ip_at") or "")
         # ip-matching is informational only (do not gate health)

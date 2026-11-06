@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+### Fixed — 出口 IP 横跳折叠 + 过期 cordon 不再误发 cordon_lifted（0.8.26，2026-11-06）
+
+生产依据（ECS 账本 `egress_events.jsonl`，zen-gw 0.8.25）：win107 桶出口 IP 在 `111.55.74.15` ↔ `111.55.74.254` 间每 30~60 秒横跳一次（移动 CGNAT），2026-11-05/06 两天账本各 62/191 条 `egress_ip_observed`、同频 INFO 日志，全被同一对 IP 的反复横跳淹没（其余桶 0-1 条）；另有 QA 在 0.8.25 验证时的 backlog 观察项——cordon 自然到期后若 probe 恰好检出 IP 变化，仍会 emit 带旧 reason 的 `cordon_lifted`（没有 live cordon 可 lift，事件语义错误）。两者均为观测层噪音，运行时判定语义零改动。
+
+- `EgressPool._probe_one` 观测折叠：变化签名 = 排序后的 (previous, current) IP 对，同一签名在 `_IP_FLAP_SUPPRESS_S`（1800s）窗口内重复出现时跳过 `egress_ip_observed` 事件与 INFO 日志（改打 debug），`state.egress_ip`/`egress_ip_at` 更新照旧；不同 IP 对或窗口过期立即恢复完整记录，首次观测（egress_ip 为 None）永不折叠，长期审计能力保留。`EgressState` 新增纯记账字段 `ip_flap_signature`/`ip_flap_at`（不进 snapshot，admin 输出形状不变）。
+- `EgressPool._lift_ip_scoped_cordon()` 入口新增 live-cordon 闸门（`cordoned(time.monotonic())`）：cordon 已过期时 IP 变化不再 emit `cordon_lifted`、不改 failures；live cordon 期间「IP 变化即清 cordon + emit + failures=0」的既有行为原样保留（2026-10-24 opc2 桶事故修复不得削弱）。
+
+回归测试：`test_repeated_ip_flap_observed_once_within_window`、`test_different_ip_pair_rearms_observation`、`test_ip_flap_window_expiry_resumes_observation`、`test_first_ip_observation_is_never_folded`、`test_expired_cordon_not_lifted_by_ip_change`、`test_snapshot_excludes_ip_flap_bookkeeping`。
+
+门禁：pytest 520 passed，ruff clean，mypy clean。
+
 ### Fixed — 400 日志补 error 归因 + cordon 自然到期不再残留原因（0.8.25，2026-11-06）
 
 生产依据（ECS，zen-gw 容器 0.8.24）：48h 内（2026-11-05~06）出现 33 个本地 400（`logger: proxy_opencode.chat, msg: chat completion, status: 400, latency_ms ~1.5`），但 chat 日志行没有 error/reason 字段，无法归因是 ContextOverflow 还是空 messages 等其他 InvalidRequest；同日 `GET /admin/egresses` 实测 `"cordoned": false` 旁边残留 `"cordon_reason": "free_quota_exhausted (per-IP daily quota)"`（owin10-mobile、cc9 桶），误导管理面排障。

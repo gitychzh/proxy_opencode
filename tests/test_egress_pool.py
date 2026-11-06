@@ -617,6 +617,193 @@ async def test_free_tier_cordon_lifted_when_isp_changes_ip(tmp_path) -> None:  #
         cleanup()
 
 
+@respx.mock
+@pytest.mark.asyncio
+async def test_expired_cordon_not_lifted_by_ip_change(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A cordon that expired on its own has nothing to lift.
+
+    QA backlog (0.8.25 verification): once the cordon deadline had passed
+    (e.g. the daily quota window reset), the next probe observing an IP
+    change still emitted ``cordon_lifted`` with the old reason — a lift of
+    a cordon that no longer existed. Expiry alone is silent; only a *live*
+    cordon lifts on an IP change (the 2026-10-24 opc2 behaviour, which the
+    live-cordon tests above pin down).
+    """
+
+    pool = EgressPool([EgressSpec("a", "http://agent1:10001")])
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    state.egress_ip = "3.3.3.3"
+    lease = await pool.acquire()
+    await pool.release(lease, ok=False, kind="http_429")
+    assert state.cordoned(time.monotonic()) is True
+    # Let the deadline lapse without clearing the recorded reason — exactly
+    # what a naturally expired cordon looks like to the probe.
+    state.cordoned_until = time.monotonic() - 1.0  # noqa: SLF001
+    state.failures = 7  # sentinel: a live lift zeroes it, expiry must not
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://agent1:10001/healthz").respond(
+            json={"ready": True, "egress_ip": "4.4.4.4"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert state.cordoned(time.monotonic()) is False
+        # no live cordon -> no lift semantics: reason and failures untouched
+        assert state.cordon_reason != ""
+        assert state.failures == 7
+        # the observation itself is still recorded
+        assert [e["event"] for e in read()] == ["egress_ip_observed"]
+    finally:
+        cleanup()
+
+
+# ------------------------------------------------- IP observation folding
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_repeated_ip_flap_observed_once_within_window(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The same CGNAT pair re-dialing every probe round records once.
+
+    Production 2026-11-06 (win107, mobile CGNAT): the egress IP hopped
+    between 111.55.74.15 and 111.55.74.254 every 30-60s, and every hop
+    wrote an ``egress_ip_observed`` event + an INFO line — 191 events in a
+    day for one pair. Within the suppression window the repeated pair is
+    folded into the first observation; folding is observability-only, so
+    the runtime state still tracks the real address after every hop.
+    """
+
+    pool = EgressPool([EgressSpec("a", "http://agent1:10001")])
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    state.egress_ip = "111.55.74.15"
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        for ip in ("111.55.74.254", "111.55.74.15", "111.55.74.254"):
+            respx.get("http://agent1:10001/healthz").respond(
+                json={"ready": True, "egress_ip": ip}
+            )
+            await pool._probe_one(state)  # noqa: SLF001
+        # one event for the pair, stamped with the first hop's endpoints
+        assert [e["event"] for e in read()] == ["egress_ip_observed"]
+        observed = read()[0]
+        assert observed["previous"] == "111.55.74.15"
+        assert observed["current"] == "111.55.74.254"
+        # the state followed every hop even though the ledger stayed quiet
+        assert state.egress_ip == "111.55.74.254"
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_different_ip_pair_rearms_observation(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A *different* before/after pair records immediately, window or not.
+
+    The signature is the pair itself: a genuinely new address must reach
+    the ledger at once even while another pair is mid-window.
+    """
+
+    pool = EgressPool([EgressSpec("a", "http://agent1:10001")])
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    state.egress_ip = "111.55.74.15"
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://agent1:10001/healthz").respond(
+            json={"ready": True, "egress_ip": "111.55.74.254"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001  (records the pair)
+        respx.get("http://agent1:10001/healthz").respond(
+            json={"ready": True, "egress_ip": "111.55.74.15"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001  (same pair: folded)
+        respx.get("http://agent1:10001/healthz").respond(
+            json={"ready": True, "egress_ip": "36.149.55.24"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001  (new pair: records)
+        events = read()
+        assert [e["event"] for e in events] == [
+            "egress_ip_observed",
+            "egress_ip_observed",
+        ]
+        assert (events[0]["previous"], events[0]["current"]) == (
+            "111.55.74.15",
+            "111.55.74.254",
+        )
+        assert (events[1]["previous"], events[1]["current"]) == (
+            "111.55.74.15",
+            "36.149.55.24",
+        )
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_ip_flap_window_expiry_resumes_observation(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """After the window lapses the same pair records again (audit trail).
+
+    Folding must be a suppression, not amnesia: once the window is over,
+    the recurring pair lands in the ledger again so long-term flapping
+    stays visible to the nightly report.
+    """
+
+    pool = EgressPool([EgressSpec("a", "http://agent1:10001")])
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    state.egress_ip = "111.55.74.15"
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://agent1:10001/healthz").respond(
+            json={"ready": True, "egress_ip": "111.55.74.254"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001  (records)
+        respx.get("http://agent1:10001/healthz").respond(
+            json={"ready": True, "egress_ip": "111.55.74.15"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001  (folded)
+        # age the recorded signature past the suppression window
+        state.ip_flap_at -= 1801.0  # noqa: SLF001
+        respx.get("http://agent1:10001/healthz").respond(
+            json={"ready": True, "egress_ip": "111.55.74.254"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001  (records again)
+        assert [e["event"] for e in read()] == [
+            "egress_ip_observed",
+            "egress_ip_observed",
+        ]
+        assert read()[-1]["current"] == "111.55.74.254"
+    finally:
+        cleanup()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_first_ip_observation_is_never_folded(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """None -> first IP is the bucket's initial sighting: always records.
+
+    The signature folds only a *change* pair; the first observation has no
+    previous address and must reach the ledger unconditionally.
+    """
+
+    pool = EgressPool([EgressSpec("a", "http://agent1:10001")])
+    state = pool._states[0]  # noqa: SLF001
+    state.healthy = True
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://agent1:10001/healthz").respond(
+            json={"ready": True, "egress_ip": "1.2.3.4"}
+        )
+        await pool._probe_one(state)  # noqa: SLF001
+        assert [e["event"] for e in read()] == ["egress_ip_observed"]
+        assert read()[0]["previous"] is None
+        assert read()[0]["current"] == "1.2.3.4"
+        assert state.egress_ip == "1.2.3.4"
+    finally:
+        cleanup()
+
+
 # ------------------------------------------------------------ proxy auth
 
 
@@ -646,6 +833,22 @@ def test_snapshot_shape_is_log_safe() -> None:
     assert snap[0]["egress_ip"] == "1.2.3.4"
     # no credential surface in the snapshot
     assert "secret" not in " ".join(snap[0].keys())
+
+
+def test_snapshot_excludes_ip_flap_bookkeeping() -> None:
+    """ip_flap_* are pure accounting fields — the admin shape is frozen.
+
+    Adding them to snapshot() would change the /admin/egresses payload;
+    they stay runtime-only (0.8.26 observation folding).
+    """
+
+    pool = make_pool("a")
+    state = pool._states[0]
+    state.ip_flap_signature = "1.1.1.1|2.2.2.2"  # noqa: SLF001
+    state.ip_flap_at = 123.0  # noqa: SLF001
+    snap = pool.snapshot()[0]
+    assert "ip_flap_signature" not in snap
+    assert "ip_flap_at" not in snap
 
 
 def test_snapshot_cordon_reason_expires_with_the_cordon() -> None:

@@ -117,6 +117,16 @@ class EgressState:
     rotating: bool = False
     egress_ip: str | None = None
     egress_ip_at: str | None = None
+    # Pure observation bookkeeping (0.8.26): signature of the last
+    # (previous, current) egress-IP pair the probe recorded, and the
+    # monotonic time it was recorded. ``EgressPool._probe_one`` uses the
+    # pair to fold a flapping CGNAT address pair into one ledger event per
+    # suppression window instead of one event per probe round. Deliberately
+    # excluded from snapshot(): these are accounting fields, not
+    # operator-facing state, and listing them would change the admin output
+    # shape.
+    ip_flap_signature: str = ""
+    ip_flap_at: float = 0.0
     last_probe_at: float = 0.0
     last_probe_ok: bool | None = None
     # Consecutive *soft* probe failures (agent answered 200 but not ready).
