@@ -154,7 +154,13 @@ class EgressState:
             "agent_url": self.spec.agent_url,
             "healthy": self.healthy,
             "cordoned": self.cordoned(now),
-            "cordon_reason": self.cordon_reason,
+            # Lazy expiry: the cordon deadline is a passive time check and only
+            # the active lift paths clear ``cordon_reason``, so once it has
+            # passed the stale verdict must not leak into the admin view
+            # (2026-11-06 production: "cordoned": false reported next to a
+            # quota-exhausted reason, sending the operator chasing a cordon
+            # that had already lifted).
+            "cordon_reason": self.cordon_reason if self.cordoned(now) else "",
             "cordon_remaining_s": round(self.cordon_remaining_s(now), 1),
             "cooldown": self.cooling_down(now),
             "cooldown_remaining_s": round(self.cooldown_remaining_s(now), 1),

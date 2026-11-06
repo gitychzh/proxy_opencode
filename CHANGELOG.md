@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+### Fixed — 400 日志补 error 归因 + cordon 自然到期不再残留原因（0.8.25，2026-11-06）
+
+生产依据（ECS，zen-gw 容器 0.8.24）：48h 内（2026-11-05~06）出现 33 个本地 400（`logger: proxy_opencode.chat, msg: chat completion, status: 400, latency_ms ~1.5`），但 chat 日志行没有 error/reason 字段，无法归因是 ContextOverflow 还是空 messages 等其他 InvalidRequest；同日 `GET /admin/egresses` 实测 `"cordoned": false` 旁边残留 `"cordon_reason": "free_quota_exhausted (per-IP daily quota)"`（owin10-mobile、cc9 桶），误导管理面排障。
+
+- `ChatCall.log()` 新增可选 `error` 参数：仅传入时在日志 extra 里输出该字段，其余调用点的日志形状保持不变。`dispatch()` 的 InvalidRequest 分支现在把失败原因写进 400 记录——ContextOverflow 记 `context_length_exceeded: …`，其余 InvalidRequest 记请求形状错误描述（截断 200 字符）。reason 仅含请求形状描述或 token 数字，不含消息内容/凭据（`error` 已是 logsetup.FIELDS 合法键）。
+- `EgressState.snapshot()` 的 `cordon_reason` 改为惰性清理：仅 cordon 存续期输出原因，自然到期（如 UTC0 配额窗重置）后输出空串；不动状态机、不动事件账本语义（历史 cordon 事件已归 ledger）。
+
+回归测试：`test_invalid_request_400_log_carries_error_reason`、`test_context_overflow_400_log_names_context_length_exceeded`、`test_normal_chat_log_has_no_error_key`、`test_snapshot_cordon_reason_expires_with_the_cordon`。
+
+门禁：pytest 514 passed，ruff clean，mypy clean。
+
 ### Added — 逐请求出口流量账本事件（0.8.24，2026-11-04）
 
 四桶流量审计（2026-11-04 晚）发现：`egress_events.jsonl` 只有 cordon/fallback/probe 事件，**没有逐请求成败记录**——按桶统计流量只能靠 `admin/egresses` 的内存计数（容器重启即失忆），违反 AGENTS.md「统计各桶请求量（成功/失败，含 429/5xx/超时）从 JSONL 事件读取，且必须带 bucket_name + egress_ip」。

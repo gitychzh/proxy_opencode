@@ -648,6 +648,30 @@ def test_snapshot_shape_is_log_safe() -> None:
     assert "secret" not in " ".join(snap[0].keys())
 
 
+def test_snapshot_cordon_reason_expires_with_the_cordon() -> None:
+    """0.8.25: natural expiry is a passive time check — only the active lift
+    paths clear cordon_reason — so the snapshot must stop echoing the stale
+    verdict once the deadline has passed. GET /admin/egresses answered
+    "cordoned": false next to a quota-exhausted reason (2026-11-06,
+    owin10-mobile / cc9) and sent the operator chasing a lifted cordon."""
+    state = EgressState(spec=EgressSpec("a", "http://a:10001"))
+    now = time.monotonic()
+    state.cordoned_until = now + 600.0
+    state.cordon_reason = "free_quota_exhausted (per-IP daily quota)"
+
+    # While the cordon is live, both fields carry a value.
+    live = state.snapshot(now)
+    assert live["cordoned"] is True
+    assert live["cordon_reason"] == "free_quota_exhausted (per-IP daily quota)"
+    assert live["cordon_remaining_s"] > 0
+
+    # After expiry (e.g. the UTC0 quota-window reset) the reason must not leak.
+    expired = state.snapshot(now + 601.0)
+    assert expired["cordoned"] is False
+    assert expired["cordon_reason"] == ""
+    assert expired["cordon_remaining_s"] == 0.0
+
+
 def test_lease_client_requires_started_egress() -> None:
     state = EgressState(spec=EgressSpec("a", "http://a:10001"))
     from proxy_opencode.egress.pool import Lease
