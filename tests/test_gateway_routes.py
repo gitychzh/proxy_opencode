@@ -325,3 +325,100 @@ async def test_invalid_request_still_maps_to_400():
         )
     assert resp.status_code == 400
     assert resp.json()["error"]["type"] == "invalid_request_error"
+
+
+# 0.8.25: 48h of ECS logs (2026-11-05..06) showed 33 local 400s whose chat
+# record carried no error field, so ContextOverflow vs an empty-messages
+# fault could not be told apart. The 400 record must name the reason.
+
+
+@pytest.mark.asyncio
+async def test_invalid_request_400_log_carries_error_reason(caplog):
+    import logging
+
+    from proxy_opencode.errors import InvalidRequest
+
+    app, fake = make_app()
+
+    async def boom(payload):
+        raise InvalidRequest("messages must contain at least one usable turn")
+
+    fake.chat = boom  # type: ignore[method-assign]
+    with caplog.at_level(logging.INFO, logger="proxy_opencode.chat"):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={"model": "deepseek-ai/deepseek-v4.1-flash", "messages": []},
+                headers=GW_HEADERS,
+            )
+    assert resp.status_code == 400
+    records = [r for r in caplog.records if r.getMessage() == "chat completion"]
+    assert records, "the 400 chat completion record must exist"
+    assert records[-1].status == 400
+    assert records[-1].error == "messages must contain at least one usable turn"
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_400_log_names_context_length_exceeded(caplog):
+    import logging
+
+    from proxy_opencode.errors import ContextOverflow
+
+    app, fake = make_app()
+
+    async def boom(payload):
+        raise ContextOverflow(
+            model="opencode/big-pickle",
+            estimated_tokens=240000,
+            input_limit=131072,
+            context_limit=131072,
+            compaction_ceiling=98304,
+        )
+
+    fake.chat = boom  # type: ignore[method-assign]
+    with caplog.at_level(logging.INFO, logger="proxy_opencode.chat"):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "deepseek-ai/deepseek-v4.1-flash",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                headers=GW_HEADERS,
+            )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "context_length_exceeded"
+    records = [r for r in caplog.records if r.getMessage() == "chat completion"]
+    assert records, "the 400 chat completion record must exist"
+    assert records[-1].status == 400
+    assert records[-1].error.startswith("context_length_exceeded: ")
+
+
+@pytest.mark.asyncio
+async def test_normal_chat_log_has_no_error_key(caplog):
+    """The error field is opt-in: non-InvalidRequest call sites keep the
+    exact record shape they always had (no "error" key), so log consumers
+    never see the field flip on and off between records."""
+    import logging
+
+    app, _ = make_app()
+    with caplog.at_level(logging.INFO, logger="proxy_opencode.chat"):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "deepseek-ai/deepseek-v4.1-flash",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                headers=GW_HEADERS,
+            )
+    assert resp.status_code == 200
+    records = [r for r in caplog.records if r.getMessage() == "chat completion"]
+    assert records, "the 200 chat completion record must exist"
+    assert all("error" not in r.__dict__ for r in records)

@@ -120,21 +120,29 @@ class ChatCall:
     def upstream_model(self) -> str:
         return str(self.payload.get("model") or "")
 
-    def log(self, logger: logging.Logger, status: int, usage: Any = None) -> None:
-        logger.info(
-            self.log_message,
-            extra={
-                "request_id": self.request_id,
-                "model": self.upstream_model,
-                "client": self.client,
-                "stream": self.stream,
-                "has_tools": bool(self.payload.get("tools")),
-                "status": status,
-                "latency_ms": round((time.perf_counter() - self.started) * 1000, 1),
-                "usage": usage,
-                **self.extra_log_fields,
-            },
-        )
+    def log(
+        self,
+        logger: logging.Logger,
+        status: int,
+        usage: Any = None,
+        error: str | None = None,
+    ) -> None:
+        extra: dict[str, Any] = {
+            "request_id": self.request_id,
+            "model": self.upstream_model,
+            "client": self.client,
+            "stream": self.stream,
+            "has_tools": bool(self.payload.get("tools")),
+            "status": status,
+            "latency_ms": round((time.perf_counter() - self.started) * 1000, 1),
+            "usage": usage,
+            **self.extra_log_fields,
+        }
+        # 0.8.25: optional failure reason. Added only when set, so every other
+        # call site keeps the exact record shape it always had.
+        if error is not None:
+            extra["error"] = error
+        logger.info(self.log_message, extra=extra)
 
 
 def new_call(
@@ -235,11 +243,17 @@ async def dispatch(
         # overflow is a request fault too, but it carries its own code so
         # clients (opencode: reason "overflow") can start a compaction instead
         # of retrying the same oversized prompt.
-        call.log(logger, 400, None)
+        # 0.8.25: the 400 record names the reason — 48h of ECS logs (2026-11-05
+        # ..06) showed 33 local 400s with no error field, so ContextOverflow
+        # vs an empty-messages fault could not be told apart.
         if isinstance(exc, ContextOverflow):
+            call.log(
+                logger, 400, None, error=f"context_length_exceeded: {str(exc)[:200]}"
+            )
             return on_error(
                 400, str(exc), "invalid_request_error", "context_length_exceeded"
             )
+        call.log(logger, 400, None, error=str(exc)[:200])
         return on_error(400, str(exc), "invalid_request_error", None)
     except ValueError as exc:
         # A bare ValueError from deep inside an adapter is an accident in the
