@@ -67,7 +67,12 @@ def _dsh_model_entry(mid: str) -> str:
         output = prof.limits.output
         efforts = tuple(prof.capabilities.efforts)
         attachment = bool(prof.capabilities.attachment)
-        modalities = ["text", "image", "video", "audio"] if attachment else ["text"]
+        modalities = ["text", "image"] if attachment else ["text"]
+    # DSH's headless pi-ai schema accepts only "text"/"image" entries; a
+    # single "video"/"audio" item (catalog-faithful for mimo/glm/minimax)
+    # poisons the WHOLE provider registration (measured 2026-11-14: one bad
+    # modality -> NO_ADAPTER for every case). The catalogue's richer
+    # modality list is intentionally not forwarded.
     lines = [
         f'          - id: "{mid}"',
         f"            name: {mid}",
@@ -98,17 +103,22 @@ def _patch(
     ids: list[str],
     model: str,
     *,
-    reasoning_effort: str = "high",
+    reasoning_effort: str | None = "high",
 ) -> str:
     entries = "\n".join(_dsh_model_entry(mid) for mid in ids)
+    effort_line = (
+        f"    reasoningEffort: {reasoning_effort}\n"
+        if reasoning_effort is not None
+        else ""
+    )
     return (
         "- id: agent-default-model\n"
         '  name: "@deepseek-ai/dsh-agent-default-model"\n'
         "  config:\n"
         "    provider: cus_oc\n"
         f'    model: "{model}"\n'
-        f"    reasoningEffort: {reasoning_effort}\n"
-        "- id: llm-pi-ai\n"
+        + effort_line
+        + "- id: llm-pi-ai\n"
         '  name: "@deepseek-ai/dsh-llm-pi-ai"\n'
         "  config:\n"
         "    providers:\n"

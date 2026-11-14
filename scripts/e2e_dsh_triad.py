@@ -60,6 +60,25 @@ def _utc() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def _suite_effort(mid: str, wanted: str) -> str | None:
+    """The effort to request for one case, or None when the model has none.
+
+    Models with no declared effort ladder (big-pickle et al.) reason at their
+    built-in strength; asking for a level makes DSH refuse the case outright
+    (UNSUPPORTED_REASONING_EFFORT) now that capability metadata is real.
+    """
+
+    from proxy_opencode.model_profile import profile as _profile
+
+    prof = _profile(mid)
+    if prof is None:
+        return wanted
+    efforts = tuple(prof.capabilities.efforts)
+    if not efforts:
+        return None
+    return wanted if wanted in efforts else efforts[-1]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -140,12 +159,13 @@ def main() -> int:
                 workdir = Path(tmp) / case_id
                 workdir.mkdir(parents=True, exist_ok=True)
                 patch = workdir / "patch.yml"
+                effort = _suite_effort(mid, str(spec["effort"]))
                 patch.write_text(
                     _patch(
                         args.base_url,
                         ids,
                         mid,
-                        reasoning_effort=spec["effort"],
+                        reasoning_effort=effort,
                     ),
                     encoding="utf-8",
                 )
@@ -155,7 +175,7 @@ def main() -> int:
                     "case_id": case_id,
                     "model": mid,
                     "suite": suite,
-                    "reasoning_effort": spec["effort"],
+                    "reasoning_effort": effort,
                     "started_utc": started,
                     "ended_utc": started,
                     "latency_s": 0.0,
