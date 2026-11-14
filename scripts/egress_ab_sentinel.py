@@ -25,8 +25,10 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +36,30 @@ from pathlib import Path
 ECS = "root@115.29.231.25"
 ECS_ENV = "/opt/zen-gw/src/deploy/ecs/.env"
 ECS_LEDGER = "/opt/zen-gw/src/deploy/ecs/data/egress_events.jsonl"
+
+
+def _resolve_opencode() -> str:
+    """Full path to a CreateProcess-able opencode binary.
+
+    On Windows the npm wrapper ``opencode`` is a POSIX sh script that
+    ``subprocess`` cannot spawn (WinError 2); the real PE lives one level
+    deeper.  POSIX systems keep using whatever ``opencode`` resolves to.
+    """
+
+    candidates = sorted(
+        Path.home().glob(
+            ".workbuddy/binaries/node/versions/*/node_modules/"
+            "opencode-ai/bin/opencode.exe"
+        ),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if candidates:
+        return str(candidates[0])
+    found = __import__("shutil").which("opencode")
+    if found:
+        return found
+    return "opencode"
 
 
 def _utc() -> str:
@@ -57,11 +83,19 @@ def _redact(text: str, *secrets: str) -> str:
 
 
 def _read_env() -> tuple[str, str, dict[str, str]]:
-    """Gateway key, egress secret, bucket-name -> proxy URL (no printing)."""
+    """Gateway key, egress secret, bucket-name -> proxy URL (no printing).
 
-    raw = _ssh(f"grep -E '^(GATEWAY_API_KEYS|ZEN_EGRESS_SECRET|ZEN_EGRESS_PROXIES)=' {ECS_ENV}")
+    ``ZEN_EGRESS_PROXIES`` URLs carry NO credentials (bare scheme://host:port;
+    live 2026-11-14: an unauthenticated CLI CONNECT gets 407 from the agent).
+    The agent-side credential is the authoritative ``ZEN_EGRESS_SECRET``, so
+    the URL is rebuilt as scheme://secret:secret@host:port.
+    """
+
+    raw = _ssh(
+        f"grep -E '^(GATEWAY_API_KEYS|ZEN_EGRESS_SECRET|ZEN_EGRESS_PROXIES)=' {ECS_ENV}"
+    )
     key = secret = ""
-    proxies: dict[str, str] = {}
+    bare: dict[str, str] = {}
     for line in raw.splitlines():
         name, _, value = line.strip().partition("=")
         if name == "GATEWAY_API_KEYS":
@@ -72,12 +106,19 @@ def _read_env() -> tuple[str, str, dict[str, str]]:
             for part in value.split(","):
                 bucket, _, url = part.partition("=")
                 if bucket and url:
-                    proxies[bucket.strip()] = url.strip()
-    if not key or not secret or not proxies:
+                    bare[bucket.strip()] = url.strip()
+    if not key or not secret or not bare:
         raise SystemExit(
             "could not read GATEWAY_API_KEYS / ZEN_EGRESS_SECRET /"
             " ZEN_EGRESS_PROXIES from ECS"
         )
+    proxies: dict[str, str] = {}
+    for bucket, url in bare.items():
+        parts = urllib.parse.urlsplit(url)
+        hostport = parts.hostname or ""
+        if parts.port:
+            hostport += f":{parts.port}"
+        proxies[bucket] = f"http://{secret}:{secret}@{hostport}"
     return key, secret, proxies
 
 
@@ -133,18 +174,20 @@ def _ledger_rows(window_start: str, window_end: str) -> list[dict[str, str]]:
     return rows
 
 
-def _cli_golden(proxy_url: str, timeout: float) -> tuple[str, str]:
+def _cli_golden(binary: str, proxy_url: str, timeout: float) -> tuple[str, str]:
     """opencode CLI through one bucket agent; returns (verdict, output_tail)."""
 
     env = {**os.environ, "HTTPS_PROXY": proxy_url}
     try:
         proc = subprocess.run(
-            ["opencode", "run", "reply with the single word OK",
+            [binary, "run", "reply with the single word OK",
              "--model", "opencode/big-pickle"],
             env=env, capture_output=True, text=True, timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired:
         return "timeout", ""
+    except OSError as exc:  # spawn failure must never kill the sentinel
+        return "spawn-error", f"{type(exc).__name__}: {exc}"
     out = ((proc.stdout or "") + (proc.stderr or "")).strip()
     if proc.returncode == 0 and "OK" in out:
         return "ok", out[-200:]
@@ -185,68 +228,94 @@ def main(argv: list[str] | None = None) -> int:
     key = os.environ.get(args.key_env, "").strip() or _read_env()[0]
     _, secret, proxies = _read_env()
     secrets = (key, secret)
+    cli_bin = _resolve_opencode()
     out_path = Path(args.out)
-    print(f"sentinel -> {out_path} buckets={sorted(proxies)}", flush=True)
+    print(
+        f"sentinel -> {out_path} buckets={sorted(proxies)} cli={cli_bin}",
+        flush=True,
+    )
 
     loop = 0
     while True:
         loop += 1
         started = _utc()
-        status, latency = _gateway_probe(args.base_url, key, args.model, 150.0)
-        ended = _utc()
-        rows = _ledger_rows(started, ended)
-        fours = [r for r in rows if str(r.get("kind")) == "http_429"]
-        record: dict[str, object] = {
-            "ts": started,
-            "loop": loop,
-            "gateway_status": status,
-            "latency_s": round(latency, 2),
-            "ledger": [
-                {k: r.get(k) for k in ("ts", "egress", "kind", "ok", "egress_ip")}
-                for r in rows
-            ],
-        }
-        if not fours:
-            record["verdict"] = "primary-ok" if status == 200 else f"http-{status}"
-            print(
-                f"[{loop}] {started} gw={status} {record['verdict']}",
-                flush=True,
+        record: dict[str, object] = {"ts": started, "loop": loop}
+        try:
+            status, latency = _gateway_probe(
+                args.base_url, key, args.model, 150.0
             )
-        else:
-            buckets = sorted({str(r.get("egress")) for r in fours})
-            record["verdict"] = "429-wave"
-            record["wave_buckets"] = buckets
-            print(f"[{loop}] {started} gw={status} 429-WAVE on {buckets}", flush=True)
-            for bucket in buckets:
-                proxy = proxies.get(bucket, "")
-                if not proxy:
-                    record[f"cli_{bucket}"] = "no-proxy-url"
-                    continue
-                cli_verdict, cli_tail = _cli_golden(proxy, args.cli_timeout)
-                cli_tail = _redact(cli_tail, *secrets)
-                record[f"cli_{bucket}"] = cli_verdict
-                record[f"cli_{bucket}_tail"] = cli_tail
-                same_ip = next(
-                    (r.get("egress_ip") for r in fours
-                     if str(r.get("egress")) == bucket),
-                    "",
+            ended = _utc()
+            rows = _ledger_rows(started, ended)
+            fours = [r for r in rows if str(r.get("kind")) == "http_429"]
+            record.update(
+                {
+                    "gateway_status": status,
+                    "latency_s": round(latency, 2),
+                    "ledger": [
+                        {
+                            k: r.get(k)
+                            for k in ("ts", "egress", "kind", "ok", "egress_ip")
+                        }
+                        for r in rows
+                    ],
+                }
+            )
+            if not fours:
+                record["verdict"] = (
+                    "primary-ok" if status == 200 else f"http-{status}"
                 )
-                ab = (
-                    "GATEWAY-BUG (cli ok on same ip)"
-                    if cli_verdict == "ok"
-                    else "upstream-throttle-confirmed"
-                    if cli_verdict == "429"
-                    else f"cli-{cli_verdict}"
-                )
-                record[f"ab_{bucket}"] = ab
                 print(
-                    f"    {bucket} ip={same_ip} cli={cli_verdict} -> {ab}",
+                    f"[{loop}] {started} gw={status} {record['verdict']}",
                     flush=True,
                 )
-                if cli_verdict == "429" and args.auto_rotate:
-                    rot = _redact(_admin_rotate(bucket), *secrets)
-                    record[f"rotate_{bucket}"] = rot
-                    print(f"    {bucket} rotate -> {rot}", flush=True)
+            else:
+                buckets = sorted({str(r.get("egress")) for r in fours})
+                record["verdict"] = "429-wave"
+                record["wave_buckets"] = buckets
+                print(
+                    f"[{loop}] {started} gw={status} 429-WAVE on {buckets}",
+                    flush=True,
+                )
+                for bucket in buckets:
+                    proxy = proxies.get(bucket, "")
+                    if not proxy:
+                        record[f"cli_{bucket}"] = "no-proxy-url"
+                        continue
+                    cli_verdict, cli_tail = _cli_golden(
+                        cli_bin, proxy, args.cli_timeout
+                    )
+                    cli_tail = _redact(cli_tail, *secrets)
+                    record[f"cli_{bucket}"] = cli_verdict
+                    record[f"cli_{bucket}_tail"] = cli_tail
+                    same_ip = next(
+                        (r.get("egress_ip") for r in fours
+                         if str(r.get("egress")) == bucket),
+                        "",
+                    )
+                    ab = (
+                        "GATEWAY-BUG (cli ok on same ip)"
+                        if cli_verdict == "ok"
+                        else "upstream-throttle-confirmed"
+                        if cli_verdict == "429"
+                        else f"cli-{cli_verdict}"
+                    )
+                    record[f"ab_{bucket}"] = ab
+                    print(
+                        f"    {bucket} ip={same_ip} cli={cli_verdict} -> {ab}",
+                        flush=True,
+                    )
+                    if cli_verdict == "429" and args.auto_rotate:
+                        rot = _redact(_admin_rotate(bucket), *secrets)
+                        record[f"rotate_{bucket}"] = rot
+                        print(f"    {bucket} rotate -> {rot}", flush=True)
+        except Exception as exc:  # noqa: BLE001 - the sentinel must survive
+            record["verdict"] = "loop-error"
+            record["error"] = f"{type(exc).__name__}: {exc}"
+            print(
+                f"[{loop}] {started} LOOP-ERROR {record['error']}",
+                file=sys.stderr,
+                flush=True,
+            )
 
         with out_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
