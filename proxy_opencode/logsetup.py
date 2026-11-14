@@ -74,6 +74,9 @@ FIELDS = (
     "fallback",
     "fallback_model",
     "fallback_reason",
+    # Explicit primary/fallback route on every chat completion record: an
+    # absent "fallback" field used to be the only (implicit) proof of primary.
+    "route",
     # Client-write stall watchdog (relay_stream) and the failover prefetch
     # debug line.
     "blocked_s",

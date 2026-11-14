@@ -26,6 +26,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from ..config import Settings
+from ..egress.eventlog import EVENTS
 from ..errors import ContextOverflow, GatewayHttpError, InvalidRequest, openai_error
 from ..registry import ModelRegistry, UnknownModelError
 from ..upstreams.fields import filter_payload
@@ -136,6 +137,11 @@ class ChatCall:
             "status": status,
             "latency_ms": round((time.perf_counter() - self.started) * 1000, 1),
             "usage": usage,
+            # Explicit provenance: an absent fallback field used to be the
+            # only (implicit) evidence that the primary chain served a turn.
+            "route": (
+                "fallback" if self.extra_log_fields.get("fallback") else "primary"
+            ),
             **self.extra_log_fields,
         }
         # 0.8.25: optional failure reason. Added only when set, so every other
@@ -169,7 +175,7 @@ def new_call(
     payload["model"] = upstream
     public_model = registry.public_id(requested)
     payload = filter_payload(payload, settings.reasoning_passthrough)
-    return ChatCall(
+    call = ChatCall(
         payload=payload,
         public_model=public_model,
         stream=bool(payload.get("stream")),
@@ -178,6 +184,11 @@ def new_call(
         started=time.perf_counter(),
         log_message=log_message,
     )
+    # Every egress ledger event emitted while this turn is in flight inherits
+    # these two fields, so a pressure-test case can be joined to the exact
+    # bucket/IP/kind without guessing by timestamp.
+    EVENTS.bind(request_id=call.request_id, model=call.upstream_model)
+    return call
 
 
 def _model_error_response(requested: str, error_style: str) -> JSONResponse:

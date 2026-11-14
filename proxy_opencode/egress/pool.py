@@ -369,10 +369,19 @@ class EgressPool:
         # refill; when the cordon expires the bucket returns to `ready` and
         # the first real request re-probes it at CLI-like rate. There is no
         # "exhausted quota" to wait out — only sustained self-inflicted 429s.
+        # A last-resort leg that the probe has already declared dead is never
+        # worth a 60s TTFB stall: when the three normal buckets are cordoned,
+        # handing such a lease out made every request wait for a dead CONNECT
+        # before the backup chain could answer (measured 20/20 timeouts on
+        # esp32-bucket, 2026-11-14). Excluding it here makes acquire raise
+        # PoolExhausted so the fallback answers immediately, with zero
+        # upstream attempts. Healthy last-resort legs still serve tier 3.
         dead_legs = [
             s
             for s in self._states
-            if not s.healthy and not s.cordoned(now)
+            if not s.healthy
+            and not s.cordoned(now)
+            and s.spec.name not in self._last_resort
         ]
         tiers = [
             ready,

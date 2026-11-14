@@ -5,6 +5,42 @@
 
 ## [Unreleased]
 
+### Fixed — 三件套压测暴露的出口池 / 可观测性缺陷（0.8.28，2026-11-14）
+
+压测：本机 DSH `cus_oc` 供应商，12 个免费裸 ID × 三件套（基础聊天 / 工具调用 /
+推理）= 36 case，10m49s，客户端 36/36 PASS。三源证据（网关日志 /
+`egress_events.jsonl` / `admin/egresses`）JOIN 后证明**其中 35 case 的 200 来自
+备用链 proxy_ms**：主链只成功 9 次，87 次上游尝试打在 probe-dead 的 esp32 死腿上，
+另有 20 次 `HTTP 403`。完整索引与原始证据见本机
+`E:/ps/dsh_repair_self/model_test/triad_full_20261114/FINDINGS.md`。
+
+- **验收假阳性**：旧 E2E 只校验退出码 + 非空输出，把 fallback 的 200 也算 PASS。
+  新增 `scripts/e2e_dsh_triad.py`（逐 case JSONL + 精确 UTC 窗口）与
+  `scripts/collect_triad_evidence.py`（三源 JOIN，显式
+  `route=primary|fallback|mixed|unmatched`）。
+- **B1 死腿白等**：`EgressPool.acquire()` 的 tier5 `dead_legs` 仍包含
+  `healthy=false` 的 last-resort 桶；三桶全 cordon 时被选中 87 次，每次
+  `503 ESP32 Offline` / TTFB 超时后才交备用链。改为从 dead_legs 剔除
+  last-resort，无候选直接 `PoolExhausted`（零上游撞击、秒回）；healthy 的
+  last-resort 仍按 tier3 服务。
+- **B2 会话指纹漏 model**：`_session_fingerprint()` 只哈希 `messages[:2]` 前 256
+  字符，同 prompt 的 12 个模型全绑一个出口 IP，三桶分摊失效（实测 counters 仅
+  `owin10-mobile` 有 17233 token）。把 `payload["model"]` 并入哈希。
+- **B3 账本无法关联请求**：`EventLog` 新增 ContextVar 请求上下文，`emit()` 自动
+  携带 `request_id` + `model`，并发隔离；`new_call()` 绑定二者。
+- **B4 日志无显式路由**：`chat completion` 记录新增 `route=primary|fallback`
+  （`logsetup.FIELDS` 同步放行），不再靠 `fallback` 字段有无隐式推断。
+
+**未改动 / 待详细分析**：请求级 4xx 仍会经 `ok=True` 计入 `counters.record()`
+（既有契约 `test_chat_400_is_not_an_egress_failure` 锁定，改动会翻案，已回退并留
+观察项）；`ZEN_ROTATE_ON_HARD_429=false` 使硬 429 不换 IP，本轮主链只成功 9 次、
+30 请求阈值未到，**换 IP 重置额度机制没有自然触发数据**；20 次 403 未命中
+`FreeTierError` 分类，响应体形状待脱敏采样。对照实验（同网关同出口）证明主链本身
+可用：旧别名与 `big-pickle` 各 1 发均 HTTP 200 / `billing_source="free"`。
+
+回归测试 `tests/test_egress_tracing.py`（10 例）。门禁：pytest 548 passed，
+ruff clean，mypy clean，egress-agent 67 passed(3 skipped) + ruff/mypy clean。
+
 ### Added — opencode 免费模型逐日快照透传（0.8.27，2026-11-14）
 
 户主要求：把 opencode 免费模型按真实 model id 原样透传给用户（客户端供应商

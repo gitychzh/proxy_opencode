@@ -29,6 +29,20 @@
 | `free_catalog_refreshed` | `count`, `ids` | 免费模型目录刷新 |
 | `fallback_engaged` / `fallback_recovered` / `fallback_failed` | `secondary`, `status`, `reason` | 备用链路状态变化 |
 
+**请求关联（0.8.28）**：`new_call()` 把 `request_id` + `model` 绑进 `EventLog` 的
+请求级 ContextVar，`emit()` 自动写进该请求期间产生的**每一个**事件（含
+`egress_request`），并发请求之间互不串扰；后台任务（探针、目录刷新）不带这两个字段。
+结构化聊天日志同时新增显式 `route=primary|fallback`，不再靠 `fallback` 字段有无
+隐式推断。压测 / 排障时可用 `request_id` 把「一次客户端请求」与「它试过的每个桶、
+IP、429/403/超时」精确 JOIN，不必按时间戳猜：
+
+```bash
+jq -c 'select(.request_id=="<id>")' data/egress_events.jsonl
+```
+
+注意：E2E 只校验客户端 200 会把备用链答案算成通过，务必配合
+`scripts/collect_triad_evidence.py` 的 `route` 判定一起看。
+
 快速查看：
 
 ```bash

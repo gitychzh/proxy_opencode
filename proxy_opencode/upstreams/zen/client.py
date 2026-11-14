@@ -547,6 +547,13 @@ class ZenDirectAdapter:
         ):
             await self._release(lease, ok=False, kind="free_tier_rejected")
         else:
+            # Request-level 4xx (incl. a 403 that is not a FreeTierError) is
+            # deliberately NOT an egress failure — see the
+            # *_is_not_an_egress_failure regressions. NOTE for the 2026-11-14
+            # triad analysis: this still reaches counters.record() as a
+            # completed request, so 20x HTTP 403 inflated the 30-request
+            # rotation threshold. Left as an observation, not changed here;
+            # changing it would flip a settled protocol contract.
             await self._release(lease, ok=True)
 
     async def _release(
@@ -741,6 +748,12 @@ def _session_fingerprint(payload: Mapping[str, Any]) -> str:
             head.append(str(content)[:256] if content is not None else "")
         else:
             head.append("")
+    # The model id is part of the session identity (0.8.28). Without it all
+    # requests sharing a prompt prefix — e.g. a 12-model E2E sweep — map to
+    # ONE affinity binding and hammer a single egress IP while the other
+    # buckets idle, burning that IP's allowance and defeating the 3-bucket
+    # spread that the rotation threshold assumes.
+    head.append(str(payload.get("model") or ""))
     return hashlib.sha1("\x00".join(head).encode("utf-8", "ignore")).hexdigest()[:16]
 
 

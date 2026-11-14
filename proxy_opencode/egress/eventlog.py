@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import threading
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
@@ -33,6 +34,18 @@ class EventLog:
         self._path = ""
         self._lock = threading.Lock()
         self._disabled = False
+        # Per-request correlation: every event emitted while a chat request
+        # is in flight inherits request_id + model, so the ledger can be
+        # joined to the gateway's chat log without guessing by timestamp.
+        # A ContextVar keeps concurrent requests isolated.
+        self._trace: ContextVar[dict[str, Any]] = ContextVar(
+            "zen_egress_trace", default={}
+        )
+
+    def bind(self, **fields: Any) -> None:
+        """Attach correlation fields to the current async request context."""
+
+        self._trace.set({**self._trace.get(), **fields})
 
     @property
     def path(self) -> str:
@@ -52,6 +65,7 @@ class EventLog:
         record: dict[str, Any] = {
             "ts": datetime.now(tz=timezone.utc).isoformat(timespec="milliseconds"),
             "event": event,
+            **self._trace.get(),
             **fields,
         }
         line = json.dumps(record, ensure_ascii=False, default=str) + "\n"

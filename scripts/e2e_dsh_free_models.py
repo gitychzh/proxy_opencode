@@ -48,7 +48,13 @@ def _models(base_url: str, key: str) -> list[str]:
     return [mid for mid in ids if "/" not in mid]
 
 
-def _patch(base_url: str, ids: list[str], model: str) -> str:
+def _patch(
+    base_url: str,
+    ids: list[str],
+    model: str,
+    *,
+    reasoning_effort: str = "high",
+) -> str:
     entries = "".join(
         f'          - id: "{mid}"\n'
         f"            name: {mid}\n"
@@ -73,7 +79,7 @@ def _patch(base_url: str, ids: list[str], model: str) -> str:
         "  config:\n"
         "    provider: cus_oc\n"
         f'    model: "{model}"\n'
-        "    reasoningEffort: high\n"
+        f"    reasoningEffort: {reasoning_effort}\n"
         "- id: llm-pi-ai\n"
         '  name: "@deepseek-ai/dsh-llm-pi-ai"\n'
         "  config:\n"
