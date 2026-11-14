@@ -299,3 +299,48 @@ async def test_models_endpoint_publishes_every_free_id(tmp_path):
     assert resp.status_code == 200
     assert ids[0] == ALIAS
     assert set(ids[1:]) == set(FREE_IDS)
+
+
+# ------------------------------------------------------------ CLI drift guard
+
+
+def test_client_version_drift_flags_mismatch(monkeypatch):
+    """npm latest != pin -> drift=True and a loud payload (protocol guard)."""
+
+
+    from scripts.sync_zen_free_models import check_client_version_drift
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"version": "1.20.0"}'
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda req, timeout: FakeResponse()
+    )
+    info = check_client_version_drift()
+    assert info["pinned"] == "1.19.5"
+    assert info["latest"] == "1.20.0"
+    assert info["drift"] is True
+
+
+def test_client_version_drift_survives_registry_failure(monkeypatch):
+    """A registry outage must not fail the sync (warning-only guard)."""
+
+    import urllib.error
+
+    from scripts.sync_zen_free_models import check_client_version_drift
+
+    def boom(req, timeout):
+        raise urllib.error.URLError("down")
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    info = check_client_version_drift()
+    assert info["drift"] is False
+    assert info["latest"] is None
+    assert info["error"] == "URLError"

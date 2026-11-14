@@ -5,6 +5,28 @@
 
 ## [Unreleased]
 
+### Added — 429 波归因哨兵 + CLI 版本漂移守卫（0.8.30，2026-11-14）
+
+背景：本机 DSH E2E 期间网关被 429 打满并降级备用链。旧判据「Retry-After 指向
+UTC0 = 真实配额」被活体账本推翻：**同一出口 IP 在 429 波后自愈**
+（telecom `49.70.120.167` 10:33 UTC 429 → 11:39 连续 8×200；cc9
+`116.147.31.182` 10:33 429 → 11:34 CLI 金标准 200），且三运营商 IP 同秒
+（10:33:18-20）一起 429——上游存在共享池维度的阵发节流，UTC0 形 Retry-After
+不足以判配额。AGENTS.md §1 已按此修正（判据只保留「同桶同窗 CLI 对照」）。
+
+- **`scripts/egress_ab_sentinel.py`**（新增）：常驻哨兵，每 3 分钟探一发；
+  检测到 429 即在同一桶经其 agent 跑 opencode CLI 金标准，双结果落 JSONL
+  （`GATEWAY-BUG` / `upstream-throttle-confirmed`）；`--auto-rotate` 在 CLI
+  确认 429 后调管理面换 IP（用户定策：换 IP 重置额度，不轻易判烧穿）。
+- **CLI 漂移守卫**（`scripts/sync_zen_free_models.py`）：每日同步追加
+  npm `opencode-ai` latest 与固定 pin（1.19.5）比对；漂移则 stderr 告警并入
+  `--json` 载荷。协议头因客户端更新而漂移是本项目的高频坑，现每日自动盯。
+- 实测记录：10:33 UTC 波次 3 桶 429（`deepseek-v4.1-flash-free`），40 分钟后
+  同 IP 三模型（deepseek/beam/big-pickle）全 200 primary；11:39 八连发全 200。
+
+回归测试：`tests/test_free_models.py` 新增漂移守卫 2 例（mismatch 报警 /
+registry 故障不阻断）；ruff clean。
+
 ### Added — 模型能力档案补齐 12 ID + 上下文/思考强度实测（0.8.29，2026-11-14）
 
 - **档案表 4 → 12**：`model_profile._PROFILES` 补齐当日免费目录全部 12 个 ID

@@ -34,6 +34,46 @@ from proxy_opencode.egress.free_models import (  # noqa: E402
 
 DEFAULT_STATE_FILE = "/opt/zen-gw/src/deploy/ecs/data/zen_free_models.json"
 DEFAULT_ENV_FILE = "/opt/zen-gw/src/deploy/ecs/.env"
+NPM_LATEST_URL = "https://registry.npmjs.org/opencode-ai/latest"
+
+
+def _pinned_client_version() -> str:
+    """The client version the gateway's protocol capture mirrors."""
+
+    from proxy_opencode.config import DEFAULT_ZEN_CLIENT_VERSION
+
+    return str(DEFAULT_ZEN_CLIENT_VERSION)
+
+
+def check_client_version_drift() -> dict[str, object]:
+    """Warn when npm ships a new stable opencode CLI (protocol-drift guard).
+
+    The gateway mirrors one pinned CLI version's wire protocol; a silent CLI
+    update has repeatedly broken the free tier in the past. The daily timer
+    therefore compares npm's latest stable against the pin and shouts into
+    the journal (plus the --json payload) on drift. Never fails the sync.
+    """
+
+    pinned = _pinned_client_version()
+    info: dict[str, object] = {"pinned": pinned}
+    try:
+        req = urllib.request.Request(
+            NPM_LATEST_URL,
+            headers={
+                "User-Agent": "curl/8.0",
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            latest = str(json.load(resp).get("version") or "")
+    except (OSError, ValueError, urllib.error.URLError) as exc:
+        info["latest"] = None
+        info["drift"] = False
+        info["error"] = f"{type(exc).__name__}"
+        return info
+    info["latest"] = latest
+    info["drift"] = bool(latest) and latest != pinned
+    return info
 
 
 def main() -> int:
@@ -87,6 +127,15 @@ def main() -> int:
         "env_written": result.env_written,
         "ids": result.ids,
     }
+    drift = check_client_version_drift()
+    payload["client_version"] = drift
+    if drift.get("drift"):
+        print(
+            "WARNING: opencode CLI drift - npm latest "
+            f"{drift.get('latest')} != pinned {drift.get('pinned')}; "
+            "re-capture the wire protocol before the free tier breaks",
+            file=sys.stderr,
+        )
     if args.json:
         print(json.dumps(payload, ensure_ascii=False))
     elif result.changed:
