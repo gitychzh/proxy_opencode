@@ -110,8 +110,32 @@ http://115.29.231.25:10002/v1/models_cus?key=<网关或管理员KEY>
 ```
 
 鉴权接受 `?key=` 或 Bearer。**不要**给该端点再造普通名字的别名（会被扫描 agent
-捕获）。裸 ID 仅排障可见：聊天接口一律 404，客户端用公开别名；标准 `/v1/models`
-永远只列公开别名（严格 OpenAI 形状）。
+捕获）。配置每日快照后，`/v1/models` 在旧别名之外列出全部免费裸 ID 且可直接
+请求（model id 原样透传）；未配置快照时裸 ID 仍一律 404、标准目录只列别名。
+
+## 每日免费模型同步（0.8.27）
+
+`ZEN_FREE_MODELS_FILE=/data/zen_free_models.json`，宿主对应
+`deploy/ecs/data/zen_free_models.json`（挂在 /data 卷里）。ECS 宿主 systemd
+timer 每天 22:00 Asia/Shanghai 跑一次 `scripts/sync_zen_free_models.py`：
+
+```bash
+# 首次安装
+cp deploy/ecs/zen-free-models-sync.{service,timer} /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now zen-free-models-sync.timer
+
+# 运维
+systemctl status zen-free-models-sync.timer
+systemctl start zen-free-models-sync.service          # 手动补跑
+journalctl -u zen-free-models-sync.service -n 20 --no-pager
+python3 /opt/zen-gw/src/scripts/sync_zen_free_models.py --dry-run --json
+```
+
+行为：匿名 `GET /models` → 免费集合（当前 12 个）→ 与快照做集合 diff。
+**有变化**才原子写快照并更新 `.env` 的 `OPENCODE_ZEN_MODELS`；**无变化零写入、
+零重启**。网关按 mtime 热加载快照，容器不用重建。上游返回空目录时脚本退出 2，
+不清空对外目录；`.env` 里其它键与注释一律不动。
 
 ## 入口
 

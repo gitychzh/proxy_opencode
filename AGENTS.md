@@ -64,9 +64,12 @@ opencode 1.19.4 客户端协议）；另保留 `opencode-serve`（驱动本机�
 - **模型门（401 `AuthError: Missing API key`）**：免费层只服务免费裸 ID
   （`-free` 后缀或 `big-pickle`）；付费裸 ID（如 `deepseek-v4.1-flash`）同
   headers/body 回 401，且 failover 链不会因 401 触发。匿名 GET
-  `https://opencode.ai/inference/v1/models`（`Bearer public`，不经网关）可列免费
-  目录（85 个 ID，GET 不烧额度）。别名改写用 `ZEN_MODEL_MAP`（精确命中优先于
-  provider 前缀剥离）。
+  `https://opencode.ai/inference/v1/models`（`Bearer public`，不经网关）可列
+  目录（2026-11-14 匿名实测 **86 条，其中免费 12 条** = 11 个 `-free` 后缀 +
+  `big-pickle`；GET 不烧额度）。**目录总数 ≠ 免费模型数**：匿名视图的 `cost`
+  是嵌套对象且付费条目也全 0，不能用来判免费，判据只有 `-free` 后缀 +
+  `big-pickle`（见 `egress/free_models.py:is_free_entry`）。别名改写用
+  `ZEN_MODEL_MAP`（精确命中优先于 provider 前缀剥离）。
 - **真实配额（429 `FreeUsageLimitError`）**：按**出口 IP / UTC 日**计量成功调用，
   UTC0 重置（额度小，数十发 200 量级即见烧穿；`Retry-After` 指向 UTC0）。传输
   失败、TLS EOF、超时、403 **不烧额度**，不得据此判断配额。

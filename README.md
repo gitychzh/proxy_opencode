@@ -44,9 +44,11 @@ curl -H "Authorization: Bearer dev-local-key" -H "Content-Type: application/json
 | `POST /v1/responses` | codex CLI（Responses API） | `Authorization: Bearer <key>` |
 | `POST /v1/messages` | claude code（Anthropic Messages） | `x-api-key: <key>` 或 Bearer |
 
-公开别名 `deepseek-ai/deepseek-v4.1-flash` 由 `PUBLIC_MODELS` 第三列决定上游
-（生产当前 `big-pickle`，`ZEN_MODEL_MAP` 可覆盖）。**仅公开别名可请求**，上游裸
-ID 一律 404；裸 ID 只通过隐藏端点 `GET /v1/models_cus?key=<key>` 展示（排障）。
+对外目录 = `PUBLIC_MODELS` 的别名（生产上游 `big-pickle`，`ZEN_MODEL_MAP` 可覆盖）
+加上当日 opencode 免费裸 ID。后者由 `ZEN_FREE_MODELS_FILE` 快照提供，model id
+**原样透传**上游、响应也原样回显；ECS 侧 systemd timer 每天 22:00 同步目录，
+只有集合变化才更新配置。未配置快照时退回旧行为：仅别名可请求，裸 ID 404。
+排障用隐藏端点 `GET /v1/models_cus?key=<key>` 查看被反代裸 ID。
 
 ## 开发与门禁
 

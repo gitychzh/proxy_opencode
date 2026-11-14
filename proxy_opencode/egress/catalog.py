@@ -31,38 +31,12 @@ import httpx
 
 from ..model_profile import profile as model_profile
 from .eventlog import EVENTS
+from .free_models import is_free_entry
 
 logger = logging.getLogger("proxy_opencode.egress.catalog")
 
-FREE_SUFFIX = "-free"
-# The original anonymous-tier workhorse carries no suffix at all.
-EXPLICIT_FREE_IDS = frozenset({"big-pickle"})
 _REFRESH_TTL_S = 600.0
 _REFRESH_ERROR_BACKOFF_S = 300.0
-
-
-def is_free_entry(entry: dict[str, Any]) -> bool:
-    """Decide whether one upstream catalogue entry is anonymous-usable."""
-
-    mid = entry.get("id")
-    if not isinstance(mid, str) or not mid:
-        return False
-    # Explicit markers win when upstream provides them (authed views may).
-    if entry.get("allowAnonymous") is True:
-        return True
-    cost = entry.get("cost")
-    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
-        return float(cost) == 0.0
-    pricing = entry.get("pricing")
-    if isinstance(pricing, dict) and pricing:
-        try:
-            return all(float(v) == 0.0 for v in pricing.values())
-        except (TypeError, ValueError):
-            return False
-    # Anonymous view: bare ids, no pricing fields — upstream's own naming
-    # convention is the marker (live 2026-10-16: cat-jam-free,
-    # space-bunny-free, deepseek-v4.1-flash-free, ...).
-    return mid.endswith(FREE_SUFFIX) or mid in EXPLICIT_FREE_IDS
 
 
 class ZenFreeCatalog:

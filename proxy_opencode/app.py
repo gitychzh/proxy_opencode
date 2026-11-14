@@ -24,6 +24,7 @@ from .auth.keystore import KeyStore
 from .config import Settings, load_settings
 from .egress.catalog import ZenFreeCatalog
 from .egress.eventlog import EVENTS
+from .egress.free_models import FreeModelsSnapshot
 from .egress.pool import EgressPool
 from .egress.rotate import EgressRotator
 from .errors import GatewayHttpError
@@ -80,17 +81,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.egress_rotator = egress_rotator
     app.state.adapter = build_adapter(settings, pool=egress_pool)
     app.state.keystore = KeyStore(settings.key_store_path, settings.key_default_ttl_hours)
-    app.state.registry = ModelRegistry(settings)
-    # P3: the hidden /v1/models_cus endpoint's data source. It lists only the
-    # relayed upstream models (OPENCODE_ZEN_MODELS, default big-pickle) — the
-    # gateway fronts nothing else, and /v1/models keeps serving the masked
-    # alias while chat rejects raw upstream ids outright.
+    free_snapshot = (
+        FreeModelsSnapshot(settings.zen_free_models_file)
+        if settings.zen_free_models_file
+        else None
+    )
+    app.state.free_models_snapshot = free_snapshot
+    app.state.registry = ModelRegistry(settings, free_snapshot)
+    # P3: the hidden /v1/models_cus endpoint's data source. With a daily
+    # free-model snapshot configured, the relay allowlist is lifted so the
+    # hidden endpoint tracks the same live free catalogue as /v1/models.
     free_catalog: ZenFreeCatalog | None = None
     if settings.upstream_mode == "zen-direct":
         free_catalog = ZenFreeCatalog(
             settings.zen_base_url,
             api_key=settings.zen_api_key,
-            relay_ids=settings.zen_models,
+            relay_ids=None if free_snapshot is not None else settings.zen_models,
         )
     app.state.free_catalog = free_catalog
 

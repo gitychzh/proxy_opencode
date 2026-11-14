@@ -1,0 +1,17 @@
+[Unit]
+Description=Sync opencode Zen free-model catalogue into the gateway snapshot
+Documentation=https://github.com/gitychzh/proxy_opencode/blob/main/docs/ARCHITECTURE.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/zen-gw/src
+# Standard-library only: this runs on the host, outside the container image.
+# It writes the snapshot to deploy/ecs/data (= /data inside the container) and
+# updates OPENCODE_ZEN_MODELS in .env, both atomically and only on a real diff.
+ExecStart=/usr/bin/python3 /opt/zen-gw/src/scripts/sync_zen_free_models.py --json
+User=root
+Nice=10
+# A bad upstream response must never wipe the published catalogue; the script
+# refuses empty results and exits 2, and the timer retries at the next window.

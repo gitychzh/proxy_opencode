@@ -5,6 +5,37 @@
 
 ## [Unreleased]
 
+### Added — opencode 免费模型逐日快照透传（0.8.27，2026-11-14）
+
+户主要求：把 opencode 免费模型按真实 model id 原样透传给用户（客户端供应商
+`cus_oc`），并在 ECS 每天 22:00 自动同步——目录有变化才改出口配置，没变化一个
+字节都不写。
+
+- **上游事实复核**（2026-11-14 匿名实拉 `GET https://opencode.ai/zen/v1/models`，
+  `Bearer public`）：目录共 **86** 条，其中免费 **12** 条 = 11 个 `-free` 后缀 +
+  `big-pickle`。旧文档把「目录 85 条」误记成免费模型数，已一并修正（`AGENTS.md`
+  硬约束 1）。匿名视图的 `cost` 是嵌套对象且付费条目也全 0，**不可**作免费
+  判据；`-free` 后缀 + `big-pickle` 才是稳定判据。
+- 新增 `egress/free_models.py`（纯标准库，供宿主脚本与容器共用）：
+  `is_free_entry` 成为单一事实源（`egress/catalog.py` 改为 import）、
+  `fetch_free_ids`、按 mtime 热加载的 `FreeModelsSnapshot`、原子写快照
+  （保留已有文件权限，避免 .env 被放宽 / 新快照 0600 容器读不到）、幂等
+  `update_env_key`、以及「只在集合变化时才写」的 `sync_free_models`。
+- 网关：配置 `ZEN_FREE_MODELS_FILE` 后，`/v1/models` 在旧别名之外追加全部免费
+  裸 ID，`registry.resolve()` 对它们原样透传上游、`public_id()` 原样回显（两个
+  模型不串味）；未配置时行为与 0.8.26 完全一致。快照改写按 mtime 热加载，
+  **不需要重启容器**。旧别名 `deepseek-ai/deepseek-v4.1-flash` 保留不动。
+- 新增 `scripts/sync_zen_free_models.py` 与
+  `deploy/ecs/zen-free-models-sync.{service,timer}`：每天 22:00 Asia/Shanghai
+  跑一次（`Persistent=true` 补跑）；变化时才原子更新 `/data` 卷快照与 `.env` 的
+  `OPENCODE_ZEN_MODELS`，无变化零写入零重启。空目录响应直接退出 2，避免误清空
+  对外目录。
+
+回归测试：`tests/test_free_models.py`（17 例）覆盖拉取判定、快照热加载/损坏、
+`.env` 幂等改写与 CRLF、unchanged 零写入、dry-run、registry 透传/回显、
+`new_call` 双腿一致、`/v1/models` 集成。门禁：pytest 537 passed，ruff clean，
+mypy clean，egress-agent 同套全绿。
+
 ### Fixed — 出口 IP 横跳折叠 + 过期 cordon 不再误发 cordon_lifted（0.8.26，2026-11-06）
 
 生产依据（ECS 账本 `egress_events.jsonl`，zen-gw 0.8.25）：win107 桶出口 IP 在 `111.55.74.15` ↔ `111.55.74.254` 间每 30~60 秒横跳一次（移动 CGNAT），2026-11-05/06 两天账本各 62/191 条 `egress_ip_observed`、同频 INFO 日志，全被同一对 IP 的反复横跳淹没（其余桶 0-1 条）；另有 QA 在 0.8.25 验证时的 backlog 观察项——cordon 自然到期后若 probe 恰好检出 IP 变化，仍会 emit 带旧 reason 的 `cordon_lifted`（没有 live cordon 可 lift，事件语义错误）。两者均为观测层噪音，运行时判定语义零改动。

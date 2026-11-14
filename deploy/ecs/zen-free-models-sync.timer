@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily opencode Zen free-model sync at 22:00 Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* 22:00:00
+Persistent=true
+AccuracySec=1min
+Unit=zen-free-models-sync.service
+
+[Install]
+WantedBy=timers.target

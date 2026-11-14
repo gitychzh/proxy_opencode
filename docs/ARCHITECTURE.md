@@ -86,20 +86,27 @@ cordon、换 IP、failover 语义与传输无关。
 
 ## 5. 公开模型目录
 
-- 对外唯一别名 `deepseek-ai/deepseek-v4.1-flash`，`/v1/models` 返回严格 OpenAI
-  形状（`id/object/created/owned_by`）。**只有 `PUBLIC_MODELS` 里的 id 可请求**，
-  上游裸 ID 一律 404（`registry.resolve` 不接受上游拼写）。
-- 别名 → 上游免费裸 ID 的改写由 `PUBLIC_MODELS` 第三列决定，`ZEN_MODEL_MAP`
-  （`from=to` csv，精确命中优先于 provider 前缀剥离）可覆盖。生产当前上游为
-  `big-pickle`；免费层只服务免费 ID（`-free` 后缀或 `big-pickle`），付费裸 ID
-  回 401（模型门，见 AGENTS）。
-- `OPENCODE_ZEN_MODELS` 是唯一反代白名单。`egress/catalog.py` 每 10 分钟拉
-  `GET https://opencode.ai/zen/v1/models`，按 `allowAnonymous`/`cost`/`pricing`
-  （缺标记时按 `-free` 后缀）判免费，再与白名单求交集——不枚举全部免费模型，
-  不裸 ID 透传。
-- `/v1/models_cus?key=`（隐藏端点）是唯一展示被反代裸 ID 的地方：默认纯文本
-  一行一个 ID，`?format=json` 才给 OpenAI 形状。标准 `/v1/models` 只列别名，
-  **不要**再造 models/model 之类普通变体端点（会被扫描 agent 捕获）。
+- 对外目录 = **旧别名 + 当日免费裸 ID**。别名
+  `deepseek-ai/deepseek-v4.1-flash` 永久保留（其他 agent 正在调用），
+  `/v1/models` 仍是严格 OpenAI 形状（`id/object/created/owned_by`）。
+- `ZEN_FREE_MODELS_FILE`（生产 `/data/zen_free_models.json`）指向 ECS 宿主同步
+  脚本写出的每日快照。配置后，快照里的每个免费裸 ID 都成为可请求 id：
+  `registry.resolve()` 原样透传上游、`public_id()` 原样回显（两个模型不串味）；
+  未配置时退回 0.8.26 行为（只有别名，裸 ID 404）。快照按 mtime 热加载，
+  改写**不需要重启容器**。
+- 别名 → 上游免费裸 ID 由 `PUBLIC_MODELS` 第三列决定（生产 `big-pickle`），
+  `ZEN_MODEL_MAP` 可覆盖。付费裸 ID 回 401（模型门，见 AGENTS）。
+- 免费判据与同步：`egress/free_models.py` 的 `is_free_entry`（`-free` 后缀 +
+  `big-pickle`；显式 `allowAnonymous` / 数值 0 `cost` 优先）是单一事实源。
+  `scripts/sync_zen_free_models.py` 每天 22:00 Asia/Shanghai 匿名拉
+  `GET https://opencode.ai/zen/v1/models`，与快照做集合 diff：**有变化**才原子
+  写快照并更新 `.env` 的 `OPENCODE_ZEN_MODELS`，**无变化零写入零重启**。
+  空目录响应会被拒绝，避免误清空对外目录。`egress/catalog.py` 每 10 分钟
+  刷新，仅服务隐藏端点 `/v1/models_cus`。
+- `/v1/models_cus?key=`（隐藏端点）仍是唯一展示被反代裸 ID 的地方：默认纯文本
+  一行一个 ID，`?format=json` 才给 OpenAI 形状。配置每日快照后其 relay 白名单
+  放开，与 `/v1/models` 同源。**不要**再造 models/model 之类普通变体端点
+  （会被扫描 agent 捕获）。
 
 ## 6. 出口池语义
 

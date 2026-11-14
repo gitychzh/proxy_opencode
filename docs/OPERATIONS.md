@@ -39,8 +39,12 @@
 > 走域名需 ICP 备案，用户决定至少一年不用域名入口。见 ARCHITECTURE §10。
 > Zone 内与网关无关的记录（根域 / `www` / `job` / `jsj` / `phone`）保留未动。
 
-对外只暴露一个掩码别名 `deepseek-ai/deepseek-v4.1-flash`（`PUBLIC_MODELS` 第三
-列决定上游，当前 `big-pickle`）。旧栈（`9443` + `zen-lb` + 各设备完整网关）已于
+对外目录 = 旧别名 `deepseek-ai/deepseek-v4.1-flash`（`PUBLIC_MODELS` 第三列决定
+上游，当前 `big-pickle`）+ 当日 12 个 opencode 免费裸 ID（`ZEN_FREE_MODELS_FILE`
+快照，model id 原样透传、响应原样回显）。快照由 ECS 宿主 systemd timer 每天
+22:00 Asia/Shanghai 同步，只有集合变化才原子写快照并改 `.env` 的
+`OPENCODE_ZEN_MODELS`；网关按 mtime 热加载，不需要重启容器。
+旧栈（`9443` + `zen-lb` + 各设备完整网关）已于
 2026-10-17 从 ECS 清退；设备侧 `:8791`/`:8793` 旧网关已于 **2026-10-29 删除**
 （计划任务、部署树、日志、payload_dump 全清，见 CHANGELOG `Unreleased`）。
 

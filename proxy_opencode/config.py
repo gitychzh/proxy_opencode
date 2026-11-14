@@ -182,6 +182,10 @@ class Settings:
     # Clients address models by public alias (PUBLIC_MODELS), never by these
     # raw ids.
     zen_models: list[str] = field(default_factory=lambda: list(DEFAULT_ZEN_MODELS))
+    # Daily snapshot written by scripts/sync_zen_free_models.py. Empty keeps
+    # the legacy single-alias behaviour; when set, its free bare ids are
+    # published verbatim and hot-reloaded by mtime (no container restart).
+    zen_free_models_file: str = ""
     # Requested model id -> upstream bare id rewrite (round 5, 2026-10-25):
     # the anonymous free tier only serves the ``-free`` suffixed ids; a paid
     # bare id (e.g. deepseek-v4.1-flash) answers 401 AuthError "Missing API
@@ -724,6 +728,7 @@ def load_settings() -> Settings:
             os.environ.get("OPENCODE_ZEN_MODELS", ",".join(DEFAULT_ZEN_MODELS))
         )
         or list(DEFAULT_ZEN_MODELS),
+        zen_free_models_file=os.environ.get("ZEN_FREE_MODELS_FILE", "").strip(),
         zen_model_map=_model_map(os.environ.get("ZEN_MODEL_MAP", "")),
         zen_timeout_s=int(os.environ.get("OPENCODE_ZEN_TIMEOUT_S", "300")),
         zen_ttfb_s=float(os.environ.get("ZEN_TTFB_S", "60")),
