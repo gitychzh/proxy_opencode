@@ -70,6 +70,11 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=240.0)
     parser.add_argument("--limit", type=int, default=0, help="cap models")
     parser.add_argument(
+        "--models",
+        default="",
+        help="comma-separated model ids to test (default: all published)",
+    )
+    parser.add_argument(
         "--suites", default="chat,tool,reason", help="comma-separated subset"
     )
     parser.add_argument(
@@ -97,6 +102,16 @@ def main() -> int:
         return 2
     if args.limit:
         ids = ids[: args.limit]
+    if args.models:
+        wanted = {m.strip() for m in args.models.split(",") if m.strip()}
+        missing = wanted - set(ids)
+        if missing:
+            print(
+                f"models not published by /v1/models: {sorted(missing)}",
+                file=sys.stderr,
+            )
+            return 2
+        ids = [m for m in ids if m in wanted]
     if not ids:
         print("no free bare ids published by /v1/models", file=sys.stderr)
         return 2

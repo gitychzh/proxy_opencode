@@ -48,6 +48,51 @@ def _models(base_url: str, key: str) -> list[str]:
     return [mid for mid in ids if "/" not in mid]
 
 
+def _dsh_model_entry(mid: str) -> str:
+    """One DSH ``llm-pi-ai`` model entry from the gateway's profile table.
+
+    Single source of truth: ``proxy_opencode.model_profile`` (models.dev
+    values + live-measured floors). Unknown ids keep conservative defaults
+    rather than invented capability claims.
+    """
+
+    from proxy_opencode.model_profile import profile as _profile
+
+    prof = _profile(mid)
+    if prof is None:
+        context, output, efforts, attachment = 131_072, 32_768, (), False
+        modalities = ["text"]
+    else:
+        context = prof.limits.context
+        output = prof.limits.output
+        efforts = tuple(prof.capabilities.efforts)
+        attachment = bool(prof.capabilities.attachment)
+        modalities = ["text", "image", "video", "audio"] if attachment else ["text"]
+    lines = [
+        f'          - id: "{mid}"',
+        f"            name: {mid}",
+        f"            contextWindow: {context}",
+        f"            maxTokens: {output}",
+        "            input:",
+        *(f"              - {m}" for m in modalities),
+    ]
+    if efforts:
+        lines.append("            reasoningEfforts:")
+        lines.extend(f"              {e}: {e}" for e in efforts)
+    supports_effort = "true" if efforts else "false"
+    lines.extend(
+        [
+            "            compat:",
+            "              supportsStore: false",
+            "              supportsDeveloperRole: false",
+            f"              supportsReasoningEffort: {supports_effort}",
+            "              maxTokensField: max_tokens",
+            "              thinkingFormat: zai",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _patch(
     base_url: str,
     ids: list[str],
@@ -55,24 +100,7 @@ def _patch(
     *,
     reasoning_effort: str = "high",
 ) -> str:
-    entries = "".join(
-        f'          - id: "{mid}"\n'
-        f"            name: {mid}\n"
-        "            contextWindow: 131072\n"
-        "            maxTokens: 32768\n"
-        "            input:\n"
-        "              - text\n"
-        "            reasoningEfforts:\n"
-        "              low: low\n"
-        "              high: high\n"
-        "              max: max\n"
-        "            compat:\n"
-        "              supportsStore: false\n"
-        "              supportsDeveloperRole: false\n"
-        "              supportsReasoningEffort: true\n"
-        "              maxTokensField: max_tokens\n"
-        for mid in ids
-    )
+    entries = "\n".join(_dsh_model_entry(mid) for mid in ids)
     return (
         "- id: agent-default-model\n"
         '  name: "@deepseek-ai/dsh-agent-default-model"\n'

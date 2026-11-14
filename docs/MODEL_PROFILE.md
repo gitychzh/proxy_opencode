@@ -128,6 +128,59 @@ WorkBuddy 桌面版的 `~/.workbuddy/models.json` 里 `maxInputTokens` /
 pytest tests/test_model_profile.py tests/test_zen_policy.py -q
 ```
 
-`test_big_pickle_limits_match_the_shipped_catalogue_snapshot` 与
+`test_big_pickle_limits_match_the_live_upstream_not_the_stale_snapshot` 与
 `test_big_pickle_declares_reasoning_without_effort_levels` 是这两条事实的钉子：
 上游目录一变，它们先红。
+
+## 9. 免费目录全量档案（models.dev @ 2026-11-14，1.19.5 二进制快照交叉验证）
+
+2026-11-14 把档案表从 4 行补齐到 12 行（与当日免费目录一一对应），并删除已
+下架的 `muse-spark-1.3-contributor-free`。目录来源：`models.dev` provider
+`opencode`（`GET https://models.dev/api.json`），与本机 opencode 1.19.5 CLI
+二进制内嵌快照逐值核对一致。`context` 为**保证值**（守卫按它拒绝），
+「实测」列是 2026-11-14 校准探针的结果（`scripts/probe_model_context.py`，
+主链验证 `usage.opencode.billing_source == "free"`）：
+
+| id | context(保证) | output | 实测边界 | reasoning efforts | temperature | structured | attachment |
+|---|---|---|---|---|---|---|---|
+| big-pickle | 262139* | 32000 | 368,043 通过 / 无拒绝 | —（无档位） | ✓ | ✓ | ✗ |
+| mimo-v2.6-flash-free | 200000 | 32000 | 未测 | —（无档位） | ✓ | ✗ | ✓ |
+| deepseek-v4.1-flash-free | 200000 | 32000 | 280,812 通过 / 无拒绝 | low/high/max | ✓ | ✓ | ✓ |
+| glm-5.3-flash-free | 200000 | 32000 | 280,511 通过 / 无拒绝 | low/high/max | ✓ | ✓ | ✓ |
+| longcat-2.5-free | 1000000 | 262144 | 未测 | —（仅 toggle） | ✗ | ✗ | ✓ |
+| iceman-free | 262144 | 131072 | 未测 | —（无档位） | ✗ | ✗ | ✗ |
+| inkling-2-small-free | 1048576 | 131072 | 未测 | none/minimal/low/medium/high/max | ✓ | ✗ | ✓ |
+| beam-free | 1048576 | 131072 | 未测 | low/medium/high/xhigh/max | ✓ | ✓ | ✗ |
+| flint-40b-free | 262144 | 65536 | 未测 | low/medium/high/xhigh/max | ✓ | ✓ | ✗ |
+| nemotron-3.5-super-vl-free | 1048576 | 131072 | 未测 | none/minimal/low/medium/high/xhigh | ✓ | ✗ | ✓ |
+| nemotron-3.5-lightning-free | 262144 | 262144 | 未测 | —（无档位） | ✓ | ✓ | ✗ |
+| minimax-m3.1-flash-free | 1000000 | 512000 | 1,000,000 通过；1,080,000 拒（厂商原话 "context window exceeds limit"） | low/medium/high/xhigh/max | ✓ | ✗ | ✓ |
+
+\* big-pickle 是实测覆盖（2026-10-29 + 2026-11-14 双日），目录仍写 200000/160000——
+上游是**异构后端池**，越过保证值之后能否通过取决于落在哪个后端（10-29：
+268k→2/6 通过，300k→4/6，315k→0/6）。保证值就是守卫值；实测值只是
+「池子里的大窗口后端有时给到这么多」的记录，不得对外宣称。
+
+iceman-free 特殊：`reasoning: true` 但**没有** interleaved 字段（流式不吐
+独立思考 delta，`reasoning_field=""`），且 temperature / structured_output
+均为 false。
+
+## 10. 思考强度参数与 DSH 线格式取证
+
+- 客户端唯一有效的思考档位字段是 **`reasoning_effort`**（snake_case）。
+  2026-11-14 用本机网关 `PAYLOAD_DUMP_DIR` 对 DSH 做了零成本取证
+  （伪模型 id → dump 在模型解析前落盘，不打上游）：DSH 线上发的就是
+  `reasoning_effort`，与 `policy.py` 的 `CONTROL_FIELDS` 一致，无需别名。
+- `ZEN_REASONING_POLICY=max`（默认）下，`reasoning_effort` 仅当模型档案
+  声明了 efforts 且取值在列内才透传；其余控制字段（`thinking`/`reasoning`/
+  `include_reasoning`/`budget_tokens`）一律丢弃，只记字段名。`client`=
+  原样透传（legacy），`off`=全丢弃。
+- 实测（effort 扫描，512-token 探针，全部 200）：glm-5.3-flash-free 的
+  reasoning delta 长度随档位变化（low 74 / high 39 / max 241 字符——小样本
+  随机性明显，但档位字段被上游接受）；minimax 五档全 200；
+  deepseek-v4.1-flash-free 三档全 200 但流式未见独立 reasoning delta
+  （后端把它并进 content 或剥离，与 `interleaved.reasoning_content` 声明
+  不符，是上游池行为，不是网关问题）。
+- 探针工具：`scripts/probe_model_context.py --effort-sweep`（本地网关
+  `ZEN_CONTEXT_GUARD=0 ZEN_REASONING_POLICY=client` 下运行；每个 200 都烧
+  探测 IP 的当日额度，阶梯故意保守）。

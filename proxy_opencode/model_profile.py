@@ -1,15 +1,16 @@
 """Model parameters, mirrored from the opencode client that the gateway fronts.
 
 The gateway is a *stand-in for the provider*, so its numbers must be the
-provider's numbers. Everything here is transcribed from the opencode source
-tree (``sst/opencode`` @ ``dev``, 2026-10-27):
+provider's numbers. Everything here is transcribed from two agreeing
+authoritative sources (2026-11-14):
 
-* ``packages/core/src/models-dev/snapshot.txt`` — the catalogue snapshot the
-  CLI itself ships (provider ``opencode``). Limits, capability flags and the
-  declared reasoning efforts come from there; ``big-pickle`` is copied
-  verbatim: ``limit {context 200000, input 160000, output 32000}`` and
-  ``capabilities.reasoning = {supported: true}`` — with **no** ``effort``
-  list, i.e. the CLI offers no thinking-strength control for this model.
+* ``models.dev`` provider ``opencode`` — the live catalogue the CLI syncs;
+* the ``opencode`` 1.19.5 CLI's own embedded snapshot (binary grep), which
+  matches models.dev value-for-value for all twelve free ids.
+
+Deviations from the catalogue are only ever *live measurements*, kept as the
+advertised floor with the measurement recorded (big-pickle, below).
+
 * ``packages/core/src/util/token.ts`` — ``CHARS_PER_TOKEN = 4``: the prompt
   estimator both sides use.
 * ``packages/core/src/session/compaction.ts`` — auto-compaction ceiling:
@@ -83,7 +84,7 @@ class ModelProfile:
     id: str
     limits: Limits
     capabilities: Capabilities
-    source: str = "models.dev/opencode@2026-10-27"
+    source: str = "models.dev/opencode@2026-11-14"
 
     def ceiling(self) -> int:
         """First prompt size at which opencode compacts this model."""
@@ -119,35 +120,33 @@ class ModelProfile:
 
 
 # --------------------------------------------------------------------------
-# The relayed models. Values are the upstream catalogue's own numbers; a model
+# The relayed models. Values are the upstream catalogue's own numbers
+# (models.dev provider "opencode" @ 2026-11-14, cross-checked against the
+# opencode 1.19.5 binary snapshot — the two agree on every free id). A model
 # missing here is served with no enforced limits rather than with invented
 # ones (see profile()).
+#
+# Live-measured context edges (filler-calibrated probes, primary chain
+# verified via usage.opencode.billing_source == "free", report:
+# model_test/context_probe_20261114/report.json) — the upstream is a
+# *heterogeneous backend pool*, so rejections past the declared window are a
+# lottery on which backend answers (big-pickle, 2026-10-29):
+#     268k target → 2/6 accepted · 300k → 4/6 · 315k → 0/6
+# The table therefore advertises the *guaranteed* floor, never the lucky
+# draw; the measured ceilings below document what the pool sometimes gives.
 # --------------------------------------------------------------------------
 _PROFILES: dict[str, ModelProfile] = {
+    # LIMITS RE-MEASURED LIVE — the shipped catalogue is stale for this id:
+    #   * models.dev / the 1.19.5 snapshot say {context 200000, input
+    #     160000, output 32000}. Both context numbers are too small.
+    #   * 2026-10-29: every rejection cites "maximum context length of
+    #     (262139)"; binding rule prompt + max_tokens ≤ 262,139. Above it the
+    #     pool is a lottery (see module note). Floor: 262,139.
+    #   * 2026-11-14 (home IP): 222,818 / 262,139 / 283,110 / 325,576 /
+    #     368,043 prompt tokens — all 200. The pool keeps serving
+    #     large-window backends; the floor stays 262,139.
     # Verified live 2026-10-27: reasoning supported with no effort options —
     # the CLI exposes no thinking-strength switch for it, so neither do we.
-    #
-    # LIMITS RE-MEASURED LIVE 2026-10-29 (twice) — the shipped catalogue is
-    # stale, and the upstream is a *heterogeneous* backend pool:
-    #   * models.dev / snapshot.txt say {context 200000, input 160000}. Both
-    #     numbers are too small: queries at 258,906 prompt tokens answer 200.
-    #   * Every rejection cites one ceiling:
-    #       "Input token count (N) exceeds the model's maximum context length
-    #        of (262139), no tokens left for generation"
-    #     and the binding rule is prompt + max_tokens ≤ 262,139 — measured at
-    #     261,792 input + 1,024 completion = 262,816 → 400 (over by 677).
-    #   * Above that ceiling the outcome is nondeterministic, because the pool
-    #     mixes backends with different windows. Same payload, repeated:
-    #       268,000-target → 2/6 accepted (prompt 263,703 / 271,665)
-    #       300,000-target → 4/6 accepted (prompt 303,265!)
-    #       315,000-target → 0/6 accepted
-    #     Response ids confirm three distinct backends (`chatcmpl-…`,
-    #     `mai-api-…`, bare hex).
-    # So 262,139 is the only *guaranteed* window; anything above it is a
-    # lottery on which backend the request lands. The guard keeps the floor
-    # (with `input` 1,139 below it, so the 1,024-token output floor can never
-    # push a passing prompt back over) rather than advertising the optimistic
-    # 303k and failing two requests out of three.
     "big-pickle": ModelProfile(
         id="big-pickle",
         limits=Limits(context=262_139, input=261_000, output=32_000),
@@ -159,24 +158,113 @@ _PROFILES: dict[str, ModelProfile] = {
             temperature=True,
             attachment=False,
         ),
+        source="live upstream (2026-10-29, 2026-11-14)",
     ),
+    # 2026-11-14: declared 200000; live 170k/200k/216k/248k/280,812 prompt
+    # tokens all 200, no rejection (soft edge, heterogeneous pool).
     "deepseek-v4.1-flash-free": ModelProfile(
         id="deepseek-v4.1-flash-free",
         limits=Limits(context=200_000, output=32_000),
-        capabilities=Capabilities(reasoning=True, efforts=("low", "high", "max"), attachment=False),
+        capabilities=Capabilities(reasoning=True, efforts=("low", "high", "max")),
     ),
+    # 2026-11-14: declared 200000; live 280,511 prompt tokens accepted 5/5,
+    # no rejection (soft edge, heterogeneous pool).
     "glm-5.3-flash-free": ModelProfile(
         id="glm-5.3-flash-free",
         limits=Limits(context=200_000, output=32_000),
-        capabilities=Capabilities(reasoning=True, efforts=("low", "high", "max"), attachment=False),
+        capabilities=Capabilities(reasoning=True, efforts=("low", "high", "max")),
     ),
-    "muse-spark-1.3-contributor-free": ModelProfile(
-        id="muse-spark-1.3-contributor-free",
+    # 2026-11-14: declared 1,000,000; live probe accepted exactly
+    # 1,000,000 prompt tokens and rejected 1,080,000 with the vendor's own
+    # message "context window exceeds limit". Floor: 1,000,000.
+    "minimax-m3.1-flash-free": ModelProfile(
+        id="minimax-m3.1-flash-free",
+        limits=Limits(context=1_000_000, output=512_000),
+        capabilities=Capabilities(
+            reasoning=True,
+            efforts=("low", "medium", "high", "xhigh", "max"),
+            attachment=True,
+        ),
+    ),
+    "mimo-v2.6-flash-free": ModelProfile(
+        id="mimo-v2.6-flash-free",
+        limits=Limits(context=200_000, output=32_000),
+        capabilities=Capabilities(
+            reasoning=True,
+            efforts=(),
+            structured_output=False,
+            attachment=True,
+        ),
+    ),
+    "longcat-2.5-free": ModelProfile(
+        id="longcat-2.5-free",
+        limits=Limits(context=1_000_000, output=262_144),
+        capabilities=Capabilities(
+            reasoning=True,
+            efforts=(),  # toggle only — no strength ladder published
+            temperature=False,
+            structured_output=False,
+            attachment=True,
+        ),
+    ),
+    # reasoning deltas exist upstream but this id publishes no interleaved
+    # field, so streamed thinking text is not expected back.
+    "iceman-free": ModelProfile(
+        id="iceman-free",
+        limits=Limits(context=262_144, output=131_072),
+        capabilities=Capabilities(
+            reasoning=True,
+            efforts=(),
+            structured_output=False,
+            temperature=False,
+            attachment=False,
+            reasoning_field="",
+        ),
+    ),
+    "inkling-2-small-free": ModelProfile(
+        id="inkling-2-small-free",
         limits=Limits(context=1_048_576, output=131_072),
         capabilities=Capabilities(
             reasoning=True,
-            efforts=("minimal", "low", "medium", "high", "xhigh"),
-            attachment=False,
+            # "none" is published: the client may switch thinking OFF.
+            efforts=("none", "minimal", "low", "medium", "high", "max"),
+            structured_output=False,
+            attachment=True,
+        ),
+    ),
+    "beam-free": ModelProfile(
+        id="beam-free",
+        limits=Limits(context=1_048_576, output=131_072),
+        capabilities=Capabilities(
+            reasoning=True,
+            efforts=("low", "medium", "high", "xhigh", "max"),
+        ),
+    ),
+    "flint-40b-free": ModelProfile(
+        id="flint-40b-free",
+        limits=Limits(context=262_144, output=65_536),
+        capabilities=Capabilities(
+            reasoning=True,
+            efforts=("low", "medium", "high", "xhigh", "max"),
+        ),
+    ),
+    "nemotron-3.5-super-vl-free": ModelProfile(
+        id="nemotron-3.5-super-vl-free",
+        limits=Limits(context=1_048_576, input=1_048_576, output=131_072),
+        capabilities=Capabilities(
+            reasoning=True,
+            # "none" published; no "max" level for this id.
+            efforts=("none", "minimal", "low", "medium", "high", "xhigh"),
+            structured_output=False,
+            attachment=True,
+        ),
+    ),
+    "nemotron-3.5-lightning-free": ModelProfile(
+        id="nemotron-3.5-lightning-free",
+        limits=Limits(context=262_144, output=262_144),
+        capabilities=Capabilities(
+            reasoning=True,
+            efforts=(),
         ),
     ),
 }

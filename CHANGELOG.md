@@ -5,6 +5,36 @@
 
 ## [Unreleased]
 
+### Added — 模型能力档案补齐 12 ID + 上下文/思考强度实测（0.8.29，2026-11-14）
+
+- **档案表 4 → 12**：`model_profile._PROFILES` 补齐当日免费目录全部 12 个 ID
+  （models.dev provider `opencode` @ 2026-11-14，与本机 opencode 1.19.5 CLI
+  二进制内嵌快照逐值核对一致），删除已下架的 `muse-spark-1.3-contributor-free`。
+  此前 8 个无档案 ID 的后果：无上下文守卫、无输出预算、客户端 `reasoning_effort`
+  被 `max` 策略静默丢弃——minimax 声明 1M/512k、beam/inkling/nemotron-super-vl
+  1M、longcat 1M（temperature=false）、iceman 262k（无流式思考字段、无
+  temperature）等差异现在全部可查询（`/v1/models_cus?format=json`）。
+- **实测边界**（`scripts/probe_model_context.py`，校准探针 + 主链
+  `billing_source=free` 验证，报告
+  `E:/ps/dsh_repair_self/model_test/context_probe_20261114/report.json`）：
+  big-pickle 368,043 prompt tokens 通过（10-29 保证值 262,139 不变，异构后端池
+  再添证据）；minimax 恰好 1,000,000 通过、1,080,000 被厂商原话
+  "context window exceeds limit" 拒绝；glm 280,511 / deepseek 280,812 通过
+  （声明 200k，软边界）。保证值与守卫值保持一致，实测只进档案注释与文档。
+- **思考强度取证**：本机网关 `PAYLOAD_DUMP_DIR` 伪模型零成本取证，确认 DSH
+  线上发送 `reasoning_effort`（snake_case），与 `CONTROL_FIELDS` 一致，无需别名。
+  effort 扫描：glm 三档全 200（reasoning delta 长度随档位波动）、minimax 五档
+  全 200、deepseek 三档全 200（流式未见独立 reasoning delta，上游池行为）。
+- **DSH 配置升级**：`_patch()`/`_dsh_model_entry()` 从档案表生成真实能力元数据
+  （替换原 131072/32768 占位值），headless 持久补丁与 desktop
+  `cordis.patch.yml` 的 `cus_oc` 供应商（12 模型，追加为 proxy-nv 平级、默认
+  模型不动）均已再生成；desktop 备份
+  `cordis.patch.yml.bak-20261114-1755`。E2E runner 支持 `--models` 过滤。
+
+回归测试：`tests/test_model_profile.py` 新增 6 例（目录全覆盖、下架 ID 不残留、
+minimax 1M+ladder、iceman 无思考字段、longcat 无 temperature、可关思考 ID 声明
+`none`）；门禁 pytest/ruff/mypy/egress-agent 全绿。
+
 ### Fixed — 三件套压测暴露的出口池 / 可观测性缺陷（0.8.28，2026-11-14）
 
 压测：本机 DSH `cus_oc` 供应商，12 个免费裸 ID × 三件套（基础聊天 / 工具调用 /

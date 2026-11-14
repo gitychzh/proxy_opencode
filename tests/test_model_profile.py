@@ -117,6 +117,74 @@ def test_profile_table_only_contains_free_relay_ids():
     assert all(mid.endswith("-free") or mid == "big-pickle" for mid in profiles())
 
 
+def test_table_covers_every_free_id_in_the_2026_11_14_catalogue():
+    # One profile per free id the daily sync publishes (models.dev
+    # 2026-11-14: 86 catalogue entries, 12 free). A missing id would mean
+    # that model runs with no context guard and no reasoning forwarding.
+    expected = {
+        "big-pickle",
+        "mimo-v2.6-flash-free",
+        "deepseek-v4.1-flash-free",
+        "glm-5.3-flash-free",
+        "longcat-2.5-free",
+        "iceman-free",
+        "inkling-2-small-free",
+        "beam-free",
+        "flint-40b-free",
+        "nemotron-3.5-super-vl-free",
+        "nemotron-3.5-lightning-free",
+        "minimax-m3.1-flash-free",
+    }
+    assert set(profiles()) == expected
+
+
+def test_delisted_model_profile_is_not_kept():
+    # muse-spark-1.3-contributor-free left the upstream catalogue; keeping
+    # its row would advertise limits for a dead id.
+    assert profile("muse-spark-1.3-contributor-free") is None
+
+
+def test_minimax_publishes_the_one_million_window_and_effort_ladder():
+    # models.dev 2026-11-14: context 1,000,000 / output 512,000, efforts
+    # [low, medium, high, xhigh, max]. Live 2026-11-14: exactly 1,000,000
+    # prompt tokens accepted, 1,080,000 rejected ("context window exceeds
+    # limit" — the vendor's own message).
+    prof = profile("minimax-m3.1-flash-free")
+    assert prof is not None
+    assert prof.limits.context == 1_000_000
+    assert prof.limits.output == 512_000
+    assert prof.capabilities.efforts == ("low", "medium", "high", "xhigh", "max")
+    assert prof.capabilities.attachment is True
+
+
+def test_iceman_publishes_no_streamed_reasoning_field_and_no_temperature():
+    # models.dev 2026-11-14: iceman has no `interleaved` block, no
+    # temperature / structured_output keys — all three mean "absent".
+    prof = profile("iceman-free")
+    assert prof is not None
+    assert prof.capabilities.reasoning_field == ""
+    assert prof.capabilities.temperature is False
+    assert prof.capabilities.structured_output is False
+    assert prof.capabilities.efforts == ()
+
+
+def test_longcat_publishes_no_temperature_control():
+    prof = profile("longcat-2.5-free")
+    assert prof is not None
+    assert prof.capabilities.temperature is False
+    # reasoning has a toggle upstream but no strength ladder.
+    assert prof.capabilities.efforts == ()
+
+
+def test_models_supporting_thinking_off_declare_none():
+    # inkling-2-small / nemotron-3.5-super-vl publish "none": the client may
+    # switch thinking OFF, so the gateway must forward that level too.
+    for mid in ("inkling-2-small-free", "nemotron-3.5-super-vl-free"):
+        prof = profile(mid)
+        assert prof is not None
+        assert "none" in prof.capabilities.efforts
+
+
 @pytest.mark.parametrize("model_id", sorted(profiles()))
 def test_every_profile_is_self_consistent(model_id):
     prof = profiles()[model_id]
