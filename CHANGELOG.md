@@ -30,10 +30,14 @@
   跑一次（`Persistent=true` 补跑）；变化时才原子更新 `/data` 卷快照与 `.env` 的
   `OPENCODE_ZEN_MODELS`，无变化零写入零重启。空目录响应直接退出 2，避免误清空
   对外目录。
+- **部署实测**（2026-11-14）：Cloudflare Error 1010 会拦匿名 `/models` 的
+  `Python-urllib/3.x` 默认 UA（403），本机与 ECS 双端一致、与出口 IP 无关；
+  `fetch_free_ids` 固定带 `curl/8.0` UA 后两端均 200。原子写保留目标已有权限：
+  `.env` 维持 0600，新快照 0644 供容器 uid 10002 读。
 
-回归测试：`tests/test_free_models.py`（17 例）覆盖拉取判定、快照热加载/损坏、
+回归测试：`tests/test_free_models.py`（18 例）覆盖拉取判定与 UA、快照热加载/损坏、
 `.env` 幂等改写与 CRLF、unchanged 零写入、dry-run、registry 透传/回显、
-`new_call` 双腿一致、`/v1/models` 集成。门禁：pytest 537 passed，ruff clean，
+`new_call` 双腿一致、`/v1/models` 集成。门禁：pytest 538 passed，ruff clean，
 mypy clean，egress-agent 同套全绿。
 
 ### Fixed — 出口 IP 横跳折叠 + 过期 cordon 不再误发 cordon_lifted（0.8.26，2026-11-06）

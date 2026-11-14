@@ -62,6 +62,20 @@ def test_fetch_free_ids_uses_naming_convention():
     assert fetch_free_ids(fetch=_fetch) == sorted(FREE_IDS)
 
 
+def test_fetch_free_ids_avoids_python_urllib_403():
+    """Cloudflare Error 1010 blocks the default Python UA on /models."""
+
+    seen: dict[str, str] = {}
+
+    def fetch(url: str, headers: dict[str, str], timeout: float) -> bytes:
+        seen.update(headers)
+        return _fetch(url, headers, timeout)
+
+    fetch_free_ids(fetch=fetch)
+    assert "User-Agent" in seen
+    assert "Python-urllib" not in seen["User-Agent"]
+
+
 def test_fetch_free_ids_rejects_bad_shape():
     with pytest.raises(ValueError):
         fetch_free_ids(fetch=lambda *_: b'{"object":"list"}')

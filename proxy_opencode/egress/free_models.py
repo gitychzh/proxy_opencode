@@ -30,6 +30,10 @@ DEFAULT_BASE_URL = "https://opencode.ai/zen/v1"
 # The anonymous catalogue is public; this bearer value is a protocol literal,
 # not a credential (AGENTS.md section 1, model gate). Never log it.
 ANONYMOUS_BEARER = "public"
+# Cloudflare Error 1010 rejects Python's default "Python-urllib/3.x" UA on the
+# anonymous catalogue (measured 2026-11-14 on both the workstation and the ECS
+# host: default UA -> 403, any normal UA -> 200). Not IP related.
+CATALOG_USER_AGENT = "curl/8.0"
 ENV_KEY = "OPENCODE_ZEN_MODELS"
 FREE_SUFFIX = "-free"
 EXPLICIT_FREE_IDS = frozenset({"big-pickle"})
@@ -88,6 +92,7 @@ def fetch_free_ids(
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key or ANONYMOUS_BEARER}",
+        "User-Agent": CATALOG_USER_AGENT,
     }
     raw = (fetch or _http_get)(url, headers, timeout_s)
     body = json.loads(raw.decode("utf-8"))
