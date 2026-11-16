@@ -5,6 +5,35 @@
 
 ## [Unreleased]
 
+### Added — 免费层估算器门实测 + hermes 四模型精细化配置（0.8.31，2026-11-16）
+
+**发现一道此前未记录的上游门**：免费层对单请求另设 `at most 32000 prompt
+tokens`，其估算器固定 `round(chars * 0.339)`（与内容语言无关，三组独立阶梯
+实测 0.3380/0.3342/0.3387）→ **约 94.4K chars 即硬顶**，远早于模型窗口。
+`docs/MODEL_PROFILE.md` 新增 §11 完整记录。
+
+- **修正 §9 的读法**：368K / 1,000,000「通过」是在不撞估算门的前提下用高密度
+  内容测出的 usage 值，属测量技巧，**不是可用容量**。本轮用 U+20000/U+2A700
+  （真实 4.09~4.21 tok/char vs 估算 0.339）复现：deepseek 384,470 /
+  big-pickle 384,468 / minimax 384,468 / glm 384,179（全部 200，usage 回读）。
+  常规中文 64,124 chars → 200，96,209 chars → 400。
+- **`scripts/configure_hermes_zenedge.py`**（新增）：为 ECS hermes 生成/校准
+  zenedge provider 与 model_overrides 两块（4 个免费模型、能力位、64000 硬下限、
+  `--dry-run`）。顺带修掉原配置两处硬伤：默认模型用的是付费裸 ID
+  `deepseek-ai/deepseek-v4.1-flash`（必 401）、`model_overrides` 里
+  `deepseek-v4.1-flash` 因 YAML 未加引号被解析成 `deepseek-v4: 1-flash`。
+- **压缩参数**：`compression.threshold_tokens` 保持空——它是全局绝对上限，
+  会连坐 msagg(262K)/nv(1M)；per-model `model_thresholds` 显式写 0.75
+  （<512K 窗口的引擎 raise-only 下限）。
+- **E2E**：ECS hermes 对四模型全量验收 —— `big-pickle 4/4`、
+  `deepseek-v4.1-flash-free 4/4`、`glm-5.3-flash-free 6/6`、
+  `minimax-m3.1-flash-free 6/6`（`scripts/e2e_hermes.py`，provider `zenedge`）。
+  工具链实测：四模型均能经 hermes 读 1.1MB 文件并回显真实行数。
+- **待决策**：网关 `policy.py` 的 `ContextOverflow` 用 `round(chars/4)` 对照
+  目录保证值，对这道门放行 8.5~42 倍（实测 deepseek 440,016 chars 被放行、
+  上游 400）。收紧会同时影响所有客户端的放行面（含付费与 opencode 本体），
+  属契约级改动，单独立项。
+
 ### Added — 429 波归因哨兵 + CLI 版本漂移守卫（0.8.30，2026-11-14）
 
 背景：本机 DSH E2E 期间网关被 429 打满并降级备用链。旧判据「Retry-After 指向

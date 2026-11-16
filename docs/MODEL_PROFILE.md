@@ -184,3 +184,89 @@ iceman-free 特殊：`reasoning: true` 但**没有** interleaved 字段（流式
 - 探针工具：`scripts/probe_model_context.py --effort-sweep`（本地网关
   `ZEN_CONTEXT_GUARD=0 ZEN_REASONING_POLICY=client` 下运行；每个 200 都烧
   探测 IP 的当日额度，阶梯故意保守）。
+
+## 11. 免费层「估算器门」：32000 prompt tokens 才是单请求真顶（2026-11-16 实测）
+
+**这是本项目此前未记录的一道门**，比模型窗口更早生效，必须与 §9 的
+「保证值」区分开看。
+
+### 11.1 事实
+
+上游对**每一次请求**独立校验估算体积，超限即 400（`code=context_length_exceeded`），
+错误体原文同时给出两个数：
+
+```
+This model's maximum context length is 200000 tokens and at most 32000 prompt
+tokens are accepted. This request is about 188497 prompt tokens.
+```
+
+- **模型最大上下文**（`200000` / `262139` / `1000000`）是窗口声明；
+- **`at most 32000 prompt tokens`** 是免费层对**单请求输入**的硬顶；
+- `about N` 是上游估算器的结果——**它固定按 `round(chars * 0.339)` 计**，
+  与内容语言/类型**无关**：自然中文、英文 filler、纯 4-byte 符号串，实测
+  `about/chars` 全部落在 0.334~0.339（3 组独立阶梯：0.3380 / 0.3342 / 0.3387）。
+
+换算成体积：**约 94.4K chars 就是免费层的单请求硬顶**，与模型无关。
+
+### 11.2 为什么 §9 的 368K/1,000,000 能过
+
+§9 那次探针用英文 filler 阶梯，走到 368K tokens 仍 200——因为**真实 tokenizer
+把内容折得更密**：`usage.prompt_tokens` 与 `about` 是两个不同的数，前者是真实
+BPE 计数，后者是上游控制面的估算。
+
+2026-11-16 用 4-byte 罕见字符（U+20000 / U+2A700，真实密度实测 **4.09~4.21
+tok/char**，而估算器只按 0.339 计）可以把真实 tokens 藏在 94K chars 以内，
+于是能在**不超估算门**的前提下把 usage 顶到：
+
+| 模型 | 实测接受（usage.prompt_tokens） | filler |
+|---|---|---|
+| deepseek-v4.1-flash-free | 384,470 | U+20000 × 94000 |
+| big-pickle | 384,468 | U+20000 × 94000 |
+| minimax-m3.1-flash-free | 384,468 | U+20000 × 94000 |
+| glm-5.3-flash-free | 384,179 | U+2A700 × 94000 |
+
+**但这 384K 是测量技巧的产物，不是可用容量。** 常规文本（自然中文/英文）
+永远先撞 94.4K chars 的估算门：实测中文 64,124 chars → 200，96,209 chars → 400。
+对外给客户端配窗口时，**只能按估算门口径**，不得宣称 384K。
+
+同轮 4-byte 字符上探到 94,300/95,000/100,000 runes 全部 400，`about`
+32,044/32,218/33,468——证明天花板是**字符数**而不是 tokens。
+
+### 11.3 对客户端/网关配置的含义
+
+| 层 | 该填什么 | 理由 |
+|---|---|---|
+| 网关 context guard | 保持目录保证值 | 它是 opencode 契约的一半；放开会让客户端不压缩 |
+| hermes `context_length` | **64000**（引擎硬下限） | 低于 64000 `agent_init` 直接 `ValueError`；且 hermes 用 4 chars/token 估算，0.75 阈值 = 192K chars，早已越过 94.4K 门，主压缩不会先触发 |
+| 实际压缩 | 靠 `trigger_source=overflow` | 撞上游 400 后立即压缩，日志可见；这是唯一生效路径 |
+| 输出预留 | 目录 `output` 值 | `_compute_threshold_tokens` 会按 `context - max_tokens` 算输入预算 |
+
+hermes 侧可复现配置：`scripts/configure_hermes_zenedge.py`（写 provider +
+model_overrides 两块，`--dry-run` 可先看）。
+
+### 11.4 网关 guard 的已知缺口（未修，待决策）
+
+`policy.py` 的 `ContextOverflow` 用 `estimate_request()`（即 `round(chars/4)`）
+对照 `profile.limits.window()`。对照 94.4K chars 的真门，各模型放行倍数：
+
+| 模型 | guard 阈值(window) | 折合 chars | 上游真门 chars | 放行倍数 |
+|---|---|---|---|---|
+| big-pickle | 261,000 | 1,044,000 | ~94,479 | 11.1× |
+| deepseek / glm | 200,000 | 800,000 | ~94,479 | 8.5× |
+| minimax | 1,000,000 | 4,000,000 | ~94,479 | 42.3× |
+
+实测确认：deepseek 发 440,016 chars（中文自然文本）→ 网关**放行**，上游 400
+（`about=118468`）。即 guard 对免费层这道门**完全失效**，代价是白跑一轮往返。
+修它会同时收紧对**所有**客户端的放行面（含付费模型与 opencode 本体），
+属于契约级改动，需单独立项评估，不在本次配置范围。
+
+### 11.5 复现命令
+
+```bash
+# 四模型稳定性 + 延迟（每模型 5 发流式）
+python3 scripts_local/stability_ctx_probe.py
+
+# 估算门口径验证（中文自然文本，看 about/chars 恒定）
+python3 scripts_local/ctx_probe.py http://115.29.231.25:10002 "$KEY" \
+    deepseek-v4.1-flash-free 26000
+```
