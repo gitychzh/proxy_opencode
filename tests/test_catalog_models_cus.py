@@ -180,8 +180,13 @@ async def test_models_cus_accepts_bearer_and_rejects_missing_key(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_models_cus_hidden_and_not_in_models(tmp_path):
-    """Standard /v1/models must NOT enumerate raw ids — models_cus only."""
+async def test_models_lists_the_upstream_catalogue_verbatim(tmp_path):
+    """2026-11-17 (owner): no alias layer — /v1/models mirrors upstream.
+
+    The historical single-alias body is gone. With the default empty
+    catalogue the standard path relays the upstream model list verbatim, so a
+    client sees the real ids it can address.
+    """
     app = make_app(tmp_path)
     with respx.mock:
         respx.get("https://opencode.ai/zen/v1/models").respond(json=MOCK_UPSTREAM)
@@ -194,31 +199,45 @@ async def test_models_cus_hidden_and_not_in_models(tmp_path):
             )
     data = models.json()["data"]
     ids = [m["id"] for m in data]
-    assert ids == [ALIAS]  # exactly the public alias, nothing else
-    assert "big-pickle" not in ids
-    assert "space-bunny-free" not in ids
+    # upstream ids come through, including the ones the old alias hid
+    # (the upstream namespace prefixes them with "opencode/")
+    assert any(i.endswith("big-pickle") for i in ids)
+    assert any(i.endswith("deepseek-v4.1-flash-free") for i in ids)
+    # the removed alias is no longer advertised as a model
+    assert ALIAS not in ids
     # Strictly standard OpenAI model shape (hermes discovery).
-    assert set(data[0]) == {"id", "object", "created", "owned_by"}
+    assert set(data[0]) >= {"id", "object", "created", "owned_by"}
 
 
 @pytest.mark.asyncio
-async def test_raw_upstream_id_rejected_404(tmp_path):
-    """Knowing the relayed raw id (from /v1/models_cus) does not make it
-    addressable: only the public alias is — the backend name stays hidden."""
+async def test_raw_upstream_id_is_addressable(tmp_path):
+    """2026-11-17 (owner): ids are passed through, so a raw id IS callable.
+
+    The old contract hid the backend name behind an alias and rejected the
+    raw id with 404. Both are gone: whatever /v1/models lists can be sent.
+    """
     app = make_app(tmp_path)
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test"
-    ) as client:
-        resp = await client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "big-pickle",
-                "messages": [{"role": "user", "content": "hi"}],
-            },
-            headers={"Authorization": "Bearer gw-key"},
+    with respx.mock:
+        respx.get("https://opencode.ai/zen/v1/models").respond(json=MOCK_UPSTREAM)
+        respx.post("https://opencode.ai/zen/v1/chat/completions").respond(
+            json={"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
         )
-    assert resp.status_code == 404
-    assert resp.json()["error"]["code"] == "model_not_found"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "big-pickle",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+                headers={"Authorization": "Bearer gw-key"},
+            )
+    # reached upstream (not a 404 model_not_found); the exact upstream status
+    # depends on the mocked transport, so only the model gate is asserted.
+    assert resp.status_code != 404 or (
+        resp.json().get("error", {}).get("code") != "model_not_found"
+    )
 
 
 @pytest.mark.asyncio

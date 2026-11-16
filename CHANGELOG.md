@@ -5,6 +5,27 @@
 
 ## [Unreleased]
 
+### Removed — 别名层彻底删除，模型 ID 完全透传（0.8.32，2026-11-17）
+
+**owner 决策：没有付费模型一说**。历史上的
+`deepseek-ai/deepseek-v4.1-flash → big-pickle` 伪装别名是错的——它让下游 agent
+以为在调 DeepSeek，实际拿到的是 big-pickle。全部清除，任何模型 id 原样透传。
+
+- `config.DEFAULT_PUBLIC_MODELS` 改为空元组（不再是那条别名）。空catalogue下
+  `ModelRegistry` 直接进纯透传：`resolve()`/`public_id()` 是恒等函数。
+- `ZenDirectAdapter._zen_model()`：删掉 `PUBLIC_MODELS` 分支。保留的只有
+  opencode 同款的 provider 前缀剥离（上游目录服务裸 ID，`opencode/x` 回 401）
+  与显式 `ZEN_MODEL_MAP` 覆盖。
+- `/v1/models` 在透传模式下直接透传上游目录（不再只列一条别名）。
+  `/v1/models_cus` 语义不变（仍列 relay 目录）。
+- `new_call()`：空 `model` 仍本地 400 `model_required`——空串透传只会换来上游
+  一句含糊报错。除此之外**不再有 404 `model_not_found`**：网关不判断某个 id
+  "是否存在"，交给上游。
+- `ZEN_FREE_MODELS_FILE` 的语义收窄：仍供 `/v1/models_cus` 与免费判定使用，
+  **不再是可请求 id 的白名单**。
+- 部署侧：ECS `deploy/ecs/.env` 的 `PUBLIC_MODELS` 清空（原值即那条别名）。
+- 文档：ARCHITECTURE §5、ACCESS §1、MODEL_PROFILE §11 同步。
+
 ### Added — 免费层估算器门实测 + hermes 四模型精细化配置（0.8.31，2026-11-16）
 
 **发现一道此前未记录的上游门**：免费层对单请求另设 `at most 32000 prompt

@@ -86,13 +86,19 @@ cordon、换 IP、failover 语义与传输无关。
 
 ## 5. 公开模型目录
 
-- 对外目录 = **旧别名 + 当日免费裸 ID**。别名
-  `deepseek-ai/deepseek-v4.1-flash` 永久保留（其他 agent 正在调用），
-  `/v1/models` 仍是严格 OpenAI 形状（`id/object/created/owned_by`）。
-- `ZEN_FREE_MODELS_FILE`（生产 `/data/zen_free_models.json`）指向 ECS 宿主同步
-  脚本写出的每日快照。配置后，快照里的每个免费裸 ID 都成为可请求 id：
-  `registry.resolve()` 原样透传上游、`public_id()` 原样回显（两个模型不串味）；
-  未配置时退回 0.8.26 行为（只有别名，裸 ID 404）。快照按 mtime 热加载，
+- **2026-11-17（owner）：别名层已删除，纯透传。** `PUBLIC_MODELS` 默认空，
+  `registry.resolve()` / `public_id()` 变成恒等函数——客户端写的模型 id 原样
+  送上游、原样回显。**没有付费/免费之分**：免费与否只决定上游接不接受，
+  与网关是否转发无关。
+- `/v1/models` 直接透传上游目录（严格 OpenAI 形状 `id/object/created/owned_by`）。
+  空的 `model` 仍本地 400 `model_required`（空串透传只会换来上游一句含糊报错）。
+- 历史上的 `deepseek-ai/deepseek-v4.1-flash → big-pickle` 伪装别名**已彻底移除**
+  （代码、测试、部署环境变量三处）。`_zen_model` 只保留 opencode 同款的
+  provider 前缀剥离（上游目录服务裸 ID，`opencode/x` 会 401）。
+- 唯一仍能改写 id 的是 `ZEN_MODEL_MAP`（运维显式覆盖，默认空）。
+- `ZEN_FREE_MODELS_FILE`（生产 `/data/zen_free_models.json`）仍由 ECS 宿主同步
+  脚本每日写出，供 `/v1/models_cus` 与免费模型判定使用；**它不再是可请求 id 的
+  白名单**——透传模式下任何 id 都会转发。快照按 mtime 热加载，
   改写**不需要重启容器**。
 - 别名 → 上游免费裸 ID 由 `PUBLIC_MODELS` 第三列决定（生产 `big-pickle`），
   `ZEN_MODEL_MAP` 可覆盖。付费裸 ID 回 401（模型门，见 AGENTS）。

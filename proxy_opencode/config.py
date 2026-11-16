@@ -27,17 +27,16 @@ DEFAULT_ZEN_MODELS = ("big-pickle",)
 # Users only ever see `id`; upstream is resolved server-side and scrubbed
 # from every response (JSON bodies and streamed SSE chunks alike). The
 # standard /v1/models body is plain OpenAI shape (id/object/created/
-# owned_by); `display_name` stays internal. The default upstream must stay
-# in sync with the live zen catalogue (GET
-# https://opencode.ai/zen/v1/models) — see the 2026-10-02 drift note in
-# CHANGELOG.md.
-DEFAULT_PUBLIC_MODELS = (
-    # 2026-10-16: the alias says what the model is (big-pickle IS DeepSeek
-    # V4.1 Flash upstream). 2026-10-17: big-pickle is the ONLY relayed
-    # upstream model — its raw id (and every other free id) is neither
-    # listable nor callable through the standard paths.
-    "deepseek-ai/deepseek-v4.1-flash:DeepSeek V4.1 Flash:big-pickle",
-)
+# owned_by); `display_name` stays internal.
+#
+# 2026-11-17 (owner): the historical alias "big-pickle disguised as
+# deepseek-ai/deepseek-v4.1-flash" is REMOVED. There is no paid/free split at
+# this gateway: every model id is passed through verbatim to the upstream, and
+# the catalogue is served straight from the upstream/free snapshot. An empty
+# tuple means "no alias layer at all" — the registry then runs as a pure
+# passthrough (resolve/public_id are identity), which is exactly the owner's
+# contract. Do not reintroduce an alias here.
+DEFAULT_PUBLIC_MODELS: tuple[str, ...] = ()
 
 # Admin API keys: permanent, can manage the dynamic key store via /admin/*.
 # This is a clearly-fake LOCAL DEV placeholder, never a real credential (see

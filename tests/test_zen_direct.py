@@ -255,25 +255,38 @@ async def test_body_marker_renders_requested_model_not_capture_model() -> None:
 
 
 @pytest.mark.asyncio
-async def test_zen_model_map_rewrites_public_alias_to_free_id() -> None:
-    """Round 5: the free tier only serves `-free` suffixed bare ids; a paid
-    bare id answers 401 AuthError "Missing API key" — the exact-map hit must
-    win over provider-prefix stripping.
+async def test_zen_model_passthrough_and_explicit_map() -> None:
+    """2026-11-17 (owner): no alias translation any more.
+
+    The historical PUBLIC_MODELS branch that turned
+    ``deepseek-ai/deepseek-v4.1-flash`` into ``big-pickle`` is removed, so no
+    catalogue entry can rewrite an id. What remains is opencode's own
+    provider-prefix strip (the upstream catalogue serves bare ids and rejects
+    ``opencode/x`` with 401) plus an explicit ZEN_MODEL_MAP override.
     """
-    adapter = ZenDirectAdapter(
-        make_settings(
-            zen_model_map={
-                "deepseek-ai/deepseek-v4.1-flash": "deepseek-v4.1-flash-free",
-            }
-        )
-    )
-    assert adapter._zen_model("deepseek-ai/deepseek-v4.1-flash") == (
+    adapter = ZenDirectAdapter(make_settings())
+    # bare upstream ids are forwarded untouched
+    assert adapter._zen_model("big-pickle") == "big-pickle"
+    assert adapter._zen_model("deepseek-v4.1-flash-free") == (
         "deepseek-v4.1-flash-free"
     )
-    # unmapped ids keep the legacy strip-provider behaviour
+    assert adapter._zen_model("glm-5.3-flash-free") == "glm-5.3-flash-free"
+    # provider prefix is stripped exactly like opencode does (upstream serves
+    # bare ids; "opencode/big-pickle" answers 401 upstream)
     assert adapter._zen_model("opencode/big-pickle") == "big-pickle"
-    assert adapter._zen_model("big-pickle") == "big-pickle"
     assert adapter._zen_model(None) == "big-pickle"
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_zen_model_map_override_wins() -> None:
+    """An explicit ZEN_MODEL_MAP still rewrites, for operators who need it."""
+    adapter = ZenDirectAdapter(
+        make_settings(
+            zen_model_map={"some-id": "deepseek-v4.1-flash-free"},
+        )
+    )
+    assert adapter._zen_model("some-id") == "deepseek-v4.1-flash-free"
     await adapter.aclose()
 
 

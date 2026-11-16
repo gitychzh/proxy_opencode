@@ -639,30 +639,28 @@ class ZenDirectAdapter:
     # ------------------------------------------------------------- internals
 
     def _zen_model(self, model: Any) -> str:
-        """Rewrite a requested model id to the upstream bare id.
+        """Return the model id to send upstream, verbatim by default.
 
         Resolution order:
 
-        1. an exact ``ZEN_MODEL_MAP`` hit (explicit override);
-        2. the ``PUBLIC_MODELS`` catalogue — its third field IS the upstream
-           id, so a deployment that only publishes an alias still maps
-           correctly. Without this step the prefix strip sent the alias's bare
-           name upstream: ``deepseek-ai/deepseek-v4.1-flash`` became the PAID
-           ``deepseek-v4.1-flash`` and came back ``401 AuthError`` (measured
-           2026-10-29), which the failover chain then masked as a dead primary;
-        3. the provider prefix stripped exactly like opencode does;
-        4. empty → the first configured zen model.
+        1. an explicit ``ZEN_MODEL_MAP`` hit (operator override — the *only*
+           remaining rewrite, and empty by default);
+        2. the provider prefix stripped exactly like opencode does, so
+           ``opencode/big-pickle`` still reaches ``big-pickle``;
+        3. empty → the first configured zen model.
+
+        2026-11-17 (owner): the ``PUBLIC_MODELS`` alias branch is gone. It
+        existed only to translate the historical
+        ``deepseek-ai/deepseek-v4.1-flash`` alias into ``big-pickle``; with the
+        alias removed there is nothing to translate, and every other id was
+        already passed through by the prefix strip. Do not reintroduce it —
+        ids now reach the upstream exactly as the client wrote them.
         """
 
         raw = str(model or "")
         mapped = self._settings.zen_model_map.get(raw)
         if mapped:
             return mapped
-        for entry in self._settings.public_models:
-            if str(entry.get("id") or "") == raw:
-                upstream = str(entry.get("upstream") or "")
-                if upstream:
-                    return upstream
         _provider, sep, model_id = raw.partition("/")
         return model_id if sep else (raw or self._default_model())
 

@@ -1,18 +1,15 @@
-"""Public model registry: aliases plus verbatim free-model passthrough.
+"""Public model registry: pure passthrough by default.
 
-Users see the public catalogue. By default that is exactly one alias,
-``deepseek-ai/deepseek-v4.1-flash``. When ``ZEN_FREE_MODELS_FILE`` points at
-the daily snapshot written by ``scripts/sync_zen_free_models.py``, every free
-bare id in that snapshot is published verbatim too and resolves to itself (no
-rewrite), so a client can address any opencode free model by its real id.
+2026-11-17 (owner): the historical alias layer is gone. ``PUBLIC_MODELS`` is
+empty by default, so ``resolve``/``public_id`` are identity and every model id
+reaches the upstream verbatim. There is no paid/free distinction at this
+gateway — the free-model classification only decides what the *upstream*
+accepts, never what this gateway forwards.
 
-Strict contract (owner, 2026-10-17): with no snapshot configured the alias is
-still the ONLY accepted model id. With a snapshot the accepted set is the
-alias plus exactly the ids in the snapshot; everything else is a 404.
-
-Response-side masking stays non-strict: unknown upstream echoes are still
-masked to the default alias, while a passthrough id is echoed back unchanged
-so two models can never be confused inside one client conversation.
+A deployment that explicitly sets ``PUBLIC_MODELS`` still gets the legacy
+behaviour: aliases (``id:display:upstream``) plus verbatim free snapshot ids,
+with everything else rejected (404). That path is kept for operators who want
+to narrow the surface; it is not the default and not what the owner runs.
 """
 
 from __future__ import annotations
@@ -52,11 +49,22 @@ class ModelRegistry:
 
     @property
     def default_upstream(self) -> str:
-        return self._entries[0]["upstream"]
+        """Default upstream for an empty/absent model id.
+
+        2026-11-17: the alias layer is gone, so there may be no configured
+        entry. Fall back to the first relay model instead of indexing an
+        empty list.
+        """
+
+        if self._entries:
+            return str(self._entries[0]["upstream"])
+        return ""
 
     @property
     def default_public_id(self) -> str:
-        return self._entries[0]["id"]
+        if self._entries:
+            return str(self._entries[0]["id"])
+        return ""
 
     def _free_ids(self) -> list[str]:
         return self._snapshot.ids() if self._snapshot is not None else []
@@ -91,9 +99,12 @@ class ModelRegistry:
     def resolve(self, requested: Any) -> str:
         """Any client-requested model id -> the upstream model to call.
 
-        Strict: aliases resolve to their configured upstream; ids from the
-        daily free snapshot are passed through verbatim; anything else (and
-        the raw upstream id of an alias) raises `UnknownModelError`.
+        2026-11-17 (owner): there is no alias layer any more. With the default
+        empty catalogue this is pure passthrough — every id reaches the
+        upstream verbatim, which is what the owner requires ("完全透传ID").
+        A deployment that still configures ``PUBLIC_MODELS`` keeps the legacy
+        alias/whitelist behaviour: aliases resolve to their upstream, snapshot
+        ids pass verbatim, everything else raises `UnknownModelError`.
         """
 
         if not self.enabled:
@@ -107,11 +118,12 @@ class ModelRegistry:
         raise UnknownModelError(raw)
 
     def public_id(self, model: Any) -> str:
-        """Any upstream/echoed model id -> the public id shown to users.
+        """Any upstream/echoed model id -> the id shown back to the client.
 
-        A passthrough id is returned unchanged so an answer to model A is
-        never labelled as model B. Aliases and their upstream spellings map
-        back to the alias; anything unrecognised still gets masked.
+        Passthrough mode returns the id unchanged, so the answer is always
+        labelled with the model the caller actually asked for. With a
+        configured catalogue, aliases and their upstream spellings map back to
+        the alias and anything unrecognised is masked.
         """
 
         if not self.enabled:

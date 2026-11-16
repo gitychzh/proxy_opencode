@@ -381,7 +381,7 @@ async def test_responses_endpoint_streams_masked_events(tmp_path):
     ) as client:
         resp = await client.post(
             "/v1/responses",
-            json={"model": "deepseek-ai/deepseek-v4.1-flash", "input": "hello", "stream": True},
+            json={"model": "big-pickle", "input": "hello", "stream": True},
             headers={"Authorization": "Bearer gw-key"},
         )
     assert resp.status_code == 200
@@ -391,9 +391,8 @@ async def test_responses_endpoint_streams_masked_events(tmp_path):
     assert "event: response.created" in resp.text
     assert "event: response.in_progress" in resp.text
     assert "event: in_progress" not in resp.text
-    assert "big-pickle" not in resp.text
-    # The adapter must have received the upstream model id (bare id since the
-    # 2026-10-02 zen catalogue drift — see config.py).
+    # 2026-11-17: ids pass through, so the requested id is what the adapter
+    # receives and what the stream is labelled with.
     assert app.state.adapter.last_payload["model"] == "big-pickle"
 
 

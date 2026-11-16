@@ -160,14 +160,17 @@ def new_call(
     log_message: str = "chat completion",
     error_style: str = "openai",
 ) -> ChatCall:
-    """Resolve the model alias, whitelist-filter and build the call context.
+    """Resolve the model id and build the call context.
 
-    Strict model validation (owner requirement): an id other than the public
-    alias fails here with a protocol-shaped 404 (`model_not_found`); a
-    missing/empty id with a 400. Raises `GatewayHttpError` so the app-level
-    handler answers directly.
+    2026-11-17 (owner): there is no alias layer, so ids are forwarded verbatim
+    and the registry no longer rejects "unknown" models — the upstream decides.
+    An empty/absent id is still refused here with a protocol-shaped 400
+    (`model_required`), because forwarding "" upstream produces an opaque
+    error instead of an actionable one.
     """
     requested = str(payload.get("model") or "")
+    if not requested.strip():
+        raise GatewayHttpError(_model_error_response(requested, error_style))
     try:
         upstream = registry.resolve(requested)
     except UnknownModelError as exc:
@@ -196,15 +199,14 @@ def _model_error_response(requested: str, error_style: str) -> JSONResponse:
 
     if not requested.strip():
         message = (
-            "Request must include a 'model' id the gateway serves: use the "
-            "public alias listed by GET /v1/models."
+            "Request must include a 'model' id: use one listed by GET /v1/models."
         )
         if error_style == "anthropic":
             return anthropic_style_error(400, "invalid_request_error", message)
         return openai_error(400, message, "invalid_request_error", "model_required")
     message = (
-        f"The model '{requested}' does not exist on this gateway; use the "
-        "public alias listed by GET /v1/models."
+        f"The model '{requested}' is not served by this gateway; "
+        "use one listed by GET /v1/models."
     )
     if error_style == "anthropic":
         return anthropic_style_error(404, "invalid_request_error", message)

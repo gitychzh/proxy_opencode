@@ -25,7 +25,8 @@
 > Zone 内保留的 `223722.xyz` 根域 / `www` / `job` / `jsj`（Pages 站点）与
 > `phone`（phone 设备隧道）与网关无关，未动。
 
-聊天接口只接受公开别名 `deepseek-ai/deepseek-v4.1-flash`，上游裸 ID 返回 404。
+聊天接口接受任意模型 id 并原样透传上游（2026-11-17 起无别名层）；
+可用 id 以 `GET /v1/models` 的上游目录为准。
 
 ## 2. 凭据去向（仅索引）
 

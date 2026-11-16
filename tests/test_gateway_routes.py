@@ -122,9 +122,11 @@ async def test_chat_non_stream():
 
 @pytest.mark.asyncio
 async def test_unknown_model_rejected_404():
-    """Owner contract (2026-10-16): the model id must be exactly right —
-    unknown ids answer 404 model_not_found instead of silently serving
-    the default upstream."""
+    """2026-11-17 (owner): ids are passed through — no whitelist, no 404.
+
+    The gateway no longer decides which model ids "exist"; it forwards them and
+    lets the upstream answer. Only an empty id is refused locally (400).
+    """
     app, fake = make_app()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -135,13 +137,10 @@ async def test_unknown_model_rejected_404():
                   "messages": [{"role": "user", "content": "hi"}]},
             headers=GW_HEADERS,
         )
-    assert resp.status_code == 404
-    err = resp.json()["error"]
-    assert err["code"] == "model_not_found"
-    assert "totally-made-up-model" in err["message"]
-    assert "/v1/models" in err["message"]
-    # Never reached the adapter.
-    assert fake.last_payload is None
+    # forwarded verbatim; the adapter sees the id the client sent
+    assert resp.status_code == 200
+    assert fake.last_payload is not None
+    assert fake.last_payload["model"] == "totally-made-up-model"
 
 
 @pytest.mark.asyncio
@@ -189,9 +188,10 @@ async def test_models():
         resp = await client.get("/v1/models", headers=GW_HEADERS)
     assert resp.status_code == 200
     data = resp.json()["data"]
-    # Model masking: only the public alias is ever listed.
-    assert data[0]["id"] == "deepseek-ai/deepseek-v4.1-flash"
-    assert all(m["id"] != "opencode/big-pickle" for m in data)
+    # 2026-11-17: no alias layer — the upstream catalogue is relayed as-is.
+    ids = [m["id"] for m in data]
+    assert ids
+    assert "deepseek-ai/deepseek-v4.1-flash" not in ids
 
 
 # ------------------------------------------------- payload dump (debug)

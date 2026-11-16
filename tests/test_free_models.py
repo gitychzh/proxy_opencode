@@ -26,7 +26,7 @@ from proxy_opencode.egress.free_models import (
     update_env_key,
     write_snapshot,
 )
-from proxy_opencode.registry import ModelRegistry, UnknownModelError
+from proxy_opencode.registry import ModelRegistry
 from proxy_opencode.routes._pipeline import new_call
 
 ALIAS = "deepseek-ai/deepseek-v4.1-flash"
@@ -211,18 +211,19 @@ def _registry(tmp_path, ids=None):
     return ModelRegistry(settings, snap), state, settings
 
 
-def test_registry_without_snapshot_keeps_legacy_contract():
+def test_registry_without_alias_is_pure_passthrough():
+    """2026-11-17 (owner): no alias layer, so nothing is masked or rejected."""
     reg = ModelRegistry(Settings())
-    assert [m["id"] for m in reg.catalog()["data"]] == [ALIAS]
-    with pytest.raises(UnknownModelError):
-        reg.resolve("big-pickle")
+    assert reg.catalog()["data"] == []
+    assert reg.resolve("big-pickle") == "big-pickle"
+    assert reg.resolve(ALIAS) == ALIAS
 
 
-def test_registry_publishes_alias_plus_free_ids(tmp_path):
+def test_registry_publishes_verbatim_free_ids_only(tmp_path):
+    """No alias any more: the catalogue is exactly the free snapshot."""
     reg, _, _ = _registry(tmp_path, FREE_IDS)
     data = reg.catalog()["data"]
-    assert data[0]["id"] == ALIAS
-    assert {m["id"] for m in data[1:]} == set(FREE_IDS)
+    assert [m["id"] for m in data] == list(FREE_IDS)
     assert all(set(m) == {"id", "object", "created", "owned_by"} for m in data)
 
 
@@ -231,16 +232,21 @@ def test_registry_free_ids_are_verbatim_and_echoed_unchanged(tmp_path):
     for mid in FREE_IDS:
         assert reg.resolve(mid) == mid
         assert reg.public_id(mid) == mid
-    assert reg.resolve(ALIAS) == "big-pickle"
+    # the removed alias is no longer translated to big-pickle
+    assert reg.resolve(ALIAS) == ALIAS
     assert reg.public_id(ALIAS) == ALIAS
-    assert reg.public_id("unknown-upstream-echo") == ALIAS
 
 
-def test_registry_rejects_ids_outside_the_snapshot(tmp_path):
+def test_registry_passthrough_ignores_the_snapshot_as_a_gate(tmp_path):
+    """2026-11-17 (owner): a snapshot no longer gates anything.
+
+    It still feeds /v1/models_cus, but with no PUBLIC_MODELS the registry is a
+    pure passthrough, so ids outside the snapshot reach the upstream too (and
+    the upstream decides).
+    """
     reg, _, _ = _registry(tmp_path, FREE_IDS)
-    for raw in ("gpt-4o", "opencode/big-pickle", "", None):
-        with pytest.raises(UnknownModelError):
-            reg.resolve(raw)
+    for raw in ("gpt-4o", "opencode/big-pickle"):
+        assert reg.resolve(raw) == raw
 
 
 def test_registry_follows_a_snapshot_rewrite_without_a_restart(tmp_path):
@@ -250,8 +256,8 @@ def test_registry_follows_a_snapshot_rewrite_without_a_restart(tmp_path):
     _bump(state)
     assert reg.resolve("new-free") == "new-free"
     assert reg.public_id("new-free") == "new-free"
-    with pytest.raises(UnknownModelError):
-        reg.resolve("mimo-v2.6-flash-free")
+    # passthrough: an id dropped from the snapshot still resolves verbatim
+    assert reg.resolve("mimo-v2.6-flash-free") == "mimo-v2.6-flash-free"
 
 
 def test_new_call_keeps_free_id_on_both_legs(tmp_path):
@@ -297,8 +303,9 @@ async def test_models_endpoint_publishes_every_free_id(tmp_path):
         )
     ids = [m["id"] for m in resp.json()["data"]]
     assert resp.status_code == 200
-    assert ids[0] == ALIAS
-    assert set(ids[1:]) == set(FREE_IDS)
+    # 2026-11-17: no alias layer, so /v1/models mirrors the upstream list
+    # (the snapshot feeds models_cus, not the standard catalogue)
+    assert ids
 
 
 # ------------------------------------------------------------ CLI drift guard

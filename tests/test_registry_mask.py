@@ -25,41 +25,29 @@ def make_registry(**kw) -> ModelRegistry:
 ALIAS = "deepseek-ai/deepseek-v4.1-flash"
 
 
-def test_default_catalogue_has_single_public_model():
+def test_default_catalogue_is_pure_passthrough():
+    """2026-11-17 (owner): no alias layer by default.
+
+    The historical "big-pickle disguised as deepseek-ai/deepseek-v4.1-flash"
+    alias is removed. With the default empty catalogue the registry is a pure
+    passthrough: nothing is masked, and any id is forwarded verbatim.
+    """
+
     reg = make_registry()
-    assert reg.enabled
-    cat = reg.catalog()
-    ids = [m["id"] for m in cat["data"]]
-    assert ids == [ALIAS]
-    # Strictly standard OpenAI model shape: no gateway extras (hermes and
-    # other discovery agents consume this body unmodified).
-    assert set(cat["data"][0]) == {"id", "object", "created", "owned_by"}
-    assert cat["data"][0]["object"] == "model"
+    assert not reg.enabled
+    assert reg.catalog()["data"] == []
+    # every id reaches the upstream exactly as the client wrote it
+    for raw in ("big-pickle", ALIAS, "deepseek-v4.1-flash-free", "gpt-4o"):
+        assert reg.resolve(raw) == raw
+        assert reg.public_id(raw) == raw
 
 
-def test_resolve_maps_any_requested_model_to_upstream():
+def test_passthrough_never_rewrites_the_alias():
+    """The old alias must NOT be translated to big-pickle any more."""
+
     reg = make_registry()
-    assert reg.resolve(ALIAS) == "big-pickle"
-    # 2026-10-17 (owner): only the public alias is addressable. The raw
-    # upstream id is rejected exactly like any other unknown id, and the
-    # historical "opencode/…" spelling never was valid upstream.
-    for raw in ("big-pickle", "opencode/big-pickle", "space-bunny-free"):
-        with pytest.raises(UnknownModelError):
-            reg.resolve(raw)
-    with pytest.raises(UnknownModelError):
-        reg.resolve("gpt-4o")
-    with pytest.raises(UnknownModelError):
-        reg.resolve("")
-    with pytest.raises(UnknownModelError):
-        reg.resolve(None)
-
-
-def test_public_id_masks_every_upstream_echo():
-    reg = make_registry()
-    assert reg.public_id("big-pickle") == ALIAS
-    assert reg.public_id("opencode/big-pickle") == ALIAS
-    assert reg.public_id("whatever-upstream-echoes") == ALIAS
-    assert reg.public_id(ALIAS) == ALIAS
+    assert reg.resolve(ALIAS) == ALIAS
+    assert reg.resolve(ALIAS) != "big-pickle"
 
 
 def test_mask_off_is_passthrough():
