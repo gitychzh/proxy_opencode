@@ -92,6 +92,17 @@ CLI 429 = 上游真节流（换 IP 重置额度）。该对照已自动化为常
 JSONL；`--auto-rotate` 在 CLI 确认后调用管理面换 IP）。CLI 版本漂移由
 每日同步脚本检查（npm latest != 固定 pin 时 journal 告警）。
 
+**2026-11-17 判据补充（代码已落地，0.8.34）**：**多桶同窗硬 429 本身就是
+共享池阵发的直接证据，无需再跑 CLI 对照**——独立 per-IP 配额耗尽不可能在
+同一秒级窗口命中多家运营商。实测 15:49:10-13 UTC：cc9 / owin10-mobile /
+owin10-telecom 三家 3 秒内一起 429（`Retry-After` 29448-29450s），15:49:21
+同一台 telecom 即 200 并解除 cordon。`EgressPool` 现在按
+`>= 2 个不同桶在 ZEN_QUOTA_BURST_WINDOW_S(10s) 内硬 429` 判
+`free_quota_burst`（静默 `ZEN_QUOTA_BURST_CORDON_S=45s`），并把同窗内已判
+`free_quota_exhausted` 的桶回溯缩短（账本 `cordon_shortened`）；同桶连续 2 次
+burst 判决后升级回 600s 日配额。**看到 `cordon_reason=free_quota_burst`
+不要查额度**。单桶孤立硬 429 仍按日配额处置（600s）。
+
 **排障红线**：桶出口上**成功（200）**的活体调用会消耗该 IP 当日额度——实验少而
 精、clone-first（原样先行）；429/403/401/传输失败不烧额度。
 
