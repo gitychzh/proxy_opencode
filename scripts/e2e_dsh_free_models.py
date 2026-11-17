@@ -28,6 +28,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from proxy_opencode.model_profile import profile
+
 TASK = "Reply with exactly the single word OK and nothing else."
 DEFAULT_BASE_URL = "http://115.29.231.25:10002/v1"
 
@@ -60,7 +62,8 @@ def _dsh_model_entry(mid: str) -> str:
 
     prof = _profile(mid)
     if prof is None:
-        context, output, efforts, attachment = 131_072, 32_768, (), False
+        context, output, attachment = 131_072, 32_768, False
+        efforts: tuple[str, ...] = ()
         modalities = ["text"]
     else:
         context = prof.limits.context
@@ -83,7 +86,12 @@ def _dsh_model_entry(mid: str) -> str:
     ]
     if efforts:
         lines.append("            reasoningEfforts:")
-        lines.extend(f"              {e}: {e}" for e in efforts)
+        # DSH's llm-pi-ai schema rejects "none" as an effort key (it uses
+        # "off"); the upstream catalogue publishes "none" for thinking-off.
+        # Map the key to DSH's "off" while keeping the upstream wire value.
+        lines.extend(
+            f"              {'off' if e == 'none' else e}: {e}" for e in efforts
+        )
     supports_effort = "true" if efforts else "false"
     lines.extend(
         [
@@ -170,9 +178,20 @@ def main() -> int:
     results: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="dsh_cus_oc_") as tmp:
         for index, mid in enumerate(ids, 1):
+            # Models that reason but publish no effort ladder (efforts == ())
+            # reject an explicit "high": omit the field so DSH uses the
+            # model's default reasoning. Models with a ladder prefer "high".
+            prof = profile(mid)
+            if prof is not None and prof.capabilities.efforts:
+                effort = "high" if "high" in prof.capabilities.efforts else (
+                    prof.capabilities.efforts[0]
+                )
+            else:
+                effort = None
             patch = Path(tmp) / f"model_{index}.yml"
             patch.write_text(
-                _patch(args.base_url, ids, mid), encoding="utf-8"
+                _patch(args.base_url, ids, mid, reasoning_effort=effort),
+                encoding="utf-8",
             )
             started = time.perf_counter()
             try:
