@@ -39,6 +39,7 @@ import httpx
 
 from ...config import Settings
 from ...egress.pool import EgressPool, Lease, PoolExhausted
+from ...model_profile import estimate_upstream_tokens
 from ...model_profile import profile as model_profile
 from ..openai_http import ResponseLike, StreamRelay, _raw_relay_body
 from ..zen_bun_transport import BunTransport, BunTransportError
@@ -437,7 +438,7 @@ class ZenDirectAdapter:
             result = _raw_relay_body(resp.status_code, raw)
             await self._release_for_status(resp.status_code, resp.headers, result, lease)
             return result
-        return await self._consume_ok(resp, model, stream, lease)
+        return await self._consume_ok(resp, model, stream, lease, body)
 
     async def _exchange_via_httpx(
         self,
@@ -479,7 +480,7 @@ class ZenDirectAdapter:
             result = _raw_relay_body(resp.status_code, raw)
             await self._release_for_status(resp.status_code, resp.headers, result, lease)
             return result
-        return await self._consume_ok(resp, model, stream, lease)
+        return await self._consume_ok(resp, model, stream, lease, body)
 
     async def _consume_ok(
         self,
@@ -487,11 +488,14 @@ class ZenDirectAdapter:
         model: str,
         stream: bool,
         lease: Lease | None,
+        body: Mapping[str, Any] | None = None,
     ) -> Any:
         """Relay a streaming answer, or aggregate a non-streaming one."""
 
         if stream:
-            return self._stream_relay(resp, float(self._settings.stream_stall_s), lease)
+            return self._stream_relay(
+                resp, float(self._settings.stream_stall_s), lease, body
+            )
         try:
             result = await aggregate_sse(
                 resp, model, stall_s=float(self._settings.stream_stall_s)
@@ -570,12 +574,28 @@ class ZenDirectAdapter:
             )
 
     def _stream_relay(
-        self, resp: ResponseLike, stall_s: float, lease: Lease | None
+        self,
+        resp: ResponseLike,
+        stall_s: float,
+        lease: Lease | None,
+        body: Mapping[str, Any] | None = None,
     ) -> StreamRelay:
         """Build the streaming relay + pool release hook (shared transports)."""
 
+        # The free tier sends no usage frame on a streaming answer, so the
+        # relay synthesises one from the request we actually sent (marker and
+        # merged tool catalogue included).
+        estimate = (
+            None
+            if body is None
+            else (
+                lambda: estimate_upstream_tokens(
+                    body.get("messages") or [], body.get("tools") or ()
+                )
+            )
+        )
         if lease is None:
-            return StreamRelay(resp, {}, stall_s=stall_s)
+            return StreamRelay(resp, {}, stall_s=stall_s, estimate_prompt=estimate)
         pool = self._pool
         assert pool is not None
         held: Lease = lease
@@ -591,7 +611,9 @@ class ZenDirectAdapter:
                 )
             await pool.release(held, ok=ok, kind=kind)
 
-        return StreamRelay(resp, {}, on_close=_released, stall_s=stall_s)
+        return StreamRelay(
+            resp, {}, on_close=_released, stall_s=stall_s, estimate_prompt=estimate
+        )
 
     def _header_deadline_s(self, lease: Lease | None) -> float:
         """Response-header deadline for THIS attempt (see ZEN_TTFB_DEMOTED_S).

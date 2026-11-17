@@ -172,14 +172,40 @@ def test_off_mode_leaves_the_field_untouched():
 # ---------------------------------------------------------- context guard
 
 
-def test_prompt_past_the_input_limit_is_refused_locally():
+def test_prompt_past_the_input_window_is_refused_locally():
+    # ICEMAN has no measured free-tier character gate, so the token window is
+    # the only limit in play (the gated ids are covered below).
+    iceman = profile("iceman-free")
     body = _body(messages=[{"role": "user", "content": "x" * 1_200_000}])
+    with pytest.raises(ContextOverflow) as excinfo:
+        apply_request_policy(body, profile=iceman)
+    err = excinfo.value
+    assert err.input_limit == 262_144
+    assert err.estimated_tokens > 262_144
+    assert "262144" in str(err)
+
+
+def test_free_tier_character_gate_refuses_far_below_the_token_window():
+    # Live 2026-11-17/18: these four ids answer 400 above
+    # round(chars * 0.33966) > 32000 while advertising a 200k token window —
+    # the gate admits 8.5x less than the window, so the character ceiling has
+    # to be enforced first or every oversized prompt burns an upstream call.
+    assert BIG_PICKLE is not None and BIG_PICKLE.limits.prompt_chars > 0
+    body = _body(messages=[{"role": "user", "content": "x" * 120_000}])
     with pytest.raises(ContextOverflow) as excinfo:
         apply_request_policy(body, profile=BIG_PICKLE)
     err = excinfo.value
-    assert err.input_limit == 261_000
-    assert err.estimated_tokens > 261_000
-    assert "261000" in str(err)
+    assert err.input_limit == 32_000
+    assert err.estimated_tokens == round(120_000 * 0.33966)
+    assert err.context_limit == 262_139
+    # the compaction ceiling still speaks the client's own currency
+    assert err.compaction_ceiling == BIG_PICKLE.ceiling()
+
+
+def test_prompt_under_the_character_gate_is_forwarded():
+    body = _body(messages=[{"role": "user", "content": "x" * 90_000}])
+    applied = apply_request_policy(body, profile=DEEPSEEK)
+    assert applied.estimated_input == round(90_000 / 4)
 
 
 def test_guard_measures_the_composed_body_including_injected_tools():
@@ -203,12 +229,24 @@ def test_guard_can_be_disabled():
     assert applied.estimated_input > 160_000
 
 
-def test_input_limit_override_moves_the_boundary():
-    # 1_200_000 chars / 4 == 300_000 tokens: past the override, not past 160k.
+def test_input_limit_override_moves_the_token_boundary():
+    # 1_200_000 chars / 4 == 300_000 tokens: past the override, not past 262k.
+    # The override tunes the *token* window; a measured character gate is a
+    # vendor fact and no configuration can raise it, so this uses ICEMAN.
+    iceman = profile("iceman-free")
     body = _body(messages=[{"role": "user", "content": "x" * 1_200_000}])
     with pytest.raises(ContextOverflow) as excinfo:
-        apply_request_policy(body, profile=BIG_PICKLE, input_limit_override=250_000)
+        apply_request_policy(body, profile=iceman, input_limit_override=250_000)
     assert excinfo.value.input_limit == 250_000
+
+
+def test_character_gate_survives_an_input_limit_override():
+    # Raising the token window must not re-open traffic the vendor rejects by
+    # character count: the gate is not a tuning knob.
+    body = _body(messages=[{"role": "user", "content": "x" * 120_000}])
+    with pytest.raises(ContextOverflow) as excinfo:
+        apply_request_policy(body, profile=BIG_PICKLE, input_limit_override=500_000)
+    assert excinfo.value.input_limit == 32_000
 
 
 def test_unknown_model_gets_no_invented_limits():

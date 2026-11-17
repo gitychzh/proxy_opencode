@@ -17,10 +17,12 @@ from typing import Any, AsyncGenerator, AsyncIterator, Awaitable, Callable, Prot
 import httpx
 
 from ..config import Settings
+from ..model_profile import estimate_completion_tokens, estimate_upstream_tokens
 
 logger = logging.getLogger("proxy_opencode.stream")
 
 _CHUNK_ID_RE = re.compile(rb'"id":"([^"]+)"')
+_CHUNK_MODEL_RE = re.compile(rb'"model":"([^"]+)"')
 
 # Stream end outcomes, passed to the close hook exactly once when the relay
 # finishes, however it finishes:
@@ -87,9 +89,16 @@ class StreamRelay:
         on_close: CloseHook | None = None,
         *,
         stall_s: float = 0.0,
+        estimate_prompt: Callable[[], int] | None = None,
     ) -> None:
         self.response = resp
         self.usage_holder = usage_holder
+        # Billed-prompt-token estimate for this request, used to synthesise the
+        # usage frame the upstream never sends on a streaming answer.
+        self._estimate_prompt = estimate_prompt
+        # Generated characters seen in the relaying deltas (completion price).
+        self._completion_chars = 0
+        self._reasoning_chars = 0
         # Set after chunks() ran: True when the terminal chunk was synthesised.
         self.stream_cut = False
         # Final outcome of _stream() (see CloseHook): None until it ends;
@@ -146,9 +155,45 @@ class StreamRelay:
         saw_finish = False
         saw_done = False
         last_id = b""
+        last_model = b""
+
+        def count_delta(payload: bytes) -> None:
+            """Price the generated text of one delta (completion accounting)."""
+
+            try:
+                data = json.loads(payload)
+            except Exception:
+                return
+            if not isinstance(data, dict):
+                return
+            choices = data.get("choices")
+            if not isinstance(choices, list):
+                return
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                delta = choice.get("delta")
+                if not isinstance(delta, dict):
+                    continue
+                for key in ("content", "reasoning_content"):
+                    value = delta.get(key)
+                    if isinstance(value, str) and value:
+                        self._completion_chars += len(value)
+                        if key == "reasoning_content":
+                            self._reasoning_chars += len(value)
+                calls = delta.get("tool_calls")
+                if isinstance(calls, list):
+                    for call in calls:
+                        fn = (call or {}).get("function") if isinstance(call, dict) else None
+                        if not isinstance(fn, dict):
+                            continue
+                        for key in ("name", "arguments"):
+                            value = fn.get(key)
+                            if isinstance(value, str) and value:
+                                self._completion_chars += len(value)
 
         def scan_line(line: bytes) -> None:
-            nonlocal saw_finish, saw_done, last_id
+            nonlocal saw_finish, saw_done, last_id, last_model
             stripped = line.strip()
             if not stripped.startswith(b"data:"):
                 return
@@ -160,6 +205,10 @@ class StreamRelay:
                 match = _CHUNK_ID_RE.search(stripped)
                 if match:
                     last_id = match.group(1)
+            if not last_model and b'"model":"' in stripped:
+                match = _CHUNK_MODEL_RE.search(stripped)
+                if match:
+                    last_model = match.group(1)
             if b"usage" in stripped:
                 try:
                     data = json.loads(payload)
@@ -167,6 +216,8 @@ class StreamRelay:
                     data = None
                 if isinstance(data, dict) and data.get("usage"):
                     self.usage_holder["usage"] = data["usage"]
+            if b'"delta"' in stripped:
+                count_delta(payload)
             # A terminal chunk carries a non-null finish_reason. Zen emits
             # compact JSON (`"finish_reason":"stop"` / `"finish_reason":null`),
             # so the quoted-value form is a conservative signal: missing a
@@ -254,6 +305,45 @@ class StreamRelay:
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}],
             }
             yield f"data: {json.dumps(synth, separators=(',', ':'))}\n\n".encode()
+        if not self.usage_holder.get("usage") and self._estimate_prompt is not None:
+            # Streaming answers from the free tier carry no usage frame at all
+            # (verified 2026-11-18: plain content chunks, terminal
+            # finish_reason, no `choices: []` usage frame), so a client that
+            # prices context from `usage` stays at zero tokens for the whole
+            # session and can never see how close it is to the prompt gate.
+            # Emit one OpenAI-shaped frame derived from the request itself;
+            # `estimated: true` keeps the provenance explicit for anyone
+            # reading the numbers as a bill.
+            prompt_tokens = max(0, int(self._estimate_prompt()))
+            completion_tokens = estimate_completion_tokens(self._completion_chars)
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "prompt_tokens_details": {
+                    "cached_tokens": 0,
+                    "text_tokens": prompt_tokens,
+                    "image_tokens": 0,
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": estimate_completion_tokens(
+                        self._reasoning_chars
+                    )
+                },
+                "estimated": True,
+            }
+            self.usage_holder["usage"] = usage
+            frame = {
+                "id": last_id.decode("utf-8", "replace")
+                if last_id
+                else f"chatcmpl-zen-{secrets.token_hex(8)}",
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": last_model.decode("utf-8", "replace"),
+                "choices": [],
+                "usage": usage,
+            }
+            yield f"data: {json.dumps(frame, ensure_ascii=False)}\n\n".encode()
         if not saw_done:
             yield b"data: [DONE]\n\n"
 
@@ -298,7 +388,14 @@ class OpenAIHttpAdapter:
                 body = await resp.aread()
                 await resp.aclose()
                 return _raw_relay_body(resp.status_code, body)
-            return StreamRelay(resp, {}, stall_s=self._settings.stream_stall_s)
+            return StreamRelay(
+                resp,
+                {},
+                stall_s=self._settings.stream_stall_s,
+                estimate_prompt=lambda: estimate_upstream_tokens(
+                    payload.get("messages") or [], payload.get("tools") or ()
+                ),
+            )
 
         try:
             resp = await self.client.post("/v1/chat/completions", json=payload)

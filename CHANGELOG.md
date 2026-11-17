@@ -5,6 +5,34 @@
 
 ## [Unreleased]
 
+### Fixed — 流式作答补齐 usage；免费层的字符门在本地就拦（0.8.35，2026-11-18）
+
+用户报两件事：「DSH 里 token 数一直是 0」「deepseek 一用就触发上下文压缩，然后
+挂掉」。两件都是量纲/协议问题，证据在下面。
+
+- **流式回答上游根本不发 usage。** `stream_options.include_usage` 已经强制写进
+  上游 body（`zen/body.py`），但 2026-11-18 实测同一请求：非流式正常返回
+  `prompt_tokens: 62,807`，流式只给 8 个内容 chunk + 终止 `finish_reason`，没有
+  任何 `choices: []` 的 usage 帧。凡是从 usage 读上下文的客户端（DSH 的
+  `token-meter` 就是）只能永远读到 0，也就永远看不见自己离门还有多远。
+  `StreamRelay` 现在在终止帧之后补一帧 OpenAI 形状的 usage（`choices: []`、
+  `estimated: true`）：prompt 侧走 `estimate_upstream_tokens`（CJK 0.70 tok/char、
+  ASCII 0.28，对 11-17 的 71,238 与 11-18 的 62,807 两次实测分别差 -8.5%/+3.8%），
+  completion 侧按流内实际生成字符数折算。上游真给了 usage 时一律不合成。
+- **免费层的 prompt 门是字符门。** `round(chars * 0.33966) <= 32000`，与模型、
+  语言、内容类型都无关：92,675 chars 过、94,442 拒，四个 id 完全同门（11-17 与
+  11-18 两次二分一致）。旧 guard 拿 opencode 的 `chars/4` 去比 200,000 token
+  窗口，等于放行 8.5 倍，必然打到上游 400 再吃一次出口租约。`Limits.prompt_chars`
+  记实测字符上限（94,200），`apply_request_policy` 先按字符判，超了就用上游原文
+  措辞（`at most 32000 prompt tokens ... about N prompt tokens`）本地拒绝。
+  `input_limit_override` 调的是 token 窗，抬不开这道物理门。
+
+客户端侧配套（不在本仓库）：DSH 的 `compaction-basic` 用 chars/4 估算，bundle
+默认阈值落在 102,464 估算 tokens（~409,000 chars），远在天边，所以只会在 400
+之后走 overflow 压缩；而 overflow 的摘要请求要带 46 个工具定义（38,913 chars）
++ 待摘要历史，同样超门，压缩于是必然失败。DSH 侧已按 23,000 估算 tokens
+（~92,000 chars，门内 2.5%）重新定阈值，保留 4,000。
+
 ### Fixed — 共享池阵发节流不再被误判为日配额：一次 3 秒抖动不再变成 10 分钟全池停机（0.8.34，2026-11-17）
 
 用户报「三桶都没怎么用，却被告知额度耗尽」。账本证据：2026-11-17

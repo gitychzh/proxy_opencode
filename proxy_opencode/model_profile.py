@@ -35,6 +35,17 @@ from typing import Any, Iterable, Mapping
 
 # opencode: packages/core/src/util/token.ts
 CHARS_PER_TOKEN = 4
+# Free-tier prompt gate, measured 2026-11-17 and re-verified 2026-11-18 on the
+# same 92,675/94,442-char bisection across four ids: the vendor answers 400
+# with "at most 32000 prompt tokens are accepted ... about <n> prompt tokens"
+# where `n = round(chars * 0.33966)`. The gate is content-agnostic (CJK, Latin
+# and code all bill the same per character), which is why the character
+# ceiling — not any token count — is the binding limit for these ids.
+GATE_PROMPT_TOKENS = 32_000
+GATE_CHARS_RATIO = 0.33966
+#: Largest prompt the gate admits: 94,211 chars; the 94,442-char probe was
+#: rejected and the 92,675-char probe accepted, so 94,200 is the measured edge.
+GATE_PROMPT_CHARS = 94_200
 # opencode: session/compaction.ts — reserve below the input limit before compacting.
 RESERVE_SHARE = 0.15
 RESERVE_MIN = 16_000
@@ -54,6 +65,11 @@ class Limits:
     context: int = 0
     input: int = 0
     output: int = 0
+    #: Measured *character* ceiling of the free tier's prompt gate: the vendor
+    #: rejects at ``round(chars * GATE_CHARS_RATIO) > GATE_PROMPT_TOKENS``, a
+    #: content-agnostic rule that no token count can express. 0 = not measured,
+    #: in which case the gateway enforces nothing beyond the token window.
+    prompt_chars: int = 0
 
     def window(self) -> int:
         """The window used for budgeting: the input limit wins (opencode)."""
@@ -104,6 +120,9 @@ class ModelProfile:
                 "context": self.limits.context,
                 "input": self.limits.input,
                 "output": self.limits.output,
+                # Measured free-tier character ceiling of the prompt gate; 0
+                # when this id's gate has never been bisected.
+                "prompt_chars": self.limits.prompt_chars,
             },
             "capabilities": {
                 "tools": cap.tools,
@@ -149,7 +168,12 @@ _PROFILES: dict[str, ModelProfile] = {
     # the CLI exposes no thinking-strength switch for it, so neither do we.
     "big-pickle": ModelProfile(
         id="big-pickle",
-        limits=Limits(context=262_139, input=261_000, output=32_000),
+        limits=Limits(
+            context=262_139,
+            input=261_000,
+            output=32_000,
+            prompt_chars=GATE_PROMPT_CHARS,
+        ),
         capabilities=Capabilities(
             tools=True,
             reasoning=True,
@@ -164,14 +188,14 @@ _PROFILES: dict[str, ModelProfile] = {
     # tokens all 200, no rejection (soft edge, heterogeneous pool).
     "deepseek-v4.1-flash-free": ModelProfile(
         id="deepseek-v4.1-flash-free",
-        limits=Limits(context=200_000, output=32_000),
+        limits=Limits(context=200_000, output=32_000, prompt_chars=GATE_PROMPT_CHARS),
         capabilities=Capabilities(reasoning=True, efforts=("low", "high", "max")),
     ),
     # 2026-11-14: declared 200000; live 280,511 prompt tokens accepted 5/5,
     # no rejection (soft edge, heterogeneous pool).
     "glm-5.3-flash-free": ModelProfile(
         id="glm-5.3-flash-free",
-        limits=Limits(context=200_000, output=32_000),
+        limits=Limits(context=200_000, output=32_000, prompt_chars=GATE_PROMPT_CHARS),
         capabilities=Capabilities(reasoning=True, efforts=("low", "high", "max")),
     ),
     # 2026-11-14: declared 1,000,000; live probe accepted exactly
@@ -179,7 +203,7 @@ _PROFILES: dict[str, ModelProfile] = {
     # message "context window exceeds limit". Floor: 1,000,000.
     "minimax-m3.1-flash-free": ModelProfile(
         id="minimax-m3.1-flash-free",
-        limits=Limits(context=1_000_000, output=512_000),
+        limits=Limits(context=1_000_000, output=512_000, prompt_chars=GATE_PROMPT_CHARS),
         capabilities=Capabilities(
             reasoning=True,
             efforts=("low", "medium", "high", "xhigh", "max"),
@@ -387,6 +411,134 @@ def _compact_json(value: Any) -> str:
         return ""
 
 
+# ------------------------------------------------- upstream prompt accounting
+#
+# The free tier charges prompts in two different currencies and clients see
+# whichever one the transport happens to carry:
+#
+#   * the *gate*: ``about = round(chars * 0.339) <= 32000`` — content-agnostic,
+#     which is why four models share the exact same ~94,395-char ceiling
+#     (2026-11-17 and 2026-11-18 bisections agree);
+#   * the *bill*: ``usage.prompt_tokens`` from the vendor tokenizer — measured
+#     0.678 tokens/char on 92,675 chars of natural Chinese (62,807 billed),
+#     0.67-0.89 t/char across the 2026-11-18 shots.
+#
+# Streaming answers carry no usage at all upstream (verified 2026-11-18: eight
+# content chunks, terminal finish, no ``choices: []`` usage frame), so a
+# streaming client otherwise reports zero tokens forever. The relay therefore
+# synthesises one usage frame from this estimator; it is billed-token shaped,
+# not gate-shaped, so a client's "context used" reading matches the vendor's
+# own numbers to within a few percent instead of being 2.7x low.
+
+#: Billed prompt tokens per CJK character. Two bisections of the same 92,675
+#: chars of natural Chinese billed 62,807 (2026-11-18) and 71,238 (2026-11-17)
+#: — the pool's tokenizer/backend mix moves the ratio by ~13%, so 0.70 is the
+#: midpoint: high by 3.8% on the low sample, low by 8.5% on the high one.
+CJK_TOKEN_RATIO = 0.70
+#: Billed prompt tokens per ASCII/code character (~3.6 chars per token).
+ASCII_TOKEN_RATIO = 0.28
+#: Fixed framing cost: role markers, tool JSON wrapper, chat template.
+PROMPT_OVERHEAD_TOKENS = 300
+#: Billed completion tokens per generated character (CJK-heavy answers).
+COMPLETION_TOKEN_RATIO = 0.6
+
+
+def _cjk_chars(text: str) -> int:
+    """Count characters the vendor tokenizer bills near one token each."""
+
+    count = 0
+    for ch in text:
+        cp = ord(ch)
+        if (
+            0x3000 <= cp <= 0x303F  # CJK punctuation
+            or 0x3400 <= cp <= 0x4DBF  # extension A
+            or 0x4E00 <= cp <= 0x9FFF  # unified ideographs
+            or 0xF900 <= cp <= 0xFAFF  # compatibility ideographs
+            or 0xFF00 <= cp <= 0xFF60  # fullwidth forms
+            or 0xFFE0 <= cp <= 0xFFE6
+        ):
+            count += 1
+    return count
+
+
+def _iter_prompt_text(
+    messages: Iterable[Any], tools: Iterable[Any] | None = None
+) -> Iterable[str]:
+    """Every model-visible string of a request, for density accounting."""
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        text = _text_of(message.get("content"))
+        if text:
+            yield text
+        calls = message.get("tool_calls")
+        if isinstance(calls, list):
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                fn = call.get("function")
+                if not isinstance(fn, dict):
+                    continue
+                for key in ("name", "arguments"):
+                    value = fn.get(key)
+                    if isinstance(value, str) and value:
+                        yield value
+    for tool in tools or ():
+        if not isinstance(tool, dict):
+            continue
+        fn = tool.get("function")
+        payload = fn if isinstance(fn, dict) else tool
+        for key in ("name", "description"):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                yield value
+        params = payload.get("parameters") or payload.get("input_schema")
+        if params is not None:
+            yield _compact_json(params)
+
+
+def prompt_chars_of(
+    messages: Iterable[Any], tools: Iterable[Any] | None = None
+) -> int:
+    """Characters the free tier's gate counts for this request.
+
+    The gate is content-agnostic, so this character total — not a token
+    estimate — is what decides whether the vendor accepts the prompt.
+    """
+
+    return sum(len(text) for text in _iter_prompt_text(messages, tools))
+
+
+def estimate_upstream_tokens(
+    messages: Iterable[Any], tools: Iterable[Any] | None = None
+) -> int:
+    """Billed prompt tokens for a request, as the vendor reports them.
+
+    Distinct from :func:`estimate_request`, which reproduces *opencode's*
+    ``chars / 4`` client-side estimate. This one is density-weighted towards
+    the vendor tokenizer so a synthesised ``usage`` block lands near the real
+    bill instead of 2.7x below it.
+    """
+
+    total = 0
+    cjk = 0
+    for text in _iter_prompt_text(messages, tools):
+        total += len(text)
+        cjk += _cjk_chars(text)
+    other = max(0, total - cjk)
+    return (
+        round(cjk * CJK_TOKEN_RATIO + other * ASCII_TOKEN_RATIO)
+        + PROMPT_OVERHEAD_TOKENS
+    )
+
+
+def estimate_completion_tokens(chars: int) -> int:
+    """Billed completion tokens for ``chars`` generated characters."""
+
+    return max(0, round(max(0, chars) * COMPLETION_TOKEN_RATIO))
+
+
 # ------------------------------------------------------------------- budgets
 
 
@@ -424,19 +576,29 @@ def output_budget(limits: Limits, estimated_input: int = 0) -> int:
 
 
 __all__ = [
+    "ASCII_TOKEN_RATIO",
     "CHARS_PER_TOKEN",
+    "CJK_TOKEN_RATIO",
+    "COMPLETION_TOKEN_RATIO",
+    "GATE_CHARS_RATIO",
+    "GATE_PROMPT_CHARS",
+    "GATE_PROMPT_TOKENS",
     "OUTPUT_TOKEN_FALLBACK",
     "OUTPUT_TOKEN_MAX",
     "OUTPUT_TOKEN_MIN",
+    "PROMPT_OVERHEAD_TOKENS",
     "UNKNOWN_WINDOW",
     "Capabilities",
     "Limits",
     "ModelProfile",
     "compaction_ceiling",
+    "estimate_completion_tokens",
     "estimate_message",
     "estimate_request",
     "estimate_text",
+    "estimate_upstream_tokens",
     "output_budget",
     "profile",
     "profiles",
+    "prompt_chars_of",
 ]

@@ -214,3 +214,59 @@ def test_every_profile_is_self_consistent(model_id):
     assert prof.limits.window() > 0
     assert prof.limits.output > 0
     assert prof.ceiling() < prof.limits.window()
+
+
+# ------------------------------------------ billed prompt accounting (usage)
+#
+# The free tier bills prompts two ways: the *gate* is content-agnostic
+# (`round(chars * 0.339) <= 32000`), the *bill* is the vendor tokenizer's
+# `usage.prompt_tokens`. Streaming answers carry no usage at all upstream
+# (2026-11-18), so the relay synthesises one from the bill-shaped estimator.
+# These expectations pin it to the two live bisections of the same 92,675-char
+# Chinese prompt: 62,807 billed tokens (2026-11-18) and 71,238 (2026-11-17).
+
+_MEASURED_PROMPT = "码头台账记载了当日到港的货物清单与验收情况，由军需官签字确认。" * 2_990
+
+
+def test_estimate_upstream_tokens_tracks_the_billed_prompt():
+    from proxy_opencode.model_profile import estimate_upstream_tokens
+
+    chars = len(_MEASURED_PROMPT)
+    assert 92_000 <= chars <= 93_000
+    estimate = estimate_upstream_tokens(
+        [{"role": "user", "content": _MEASURED_PROMPT}]
+    )
+    # Both live samples live inside this band (65k midpoint +-10%).
+    assert 58_000 <= estimate <= 72_000
+
+
+def test_estimate_upstream_tokens_counts_tools_and_ascii_density():
+    from proxy_opencode.model_profile import estimate_upstream_tokens
+
+    text_only = estimate_upstream_tokens([{"role": "user", "content": "hi"}])
+    with_tool = estimate_upstream_tokens(
+        [{"role": "user", "content": "hi"}],
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a file from disk.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+    )
+    assert with_tool > text_only
+    # ASCII/code is billed near 3.6 chars per token, not one per character.
+    ascii_only = estimate_upstream_tokens(
+        [{"role": "user", "content": "a" * 3_600}]
+    )
+    assert 900 <= ascii_only <= 1_500
+
+
+def test_estimate_completion_tokens_prices_generated_text():
+    from proxy_opencode.model_profile import estimate_completion_tokens
+
+    assert estimate_completion_tokens(0) == 0
+    assert 100 <= estimate_completion_tokens(200) <= 160

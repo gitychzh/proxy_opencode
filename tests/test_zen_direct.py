@@ -2033,3 +2033,95 @@ async def test_header_deadline_never_exceeds_the_full_window() -> None:
     state = EgressState(spec=EgressSpec("bucket-a", "http://agent:10001"))
     state.cooldown_until = time.monotonic() + 30
     assert adapter._header_deadline_s(Lease(state)) == 20.0  # noqa: SLF001
+
+
+# ------------------------------------------- synthesised streaming usage
+#
+# Live 2026-11-18: the free tier answers a streaming request with plain
+# content chunks and a terminal finish_reason, but never a `choices: []`
+# usage frame — even though `stream_options.include_usage` is forced onto the
+# upstream body. A client that prices context from `usage` therefore showed
+# zero tokens for a whole session (dsh, 2026-11-18). The relay emits one
+# OpenAI-shaped, clearly-flagged frame instead.
+
+USAGELESS_SSE = (
+    b'data: {"id":"z7","created":1,"model":"deepseek-ai/DeepSeek-V4.1-Flash-1017",'
+    b'"choices":[{"index":0,"delta":{"content":"\xe5\x9b\x9e\xe7\xad\x94"}}]}\n\n'
+    b'data: {"id":"z7","created":1,"model":"deepseek-ai/DeepSeek-V4.1-Flash-1017",'
+    b'"choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\n'
+)
+
+
+def _usage_frames(out: bytes) -> list[dict[str, Any]]:
+    frames = []
+    for line in out.split(b"\n"):
+        if not line.startswith(b"data: {"):
+            continue
+        data = json.loads(line[6:])
+        if data.get("usage"):
+            frames.append(data)
+    return frames
+
+
+@pytest.mark.asyncio
+async def test_relay_synthesises_usage_when_upstream_sends_none() -> None:
+    async def gen():
+        yield USAGELESS_SSE
+
+    relay = StreamRelay(
+        httpx.Response(200, content=gen()), {}, estimate_prompt=lambda: 60_000
+    )
+    out = b"".join([c async for c in relay.chunks()])
+    assert out.startswith(USAGELESS_SSE)  # content relayed verbatim
+    frames = _usage_frames(out)
+    assert len(frames) == 1
+    frame = frames[0]
+    assert frame["choices"] == []
+    assert frame["usage"]["prompt_tokens"] == 60_000
+    assert frame["usage"]["estimated"] is True
+    assert frame["usage"]["completion_tokens"] > 0
+    assert frame["usage"]["total_tokens"] == (
+        frame["usage"]["prompt_tokens"] + frame["usage"]["completion_tokens"]
+    )
+    # the completion belongs to the emitted frame, and the log record sees it
+    assert relay.usage_holder["usage"]["prompt_tokens"] == 60_000
+    assert out.rstrip().endswith(b"data: [DONE]")
+
+
+@pytest.mark.asyncio
+async def test_relay_never_overrides_a_real_upstream_usage() -> None:
+    sse = (
+        b'data: {"id":"z8","choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'
+        b'data: {"id":"z8","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+        b'data: {"id":"z8","choices":[],"usage":{"prompt_tokens":11,'
+        b'"completion_tokens":2,"total_tokens":13}}\n\n'
+        b'data: [DONE]\n\n'
+    )
+
+    async def gen():
+        yield sse
+
+    relay = StreamRelay(
+        httpx.Response(200, content=gen()),
+        {},
+        estimate_prompt=lambda: 60_000,  # must never win over the real bill
+    )
+    out = b"".join([c async for c in relay.chunks()])
+    assert out == sse
+    assert relay.usage_holder["usage"]["prompt_tokens"] == 11
+
+
+@pytest.mark.asyncio
+async def test_relay_usage_also_terminates_a_cut_stream() -> None:
+    # A silent cut still gets a finish chunk AND the usage frame, in that order.
+    async def gen():
+        yield CUT_SSE
+
+    relay = StreamRelay(
+        httpx.Response(200, content=gen()), {}, estimate_prompt=lambda: 1_000
+    )
+    out = b"".join([c async for c in relay.chunks()])
+    assert relay.stream_cut is True
+    assert b'"finish_reason":"length"' in out
+    assert len(_usage_frames(out)) == 1
+    assert out.rstrip().endswith(b"data: [DONE]")

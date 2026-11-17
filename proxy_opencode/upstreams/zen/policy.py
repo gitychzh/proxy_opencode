@@ -18,6 +18,12 @@ Three rules, each traceable to the source tree:
   client compacts below ``input - max(15%, 16k)``. A prompt past the input
   limit is refused here (``ContextOverflow``) instead of being sent to a
   provider that would refuse it more slowly and less legibly.
+* **free-tier prompt gate** — the four bisected ids answer 400 above
+  ``round(chars * 0.33966) > 32000``, a *character* rule that no token window
+  can express (the 200k token window admits 8.5x more than the gate). The
+  measured character ceiling is enforced here too, with the vendor's own
+  wording, so an oversized prompt costs one local refusal instead of a
+  round-trip plus an egress lease.
 """
 
 from __future__ import annotations
@@ -27,9 +33,12 @@ from typing import Any
 
 from ...errors import ContextOverflow
 from ...model_profile import (
+    GATE_CHARS_RATIO,
+    GATE_PROMPT_TOKENS,
     ModelProfile,
     estimate_request,
     output_budget,
+    prompt_chars_of,
 )
 
 # Fields a client uses to ask for a thinking strength. Names differ per
@@ -87,6 +96,24 @@ def apply_request_policy(
     dropped = _apply_reasoning_policy(body, profile, reasoning_policy)
     if profile is None:
         return Applied(dropped=dropped)
+
+    # Free-tier character gate first: it binds far below the token window for
+    # the bisected ids, and it is the only limit whose breach the vendor
+    # reports in characters. Same wording, same numbers as the vendor's own
+    # 400, so a client that already parses that error needs no new branch.
+    gate_chars = profile.limits.prompt_chars
+    if context_guard and gate_chars > 0:
+        chars = prompt_chars_of(
+            body.get("messages") or [], body.get("tools") or ()
+        )
+        if chars > gate_chars:
+            raise ContextOverflow(
+                model=profile.id,
+                estimated_tokens=round(chars * GATE_CHARS_RATIO),
+                input_limit=GATE_PROMPT_TOKENS,
+                context_limit=profile.limits.context or gate_chars,
+                compaction_ceiling=profile.ceiling(),
+            )
 
     estimated = estimate_request(
         body.get("messages") or [], body.get("tools") or ()
