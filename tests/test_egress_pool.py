@@ -12,6 +12,7 @@ import pytest
 import respx
 
 from proxy_opencode.config import Settings
+from proxy_opencode.egress.models import QUOTA_BURST_ESCALATE_AFTER
 from proxy_opencode.egress.pool import (
     EgressPool,
     EgressSpec,
@@ -1916,3 +1917,94 @@ async def test_binding_not_created_on_unhealthy_catchall_lease() -> None:
     lease2 = await pool.acquire(session_key="boot")
     assert pool._affinity["boot"][0] == lease2.name
     pool.abandon(lease2)
+
+
+# ------------------------------------------- shared-pool burst throttle (0.8.34)
+#
+# 2026-11-17 production: `cc9`, `owin10-mobile` and `owin10-telecom` (three
+# different carriers) hard-429'd inside 15:49:10-13 UTC, and `owin10-telecom`
+# answered 200 again EIGHT SECONDS after being cordoned "daily quota
+# exhausted". Independent per-IP exhaustion can neither be that simultaneous
+# nor heal that fast — it was the upstream's shared-pool burst throttle, which
+# forges the daily-quota shape (429 + Retry-After -> UTC0). Benching every
+# bucket for ZEN_QUOTA_CORDON_MAX_S turned a 3-second hiccup into a 10-minute
+# pool-wide outage whose synthesis reached clients as "free usage limit
+# reached" while no allowance had been burned.
+
+
+@pytest.mark.asyncio
+async def test_shared_pool_burst_is_not_a_daily_quota_verdict() -> None:
+    pool = make_pool("q1", "q2", "q3", quota_cordon_max_s=600.0)
+    mark_healthy(pool)
+
+    first = await pool.acquire()
+    assert first.name == "q1"
+    await pool.release(first, ok=False, kind="http_429", retry_after_s=29450.0)
+    # An isolated verdict is still a daily bench: nothing proves otherwise yet.
+    assert pool._states[0].cordon_reason.startswith("free_quota_exhausted")  # noqa: SLF001
+
+    for retry_after in (29449.0, 29448.0):
+        lease = await pool.acquire()
+        assert lease.name != "q1"  # q1 is benched; the burst comes from the rest
+        await pool.release(lease, ok=False, kind="http_429", retry_after_s=retry_after)
+
+    now = time.monotonic()
+    for state in pool._states:  # noqa: SLF001 - the verdict is per-bucket state
+        assert state.cordon_reason.startswith("free_quota_burst"), (
+            state.spec.name,
+            state.cordon_reason,
+        )
+        assert state.cordon_remaining_s(now) <= 45.0
+
+
+@pytest.mark.asyncio
+async def test_isolated_hard_429_keeps_the_daily_bench() -> None:
+    pool = make_pool("q1", "q2", quota_cordon_max_s=600.0)
+    mark_healthy(pool)
+
+    lease = await pool.acquire()
+    await pool.release(lease, ok=False, kind="http_429", retry_after_s=29450.0)
+
+    state = pool._states[0]  # noqa: SLF001
+    assert state.cordon_reason.startswith("free_quota_exhausted")
+    assert state.cordon_remaining_s(time.monotonic()) > 300.0
+
+
+@pytest.mark.asyncio
+async def test_burst_escalates_to_the_daily_bench_when_it_keeps_happening() -> None:
+    """A bucket that burnt its burst re-tests gets the real bench.
+
+    Otherwise a genuinely exhausted allowance would be re-probed every 45s
+    forever, which is exactly the "gateway hammering keeps the IP pinned at
+    429" failure 0.8.18 removed.
+    """
+
+    pool = make_pool("q1", "q2", quota_cordon_max_s=600.0)
+    mark_healthy(pool)
+    pool._states[0].burst_verdicts = QUOTA_BURST_ESCALATE_AFTER  # noqa: SLF001
+
+    first = await pool.acquire()
+    assert first.name == "q1"
+    await pool.release(first, ok=False, kind="http_429", retry_after_s=29450.0)
+    assert pool._states[0].cordon_reason.startswith("free_quota_exhausted")  # noqa: SLF001
+
+    second = await pool.acquire()
+    assert second.name == "q2"
+    await pool.release(second, ok=False, kind="http_429", retry_after_s=29450.0)
+
+    # q2 gets the cheap burst verdict; q1 is NOT pulled back with it.
+    assert pool._states[1].cordon_reason.startswith("free_quota_burst")  # noqa: SLF001
+    assert pool._states[0].cordon_reason.startswith("free_quota_exhausted")  # noqa: SLF001
+
+
+def test_burst_verdict_is_liftable_by_a_completed_request() -> None:
+    pool = make_pool("q1")
+    state = pool._states[0]  # noqa: SLF001
+    now = time.monotonic()
+    state.cordoned_until = now + 45.0
+    state.cordon_reason = "free_quota_burst (shared-pool burst throttle)"
+
+    pool._lift_cordon_on_success(state, now)  # noqa: SLF001
+
+    assert state.cordoned(now) is False
+    assert state.cordon_reason == ""

@@ -27,6 +27,29 @@ window_tz = _WINDOW_TZ
 # layers cannot drift apart.
 HARD_QUOTA_RETRY_AFTER_S = 3600.0
 
+# Shared-pool burst throttle (2026-11-17). The upstream's free tier throttles
+# a rolling window per network segment, and that throttle answers with the
+# SAME shape as a burned daily allowance: 429 + Retry-After pointing at UTC0.
+# Measured 2026-11-17 14:01-15:49 UTC: three buckets on three different
+# carriers 429'd within 1-3 seconds of each other, and `owin10-telecom`
+# answered 200 again EIGHT SECONDS after being cordoned "daily quota
+# exhausted" — a real daily verdict cannot heal that fast. Treating the burst
+# as a daily verdict benched every bucket for ZEN_QUOTA_CORDON_MAX_S (600s),
+# so a 3-second upstream hiccup became a 10-minute pool-wide outage whose
+# synthesis surfaces to clients as "free usage limit reached".
+#
+# Discriminator: independent per-IP exhaustion cannot happen to several
+# buckets in the same few seconds, so >= 2 distinct buckets hard-429ing
+# inside QUOTA_BURST_WINDOW_S is a shared-pool burst. Such a verdict costs a
+# silence of QUOTA_BURST_CORDON_S (CLI-like re-test rate — 0.8.18: rapid
+# re-hammering keeps a throttled IP pinned at 429, a single slow probe does
+# not), NOT the daily bench. A bucket that keeps bursting is escalated back
+# to the daily verdict after QUOTA_BURST_ESCALATE_AFTER consecutive burst
+# verdicts, so a genuine exhaustion still ends up silent.
+QUOTA_BURST_WINDOW_S = 10.0
+QUOTA_BURST_CORDON_S = 45.0
+QUOTA_BURST_ESCALATE_AFTER = 2
+
 
 def prefix_parts(expect_prefix: str | None) -> list[str]:
     """Split a CIDR prefix list, dropping blank parts.
@@ -97,6 +120,11 @@ class EgressState:
     last_error_at: float = 0.0
     cordoned_until: float = 0.0
     cordon_reason: str = ""
+    # Consecutive shared-pool burst verdicts (see QUOTA_BURST_* above). Reset
+    # by any 200. Drives the escalation back to the daily bench so a bucket
+    # whose allowance is genuinely gone stops being re-tested every 45s.
+    # Accounting only — deliberately absent from snapshot().
+    burst_verdicts: int = 0
     # Short demotion after a transport-class failure. Owner decision
     # 2026-10-29: a bucket that fails once must NOT leave rotation — the
     # backup chain answers that single request and the very next request
@@ -240,6 +268,9 @@ def seconds_to_window_reset() -> float:
 
 __all__ = [
     "HARD_QUOTA_RETRY_AFTER_S",
+    "QUOTA_BURST_CORDON_S",
+    "QUOTA_BURST_ESCALATE_AFTER",
+    "QUOTA_BURST_WINDOW_S",
     "EgressSpec",
     "EgressState",
     "Lease",

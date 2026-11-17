@@ -18,7 +18,8 @@
 
 | 事件 | 关键字段 | 含义 |
 |---|---|---|
-| `cordon` | `egress`, `cordon_reason`, `retry_after_s`, `egress_ip` | 桶被停用；reason= `free_quota_exhausted`（429，绑到窗口末）或 `free_tier_rejected`（403 门槛） |
+| `cordon` | `egress`, `cordon_reason`, `retry_after_s`, `egress_ip` | 桶被停用；reason= `free_quota_exhausted`（429，绑到窗口末）、`free_quota_burst`（多桶同窗硬 429 = 共享池阵发，短静默）或 `free_tier_rejected`（403 门槛） |
+| `cordon_shortened` | `egress`, `from_reason`, `to_reason`, `cordon_was_s`, `cordon_s` | 阵发判决把同窗内刚下的 `free_quota_exhausted`（600s）回溯改成 `free_quota_burst`（45s）——出现即说明那次「额度耗尽」是网段抖动 |
 | `cordon_lifted` | `egress`, `cordon_reason`, `ip_to` | 换 IP 后判决失效 |
 | `egress_ip_observed` | `egress`, `previous`, `current`, `matches_prefix` | 探针观测到的 IP 变化（换 IP / ISP 重拨 / 腿回落） |
 | `egress_recovered` | `egress` | 探针 unhealthy→healthy 跃迁（agent 恢复；不再随每次成功探针重复发） |

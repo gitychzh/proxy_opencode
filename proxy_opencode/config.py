@@ -389,6 +389,15 @@ class Settings:
     # retired.
     #   ZEN_QUOTA_CORDON_MAX_S=600
     zen_quota_cordon_max_s: float = 600.0
+    # Shared-pool burst discriminator (2026-11-17). The free tier throttles a
+    # rolling window per network segment and answers that throttle with the
+    # daily-quota shape (429 + Retry-After -> UTC0). >= 2 distinct buckets
+    # hard-429ing inside this window is that shared burst, not independent
+    # per-IP exhaustion, and is silenced for the short window only.
+    #   ZEN_QUOTA_BURST_WINDOW_S=10
+    #   ZEN_QUOTA_BURST_CORDON_S=45
+    zen_quota_burst_window_s: float = 10.0
+    zen_quota_burst_cordon_s: float = 45.0
     # Floor between two hard-429 rotations of the SAME bucket. A 429 is
     # ambiguous (transport gate / stale-prompt body gate / session reuse /
     # real per-IP quota all ship the same FreeUsageLimitError), and only the
@@ -781,6 +790,12 @@ def load_settings() -> Settings:
         ),
         zen_quota_cordon_max_s=float(
             os.environ.get("ZEN_QUOTA_CORDON_MAX_S", "600")
+        ),
+        zen_quota_burst_window_s=float(
+            os.environ.get("ZEN_QUOTA_BURST_WINDOW_S", "10")
+        ),
+        zen_quota_burst_cordon_s=float(
+            os.environ.get("ZEN_QUOTA_BURST_CORDON_S", "45")
         ),
         zen_egress_rotate_min_interval_s=float(
             os.environ.get("ZEN_EGRESS_ROTATE_MIN_INTERVAL_S", "1800")

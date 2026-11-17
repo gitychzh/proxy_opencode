@@ -5,6 +5,45 @@
 
 ## [Unreleased]
 
+### Fixed — 共享池阵发节流不再被误判为日配额：一次 3 秒抖动不再变成 10 分钟全池停机（0.8.34，2026-11-17）
+
+用户报「三桶都没怎么用，却被告知额度耗尽」。账本证据：2026-11-17
+15:49:10-13 UTC，`cc9` / `owin10-mobile` / `owin10-telecom`（三个不同运营商）
+在 **3 秒内**一起硬 429，`Retry-After` 全指向 UTC0（29448-29450s）；随后
+`15:49:21` **同一个** `owin10-telecom` 就成功应答并把 cordon 解除——真正的
+日配额耗尽不可能 8 秒自愈。
+
+根因在 `EgressPool.release()` 的 `http_429` 硬分支：判据只有
+`Retry-After > HARD_QUOTA_RETRY_AFTER_S(3600)` 或缺失，命中即无条件
+`free_quota_exhausted` + cordon `ZEN_QUOTA_CORDON_MAX_S`（600s）。这正是
+AGENTS.md §1 判据修正里记的「共享池维度阵发节流」会伪造的形状。三个桶同时
+被 bench 后，`acquire()` 在 0.8.22 语义下对 cordon 桶零可达 → 全池静默 600s
+→ 每个请求拿到合成 429（`all_egress_cordoned`），客户端读作「免费额度用完了」。
+
+- 新增共享池阵发判别：`>= 2` 个**不同**桶在 `ZEN_QUOTA_BURST_WINDOW_S`
+  （默认 10s）内硬 429 ⇒ 判 `free_quota_burst`，静默
+  `ZEN_QUOTA_BURST_CORDON_S`（默认 45s，CLI 级复测节奏，不触发 0.8.18 那条
+  「高频撞击把 IP 钉在 429」）而非 600s。独立 per-IP 耗尽不可能同时命中多个
+  运营商，这是唯一可靠的判据。
+- 回溯纠正：burst 判决时，把窗口内已被判 `free_quota_exhausted` 的桶一并缩短
+  到同一短窗口（`_shorten_burst_cordons`，账本新增 `cordon_shortened` 事件），
+  否则第一个桶仍要白等 600s。
+- 防抖升级：同一桶连续 `QUOTA_BURST_ESCALATE_AFTER`（2）次 burst 判决后，
+  即使多桶同窗也回到日配额 600s —— 真耗尽时不再每 45s 免费撞击上游。
+  任一 200 归零计数（`EgressState.burst_verdicts`）。
+- `free_quota_burst` 计入 `_SUCCESS_LIFTABLE_CORDON_REASONS`（200 即解除），
+  但**不**计入 `_IP_SCOPED_CORDON_REASONS`：阵发是共享池维度，换 IP 不该洗白。
+- 日志与账本措辞分离：burst 走 WARNING
+  `egress cordoned: shared-pool burst throttle (short silence)`，不再冒用
+  `upstream daily quota exhausted` 的 ERROR（那条文案是把排障引向配额的主因）。
+- 新增配置 `ZEN_QUOTA_BURST_WINDOW_S=10` / `ZEN_QUOTA_BURST_CORDON_S=45`
+  （`config.py` + `deploy/ecs/env.example`）。
+
+回归测试：`test_shared_pool_burst_is_not_a_daily_quota_verdict`、
+`test_isolated_hard_429_keeps_the_daily_bench`、
+`test_burst_escalates_to_the_daily_bench_when_it_keeps_happening`、
+`test_burst_verdict_is_liftable_by_a_completed_request`。
+
 ### Added — hy4-flash-free 模型档案 + 实测参数（0.8.33，2026-11-17）
 
 上游 2026-11-16 新增免费模型 `hy4-flash-free`（canonical `tencent/hy4-flash`），

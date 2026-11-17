@@ -349,6 +349,33 @@ telecom/cc9 继续 42 发全 200（额度按 IP 计）；cc9 实弹换 IP
 **判据**：若某桶被隔离后一直不回来，先看 `cordon_remaining_s` 是否还有几十秒
 （说明在封顶循环里），而不是直接判定"额度到日界"。
 
+**多桶同秒硬 429 = 共享池阵发节流，不是「额度耗尽」（0.8.34 定案）**：上游按
+网段滚动窗口限流，这个节流的应答与日配额耗尽**完全同形**（429 +
+`Retry-After` 指向 UTC0）。2026-11-17 实测：15:49:10-13 UTC，`cc9` /
+`owin10-mobile` / `owin10-telecom`（三家运营商）3 秒内一起硬 429，
+`Retry-After` 29448-29450s；15:49:21 **同一个** `owin10-telecom` 就 200 并把
+cordon 解除——真日配额不可能 8 秒自愈。当时旧逻辑把三个桶全判
+`free_quota_exhausted` + bench 600s，全池零可达，客户端读到的是「免费额度用完
+了」，实际一度额都没烧。
+
+判据与处置：**>= 2 个不同桶在 `ZEN_QUOTA_BURST_WINDOW_S`（默认 10s）内硬 429 ⇒
+阵发**（独立 per-IP 耗尽不可能同时命中多个运营商），判 `free_quota_burst`，
+只静默 `ZEN_QUOTA_BURST_CORDON_S`（默认 45s），并把窗口内已被判日配额的桶一起
+缩短（账本 `cordon_shortened`）。同桶连续 2 次 burst 判决后升级回日配额 600s
+（真耗尽时不再每 45s 免费撞击）。看到 `cordon_reason` 是
+`free_quota_burst` 就不要去查额度——那是网段抖动。
+
+```bash
+# 一眼分辨：阵发 vs 真耗尽
+ssh -p 222 root@115.29.231.25 'python3 -c "
+import json
+rows=[json.loads(l) for l in open(\"/opt/zen-gw/src/deploy/ecs/data/egress_events.jsonl\") if l.strip()]
+for r in rows[-200:]:
+    if r.get(\"event\") in (\"cordon\",\"cordon_shortened\"):
+        print(r[\"ts\"], r[\"egress\"], r.get(\"cordon_reason\") or r.get(\"to_reason\"))
+"'
+```
+
 **慢请求（>60s）先分相，再谈归因**：`chat completion.latency_ms` 与同 request_id
 的 `stream ended.duration_ms` 之差就是「首字节前」的耗时。
 

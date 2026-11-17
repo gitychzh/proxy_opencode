@@ -33,6 +33,9 @@ import httpx
 from .eventlog import EVENTS
 from .models import (
     HARD_QUOTA_RETRY_AFTER_S,
+    QUOTA_BURST_CORDON_S,
+    QUOTA_BURST_ESCALATE_AFTER,
+    QUOTA_BURST_WINDOW_S,
     EgressSpec,
     EgressState,
     Lease,
@@ -98,7 +101,12 @@ class EgressPool:
     # ``_lift_cordon_on_success``). The soft throttle is included: a 200
     # while benched for a short Retry-After means the throttle is gone.
     _SUCCESS_LIFTABLE_CORDON_REASONS = frozenset(
-        {"free_quota_exhausted", "free_quota_soft", "free_tier_rejected"}
+        {
+            "free_quota_exhausted",
+            "free_quota_soft",
+            "free_quota_burst",
+            "free_tier_rejected",
+        }
     )
 
     def __init__(
@@ -113,6 +121,8 @@ class EgressPool:
         cooldown_s: float = 20.0,
         cooldown_max_s: float = 300.0,
         quota_cordon_max_s: float = 600.0,
+        quota_burst_window_s: float = QUOTA_BURST_WINDOW_S,
+        quota_burst_cordon_s: float = QUOTA_BURST_CORDON_S,
         probe_fail_tolerance: int = 1,
         observer: ReleaseObserver | None = None,
         last_resort: frozenset[str] = frozenset(),
@@ -141,6 +151,19 @@ class EgressPool:
         # release()). 0 disables the ceiling and restores the old
         # "benched until the window reset" behaviour.
         self._quota_cordon_max_s = max(0.0, float(quota_cordon_max_s))
+        # Shared-pool burst discriminator (2026-11-17). The upstream throttles
+        # a rolling window per network segment and answers that throttle with
+        # the daily-quota shape (429 + Retry-After -> UTC0). Treating it as a
+        # daily verdict benched all three buckets for 600s each time, turning
+        # a 3-second upstream hiccup into a 10-minute pool outage that clients
+        # read as "free usage limit reached" while no allowance was actually
+        # burned. >= 2 distinct buckets hard-429ing inside the window is a
+        # burst (independent per-IP exhaustion cannot be that simultaneous).
+        self._burst_window_s = max(0.0, float(quota_burst_window_s))
+        self._burst_cordon_s = max(0.0, float(quota_burst_cordon_s))
+        # (monotonic ts, bucket name) of recent hard 429 verdicts, pruned to
+        # the burst window on every use.
+        self._hard_429_log: list[tuple[float, str]] = []
         # Consecutive soft probe failures tolerated before a bucket is pulled
         # (see _probe_one). Never below 1: a tolerance of 0 would mean "pull
         # the bucket before the first failure", which is the same as 1.
@@ -220,6 +243,12 @@ class EgressPool:
             # ceiling and fall back to "benched until the window reset").
             quota_cordon_max_s=float(
                 getattr(settings, "zen_quota_cordon_max_s", 600.0)
+            ),
+            quota_burst_window_s=float(
+                getattr(settings, "zen_quota_burst_window_s", QUOTA_BURST_WINDOW_S)
+            ),
+            quota_burst_cordon_s=float(
+                getattr(settings, "zen_quota_burst_cordon_s", QUOTA_BURST_CORDON_S)
             ),
             probe_fail_tolerance=int(
                 getattr(settings, "zen_egress_probe_fail_tolerance", 1) or 1
@@ -637,6 +666,10 @@ class EgressPool:
         if ok:
             state.failures = 0
             state.last_error = ""
+            # A completed request proves the burst is over: the next hard 429
+            # gets the cheap burst verdict again instead of being escalated to
+            # a daily bench.
+            state.burst_verdicts = 0
             # A success is the only proof the leg works again: drop the
             # demotion immediately so the bucket returns to its normal share
             # of rotation on the very next pick.
@@ -699,28 +732,65 @@ class EgressPool:
                     detail={"retry_after_s": round(float(soft_s), 1)},
                 )
             else:
-                window_s = seconds_to_window_reset()
-                capped = (
-                    min(window_s, self._quota_cordon_max_s)
-                    if self._quota_cordon_max_s > 0
-                    else window_s
-                )
-                self._enter_cordon(
-                    state,
-                    now + capped,
-                    "free_quota_exhausted (per-IP daily quota)",
-                    event_reason="free_quota_exhausted",
-                    detail={
-                        "reset_at": datetime.fromtimestamp(
-                            next_window_reset(), tz=window_tz
-                        ).isoformat(),
-                        "retry_after_s": round(retry_after_s, 1)
-                        if retry_after_s is not None
-                        else None,
-                        "cordon_s": round(capped, 1),
-                        "capped_from_window_s": round(window_s, 1),
-                    },
-                )
+                # Hard shape (Retry-After absent or pointing at the window
+                # reset) is NOT proof that the allowance is gone: the
+                # upstream's shared-pool burst throttle forges exactly this
+                # shape. 2026-11-17 production: three buckets on three
+                # carriers hard-429'd inside 3 seconds and `owin10-telecom`
+                # answered 200 again EIGHT SECONDS after being benched
+                # "daily quota exhausted" — independent per-IP exhaustion
+                # cannot be that simultaneous nor heal that fast. Benching
+                # all three for ZEN_QUOTA_CORDON_MAX_S turned a 3-second
+                # hiccup into a 10-minute pool outage that clients read as
+                # "free usage limit reached" with no allowance burned.
+                peers = self._note_hard_429(state, now)
+                if (
+                    self._burst_cordon_s > 0
+                    and len(peers) >= 2
+                    and state.burst_verdicts < QUOTA_BURST_ESCALATE_AFTER
+                ):
+                    state.burst_verdicts += 1
+                    self._enter_cordon(
+                        state,
+                        now + self._burst_cordon_s,
+                        "free_quota_burst (shared-pool burst throttle)",
+                        event_reason="free_quota_burst",
+                        detail={
+                            "peers": ";".join(peers),
+                            "retry_after_s": round(retry_after_s, 1)
+                            if retry_after_s is not None
+                            else None,
+                            "cordon_s": round(self._burst_cordon_s, 1),
+                        },
+                    )
+                    # The first bucket of the burst was already benched as a
+                    # daily exhaustion a few seconds ago; pull that verdict
+                    # back too, otherwise the pool still sits out the full
+                    # daily bench for a hiccup that is already over.
+                    self._shorten_burst_cordons(now, self._burst_cordon_s)
+                else:
+                    window_s = seconds_to_window_reset()
+                    capped = (
+                        min(window_s, self._quota_cordon_max_s)
+                        if self._quota_cordon_max_s > 0
+                        else window_s
+                    )
+                    self._enter_cordon(
+                        state,
+                        now + capped,
+                        "free_quota_exhausted (per-IP daily quota)",
+                        event_reason="free_quota_exhausted",
+                        detail={
+                            "reset_at": datetime.fromtimestamp(
+                                next_window_reset(), tz=window_tz
+                            ).isoformat(),
+                            "retry_after_s": round(retry_after_s, 1)
+                            if retry_after_s is not None
+                            else None,
+                            "cordon_s": round(capped, 1),
+                            "capped_from_window_s": round(window_s, 1),
+                        },
+                    )
         elif kind == "free_tier_rejected":
             # The free-tier gate flagged this bucket's egress IP: it cannot
             # serve the free tier until the agent re-dials (measured 2026-10-17:
@@ -817,6 +887,70 @@ class EgressPool:
         lease.released = True
         lease.state.inflight = max(0, lease.state.inflight - 1)
 
+    def _note_hard_429(self, state: EgressState, now: float) -> list[str]:
+        """Record a hard-429 verdict; return the buckets seen inside the window.
+
+        The upstream's burst throttle hits every egress of a shared network
+        segment at once (2026-11-17 15:49:10-13 UTC: cc9, mobile and telecom
+        inside 3 seconds). Independent per-IP daily exhaustion can never be
+        that simultaneous, so the number of distinct buckets inside
+        ``_burst_window_s`` is the discriminator between "shared-pool hiccup"
+        and "this IP's allowance is gone".
+        """
+
+        self._hard_429_log.append((now, state.spec.name))
+        cutoff = now - self._burst_window_s
+        self._hard_429_log = [row for row in self._hard_429_log if row[0] >= cutoff]
+        peers: list[str] = []
+        for _, name in self._hard_429_log:
+            if name not in peers:
+                peers.append(name)
+        return peers
+
+    def _shorten_burst_cordons(self, now: float, seconds: float) -> None:
+        """Re-classify recent daily-quota benches as shared-pool bursts.
+
+        Only verdicts issued moments ago (they are the ones this burst
+        disproves) qualify, and only towards a *shorter* deadline: a bucket
+        that is somehow benched past ``now + seconds`` keeps its deadline.
+        The escalated case (``burst_verdicts`` reached the cap) never calls
+        this, so a genuinely exhausted allowance still gets the daily bench.
+        """
+
+        target = now + seconds
+        for st in self._states:
+            if not st.cordoned(now):
+                continue
+            if st.cordon_reason.split(" (", 1)[0] != "free_quota_exhausted":
+                continue
+            if st.burst_verdicts >= QUOTA_BURST_ESCALATE_AFTER:
+                # Already re-tested at the burst rate this many times: the
+                # allowance really is gone, keep the daily bench.
+                continue
+            if target >= st.cordoned_until:
+                continue
+            was_s = st.cordon_remaining_s(now)
+            st.cordoned_until = target
+            st.cordon_reason = "free_quota_burst (shared-pool burst throttle)"
+            st.burst_verdicts += 1
+            logger.warning(
+                "egress cordon shortened: shared-pool burst, not a per-IP daily quota",
+                extra={
+                    "egress": st.spec.name,
+                    "cordon_reason": "free_quota_exhausted->free_quota_burst",
+                    "retry_after_s": round(was_s, 1),
+                    "cap": round(seconds, 1),
+                },
+            )
+            EVENTS.emit(
+                "cordon_shortened",
+                egress=st.spec.name,
+                from_reason="free_quota_exhausted",
+                to_reason="free_quota_burst",
+                cordon_was_s=round(was_s, 1),
+                cordon_s=round(seconds, 1),
+            )
+
     def _enter_cordon(
         self,
         state: EgressState,
@@ -866,6 +1000,15 @@ class EgressPool:
         elif core == "free_quota_soft":
             logger.warning(
                 "egress cordoned: upstream soft throttle",
+                extra={"egress": state.spec.name, "reason": reason, **detail},
+            )
+        elif core == "free_quota_burst":
+            # Deliberately WARNING, not ERROR: this is a shared-pool burst the
+            # whole segment sees at once, not this bucket's allowance running
+            # out. Logging it as "daily quota exhausted" is what sent operators
+            # chasing a quota that was never burned (2026-11-17).
+            logger.warning(
+                "egress cordoned: shared-pool burst throttle (short silence)",
                 extra={"egress": state.spec.name, "reason": reason, **detail},
             )
         elif core == "free_tier_rejected":
