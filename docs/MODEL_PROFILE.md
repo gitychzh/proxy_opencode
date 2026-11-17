@@ -155,6 +155,7 @@ pytest tests/test_model_profile.py tests/test_zen_policy.py -q
 | nemotron-3.5-super-vl-free | 1048576 | 131072 | 未测 | none/minimal/low/medium/high/xhigh | ✓ | ✗ | ✓ |
 | nemotron-3.5-lightning-free | 262144 | 262144 | 未测 | —（无档位） | ✓ | ✓ | ✗ |
 | minimax-m3.1-flash-free | 1000000 | 512000 | 1,000,000 通过；1,080,000 拒（厂商原话 "context window exceeds limit"） | low/medium/high/xhigh/max | ✓ | ✗ | ✓ |
+| hy4-flash-free | 1048576 | 65536 | **1,281,215 chars→867,947 tok 通过；1,290,595 chars 拒**（见 §12） | none/high | ✓ | ✓ | ✓ |
 
 \* big-pickle 是实测覆盖（2026-10-29 + 2026-11-14 双日），目录仍写 200000/160000——
 上游是**异构后端池**，越过保证值之后能否通过取决于落在哪个后端（10-29：
@@ -283,4 +284,47 @@ python3 scripts_local/stability_ctx_probe.py
 # 估算门口径验证（中文自然文本，看 about/chars 恒定）
 python3 scripts_local/ctx_probe.py http://115.29.231.25:10002 "$KEY" \
     deepseek-v4.1-flash-free 26000
+```
+
+## 12. hy4-flash-free：不走估算门的新一代免费层（2026-11-17 实测）
+
+2026-11-16 上游新增 `hy4-flash-free`（canonical `tencent/hy4-flash`，腾讯 Hy
+系列低价档），11-17 进入匿名目录（86 条 / 免费 12 条，同轮 minimax 下架）。
+ECS 每日 22:00 同步在 11-16 已自动把它写入快照与 `.env`，网关纯透传无需改代码
+即已可调用（chat 冒烟 200，`billing_source=free`）。
+
+**关键差异：它不受 §11 的 `at most 32000 prompt tokens` 估算门约束。**
+旧四模型用 `about = round(chars×0.339)`，约 94.4K chars 就撞顶；hy4 走的是**真实
+1,048,576-token 窗口**，中文密度约 0.68 tok/char，可直接吃百万字符级输入：
+
+| 测量 | 结果 | 证据 |
+|---|---|---|
+| 自然中文最大 200 | **1,281,215 chars → 867,947 真实 tokens** | `scripts_local/hy4_ctx_bisect_20261117.json` |
+| 首次 400 | 1,290,595 chars（`about=1,299,317`） | 同上 |
+| 阶梯上探 | 1,000,000 chars→200(685,664 tok)；1,299,970 chars→400 | `scripts_local/hy4_ctx_upper_20261117.json` |
+| 4-byte U+20000 | 94,009 chars→384,264 tok（密度 4.086 tok/char） | `scripts_local/hy4_phase_4byte_20261117.json` |
+| E2E 三件套 | 基础聊天 200 / 工具调用 `get_weather` 200 / 推理 200（246 reasoning tok，思考默认开） | 本轮对话 |
+
+400 错误体原文（与旧模型的 `FreeUsageLimitError` 完全不同形）：
+```
+This endpoint's maximum context length is 1048576 tokens. However, you requested
+about 1308710 tokens (1302533 of text input, 6161 of tool input, 16 in the output).
+```
+注意两套 `about` 口径：成功响应按真实 BPE（`usage.prompt_tokens`，1.28M chars→867,947），
+400 错误体按 `chars×1.007` 的粗估。**判据以真实窗口 1,048,576 tokens 为准**，
+对外按 ~1.28M 中文字符 / ~868K tokens 宣称，不得沿用旧模型的 94.4K chars。
+
+目录参数（权威）：context 1,048,576 / input 983,040 / output 65,536；
+reasoning efforts `[none, high]`（`none` 仅客户端手动可选，默认推理开启，网关
+从不关思考）；attachment ✓（jpeg/png/webp/gif）。`max_tokens` 请求 120,000
+实测 200（上游不在请求阶段硬拒 output，仅实际生成时约束）。
+`model_profile` 已补录；§11.4 的 guard 缺口对 hy4 更宽（window 983,040→折合
+3.9M chars 才拦，真门 1.29M chars），仍属同一未修契约缺口。
+
+复现：
+```bash
+python3 scripts_local/hy4_ctx_probe.py --phase chars     # chars 门（已证 >150K）
+python3 scripts_local/hy4_ctx_upper.py                    # 阶梯上探逼出 400
+python3 scripts_local/hy4_ctx_probe.py --phase 4byte      # 真实 tokenizer 密度
+python3 scripts_local/hy4_ctx_probe.py --phase output     # 输出预算
 ```

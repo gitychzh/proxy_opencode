@@ -5,6 +5,21 @@
 
 ## [Unreleased]
 
+### Added — hy4-flash-free 模型档案 + 实测参数（0.8.33，2026-11-17）
+
+上游 2026-11-16 新增免费模型 `hy4-flash-free`（canonical `tencent/hy4-flash`），
+ECS 每日同步已自动纳入快照/`.env`，网关纯透传无需改代码即可调用（chat 冒烟
+200，`billing_source=free`，E2E 三件套全绿）。
+
+- `model_profile` 补录 hy4：context 1,048,576 / input 983,040 / output 65,536，
+  reasoning efforts `(none, high)`，attachment ✓（`none` 仅客户端可选，默认推理开）。
+- `tests/test_model_profile.py`：覆盖集合加 hy4（保留已下架的 minimax 供在飞客户端），
+  新增 hy4 参数/efforts 专项测试。
+- `docs/MODEL_PROFILE.md` §9 表格加行、新增 §12：实测 hy4 **不走**旧模型 94.4K chars
+  的 `32000-about` 估算门，直接撞真实 1,048,576-token 窗口——自然中文 1,281,215
+  chars→867,947 tok 通过，1,290,595 chars 拒；4-byte U+20000 94,009 chars→384,264 tok。
+- 新探测脚本 `scripts_local/hy4_ctx_probe.py` / `hy4_ctx_upper.py` 与逐发 JSON 证据。
+
 ### Removed — 别名层彻底删除，模型 ID 完全透传（0.8.32，2026-11-17）
 
 **owner 决策：没有付费模型一说**。历史上的

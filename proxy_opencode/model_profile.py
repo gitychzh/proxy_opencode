@@ -267,6 +267,27 @@ _PROFILES: dict[str, ModelProfile] = {
             efforts=(),
         ),
     ),
+    # 2026-11-16 new upstream id (canonical tencent/hy4-flash), first seen in
+    # the anonymous catalogue 2026-11-17. Values transcribed verbatim from
+    # that catalogue: context 1,048,576 / input 983,040 / output 65,536,
+    # reasoning efforts [none, high], four image input modalities.
+    # Unlike the other free ids this model is NOT subject to the 32000-about
+    # estimator gate (docs/MODEL_PROFILE.md §11): measured natural CJK 1,281,215
+    # chars -> 867,947 usage tokens all 200; the binding limit is the real
+    # 1,048,576-token window. "none" is only a client-selectable effort level —
+    # reasoning is ON by default; the gateway never disables thinking.
+    "hy4-flash-free": ModelProfile(
+        id="hy4-flash-free",
+        limits=Limits(context=1_048_576, input=983_040, output=65_536),
+        capabilities=Capabilities(
+            reasoning=True,
+            efforts=("none", "high"),
+            structured_output=True,
+            temperature=True,
+            attachment=True,
+        ),
+        source="live upstream catalogue @2026-11-17 + measured 2026-11-17",
+    ),
 }
 
 

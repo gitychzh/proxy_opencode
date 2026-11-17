@@ -117,10 +117,13 @@ def test_profile_table_only_contains_free_relay_ids():
     assert all(mid.endswith("-free") or mid == "big-pickle" for mid in profiles())
 
 
-def test_table_covers_every_free_id_in_the_2026_11_14_catalogue():
-    # One profile per free id the daily sync publishes (models.dev
-    # 2026-11-14: 86 catalogue entries, 12 free). A missing id would mean
-    # that model runs with no context guard and no reasoning forwarding.
+def test_table_covers_every_free_id_in_the_catalogue():
+    # One profile per free id the gateway relays. 2026-11-17 the anonymous
+    # catalogue gained `hy4-flash-free` (86 entries, 12 free; minimax left).
+    # minimax's profile is deliberately retained for in-flight clients (the
+    # gateway is passthrough — the id still reaches upstream verbatim), and
+    # hy4 is added from the live catalogue. A missing id means no context
+    # guard and no reasoning forwarding.
     expected = {
         "big-pickle",
         "mimo-v2.6-flash-free",
@@ -133,9 +136,29 @@ def test_table_covers_every_free_id_in_the_2026_11_14_catalogue():
         "flint-40b-free",
         "nemotron-3.5-super-vl-free",
         "nemotron-3.5-lightning-free",
-        "minimax-m3.1-flash-free",
+        "minimax-m3.1-flash-free",  # delisted upstream, retained for in-flight clients
+        "hy4-flash-free",
     }
     assert set(profiles()) == expected
+
+
+def test_hy4_flash_publishes_the_live_window_and_effort_ladder():
+    # Live anonymous catalogue @2026-11-17 (canonical tencent/hy4-flash):
+    # context 1,048,576 / input 983,040 / output 65,536, reasoning efforts
+    # [none, high], four image input modalities. Measured 2026-11-17:
+    # natural CJK 1,281,215 chars -> 867,947 usage tokens all 200; 4-byte
+    # U+20000 94,009 chars -> 384,264 tokens. Not subject to the 32000-about
+    # estimator gate that caps the other free ids at ~94.4K chars (§11).
+    prof = profile("hy4-flash-free")
+    assert prof is not None
+    assert prof.limits.context == 1_048_576
+    assert prof.limits.input == 983_040
+    assert prof.limits.output == 65_536
+    assert prof.capabilities.reasoning is True
+    assert prof.capabilities.efforts == ("none", "high")
+    assert prof.capabilities.attachment is True
+    # "none" is a client-selectable effort; thinking is default-on.
+    assert "none" in prof.capabilities.efforts and prof.capabilities.reasoning
 
 
 def test_delisted_model_profile_is_not_kept():
