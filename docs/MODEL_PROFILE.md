@@ -259,21 +259,31 @@ tok/char**，而估算器只按 0.339 计）可以把真实 tokens 藏在 94K ch
 hermes 侧可复现配置：`scripts/configure_hermes_zenedge.py`（写 provider +
 model_overrides 两块，`--dry-run` 可先看）。
 
-### 11.4 网关 guard 的已知缺口（未修，待决策）
+### 11.4 网关 guard 的缺口（0.8.35 已修）
 
-`policy.py` 的 `ContextOverflow` 用 `estimate_request()`（即 `round(chars/4)`）
+`policy.py` 的 `ContextOverflow` 原本用 `estimate_request()`（即 `round(chars/4)`）
 对照 `profile.limits.window()`。对照 94.4K chars 的真门，各模型放行倍数：
 
-| 模型 | guard 阈值(window) | 折合 chars | 上游真门 chars | 放行倍数 |
+| 模型 | 旧 guard 阈值(window) | 折合 chars | 上游真门 chars | 放行倍数 |
 |---|---|---|---|---|
 | big-pickle | 261,000 | 1,044,000 | ~94,479 | 11.1× |
 | deepseek / glm | 200,000 | 800,000 | ~94,479 | 8.5× |
 | minimax | 1,000,000 | 4,000,000 | ~94,479 | 42.3× |
 
-实测确认：deepseek 发 440,016 chars（中文自然文本）→ 网关**放行**，上游 400
-（`about=118468`）。即 guard 对免费层这道门**完全失效**，代价是白跑一轮往返。
-修它会同时收紧对**所有**客户端的放行面（含付费模型与 opencode 本体），
-属于契约级改动，需单独立项评估，不在本次配置范围。
+实测确认：deepseek 发 440,016 chars（中文自然文本）→ 旧网关**放行**，上游 400
+（`about=118468`），代价是白跑一轮往返 + 一条出口租约。
+
+**0.8.35 修法**：`Limits.prompt_chars` 记实测字符边缘（四个 id 均为 94,200），
+`apply_request_policy` 在 token 守卫之前先按字符判，超了就用上游原文措辞本地
+拒绝（`at most 32000 prompt tokens ... about N prompt tokens`），不碰出口池。
+`estimated_tokens` 用 `round(chars * 0.33966)`（上游控制面系数），与上游报的
+`about` 同量纲；`input_limit_override` 只调 token 窗，抬不开这道物理门。
+
+边界验收（2026-11-18，含网关注入的 33.8K tools）：59,997 chars 消息 → 200；
+61,981 chars 消息 → 400（`about 32554`，本地 0.17s 返回）。未测门限的 id
+（`longcat` / `iceman` / `inkling` / `beam` / `flint` / `nemotron-*` / `mimo`）
+`prompt_chars` 保持 0 = 不启用字符门，仍只按 token 窗判 —— 给未知模型发明上限
+是本项目明令禁止的。
 
 ### 11.5 复现命令
 
@@ -318,8 +328,11 @@ about 1308710 tokens (1302533 of text input, 6161 of tool input, 16 in the outpu
 reasoning efforts `[none, high]`（`none` 仅客户端手动可选，默认推理开启，网关
 从不关思考）；attachment ✓（jpeg/png/webp/gif）。`max_tokens` 请求 120,000
 实测 200（上游不在请求阶段硬拒 output，仅实际生成时约束）。
-`model_profile` 已补录；§11.4 的 guard 缺口对 hy4 更宽（window 983,040→折合
-3.9M chars 才拦，真门 1.29M chars），仍属同一未修契约缺口。
+`model_profile` 已补录。§11.4 的 guard 对 hy4 **保持 token 窗判**（`prompt_chars`
+留 0）：hy4 的 400 错误体用的是 `chars×1.007` 粗估，与四模型的 `0.33966` 不同
+口径，套同一个字符门系数会把 `about` 报错量级。代价是 983,040 token 窗折合
+~3.9M chars 才拦（真门 1.29M chars，放行 3×），比四模型时代的 8.5~42× 小一个
+量级；真要收紧时按 per-model 系数一并做，不要硬塞共用常量。
 
 复现：
 ```bash
@@ -328,3 +341,31 @@ python3 scripts_local/hy4_ctx_upper.py                    # 阶梯上探逼出 4
 python3 scripts_local/hy4_ctx_probe.py --phase 4byte      # 真实 tokenizer 密度
 python3 scripts_local/hy4_ctx_probe.py --phase output     # 输出预算
 ```
+
+## 13. 流式回答的 usage：上游不发，网关补（0.8.35，2026-11-18）
+
+同一请求的两种传输给的东西不一样：
+
+| 传输 | 内容帧 | 终止 | `usage` |
+|---|---|---|---|
+| `stream: false` | 一条完整 message | — | **有**，`prompt_tokens` 是真实 BPE 计数（实测 92,675 chars 中文 → 62,807；11-17 同长度 → 71,238） |
+| `stream: true` | 内容/思考增量 | `finish_reason` | **没有**（个别后端会给，原样透传） |
+
+`stream_options.include_usage` 已经由 `zen/body.py` 强制写进上游 body，但对这批
+后端无效——2026-11-18 实测：8 个内容帧 + 终止帧，没有任何 `choices: []` 的
+usage 帧。凡是靠 usage 计上下文的客户端（DSH 的 `token-meter` 就是）会整场会话
+读到 0 token，也就看不见自己离 §11 那道门还有多远。
+
+`StreamRelay` 因此在终止帧之后补一帧 OpenAI 形状的 usage（`choices: []`、
+`estimated: true`）：
+
+- prompt 侧 = `estimate_upstream_tokens()`：CJK 0.70 tok/char、ASCII 0.28
+  tok/char、+300 结构开销。对两次实测分别高 3.8%（62,807）与低 8.5%（71,238）
+  —— 同一个池的 tokenizer/后端组合会把密度挪 ±13%，这个系数取的是中点；
+- completion 侧 = 流内实际生成字符数 × 0.6（含 `reasoning_content` 与
+  `tool_calls.arguments`，后者在 `completion_tokens_details.reasoning_tokens`
+  里单列）；
+- 上游真给了 usage 就**一律不合成**（测试 `test_relay_never_overrides_a_real_upstream_usage`）。
+
+它是**估算，不是账单**：`estimated: true` 就是给读者看的。要精确账单只有
+`stream: false` 一条路。

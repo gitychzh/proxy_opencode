@@ -70,6 +70,22 @@ opencode 1.19.4 客户端协议）；另保留 `opencode-serve`（驱动本机�
   是嵌套对象且付费条目也全 0，不能用来判免费，判据只有 `-free` 后缀 +
   `big-pickle`（见 `egress/free_models.py:is_free_entry`）。别名改写用
   `ZEN_MODEL_MAP`（精确命中优先于 provider 前缀剥离）。
+- **prompt 字符门（400 `context_length_exceeded`）**：这四个 id 的真实 prompt
+  上限不是目录里的 200k token 窗，而是 `round(chars * 0.33966) <= 32000` ——
+  **字符门，与模型、语言、内容类型都无关**（2026-11-17 与 11-18 两次二分同结论：
+  92,675 chars 过、94,442 拒，四 id 完全同门）。`chars` 统计**整个请求**，含注入
+  的内置工具 JSON：2026-11-18 实测 59,997 chars 消息 + 33.8k tools = 93,861 chars
+  → 200；61,981 + 33.8k = 95,845 → 400（`about 32554`）。所以 tools 越多的客户端
+  可用对话越少（DSH 46 个工具 38,913 chars ⇒ 对话只剩 ~55k chars）。错误体原文
+  `maximum context length is 200000 tokens and at most 32000 prompt tokens are
+  accepted ... (the client compacts below 170000 tokens)`：那句 170000 是上游给
+  opencode 的压缩点，与真实门无关，**不要据此设客户端阈值**。0.8.35 起网关用
+  `Limits.prompt_chars`（94,200，实测边缘）在本地先拒，不再烧一次出口租约；
+  `input_limit_override` 调的是 token 窗，抬不开这道物理门。
+- **流式回答不带 usage**：同一请求非流式返回 `prompt_tokens`（2026-11-18 实测
+  62,807），流式只给内容帧 + 终止 `finish_reason`，没有 `choices: []` 的 usage
+  帧（个别后端会给，则原样透传）。0.8.35 起网关在终止帧之后补一帧
+  `choices: []` + `estimated: true`，客户端才看得见上下文占用。
 - **真实配额（429 `FreeUsageLimitError`）**：按**出口 IP / UTC 日**计量成功调用，
   UTC0 重置（额度小，数十发 200 量级即见烧穿；`Retry-After` 指向 UTC0）。传输
   失败、TLS EOF、超时、403 **不烧额度**，不得据此判断配额。
