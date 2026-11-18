@@ -82,10 +82,21 @@ opencode 1.19.4 客户端协议）；另保留 `opencode-serve`（驱动本机�
   opencode 的压缩点，与真实门无关，**不要据此设客户端阈值**。0.8.35 起网关用
   `Limits.prompt_chars`（94,200，实测边缘）在本地先拒，不再烧一次出口租约；
   `input_limit_override` 调的是 token 窗，抬不开这道物理门。
+- **这条 400 是我们自己发的，不是上游转发的**（2026-11-18 定稿）：`errors.py`
+  的 `ContextOverflow.describe()` 逐字复刻上游文案（opencode 靠
+  `code=context_length_exceeded` 触发 overflow 压缩，换形状会让 CLI 重试同一
+  个 prompt）。判别方法只有两条：**耗时**（本地 2–4 ms，上游往返 3–20 s）与
+  **日志 `error` 字段**（本地 `context_length_exceeded: ...` 只由
+  `_pipeline.py` 的 `isinstance(exc, ContextOverflow)` 分支写；上游 4xx 走
+  `_raw_relay_body` 原样透传，`error` 为空）。0.8.36 起本地文案在保留原句之后
+  追加 `[proxy_opencode]` 段，给出真实字符账（总字符 / tools / messages / 超出量）
+  且把"compacts below"改成**可达**的 32000，不再复读 170000。
 - **流式回答不带 usage**：同一请求非流式返回 `prompt_tokens`（2026-11-18 实测
   62,807），流式只给内容帧 + 终止 `finish_reason`，没有 `choices: []` 的 usage
   帧（个别后端会给，则原样透传）。0.8.35 起网关在终止帧之后补一帧
-  `choices: []` + `estimated: true`，客户端才看得见上下文占用。
+  `choices: []` + `estimated: true`，客户端才看得见上下文占用。注意 DSH 的
+  `session.v4.jsonl` 里 `usage.inputTokens` **恒为 0**（所有会话、所有 provider
+  都一样），那是它的日志口径，不能用它判断 provider 有没有报 usage。
 - **真实配额（429 `FreeUsageLimitError`）**：按**出口 IP / UTC 日**计量成功调用，
   UTC0 重置（额度小，数十发 200 量级即见烧穿；`Retry-After` 指向 UTC0）。传输
   失败、TLS EOF、超时、403 **不烧额度**，不得据此判断配额。

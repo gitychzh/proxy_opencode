@@ -285,6 +285,12 @@ model_overrides 两块，`--dry-run` 可先看）。
 `prompt_chars` 保持 0 = 不启用字符门，仍只按 token 窗判 —— 给未知模型发明上限
 是本项目明令禁止的。
 
+**0.8.36 补文案**：命中字符门时 `compaction_ceiling` 渲染成
+`min(ceiling, 32000)`（可达的压缩点），并在上游原句之后追加 `[proxy_opencode]`
+段给出字符账（总字符 / tools / messages / 超出量）。原句前缀一字不改，
+`code` 仍是 `context_length_exceeded` —— 换形状会让 opencode 重试同一个
+prompt 而不是起压缩。
+
 ### 11.5 复现命令
 
 ```bash

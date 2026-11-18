@@ -103,9 +103,10 @@ def apply_request_policy(
     # 400, so a client that already parses that error needs no new branch.
     gate_chars = profile.limits.prompt_chars
     if context_guard and gate_chars > 0:
-        chars = prompt_chars_of(
-            body.get("messages") or [], body.get("tools") or ()
-        )
+        messages = body.get("messages") or []
+        tools = body.get("tools") or ()
+        tool_chars = prompt_chars_of((), tools)
+        chars = prompt_chars_of(messages, tools)
         if chars > gate_chars:
             raise ContextOverflow(
                 model=profile.id,
@@ -113,6 +114,9 @@ def apply_request_policy(
                 input_limit=GATE_PROMPT_TOKENS,
                 context_limit=profile.limits.context or gate_chars,
                 compaction_ceiling=profile.ceiling(),
+                prompt_chars=chars,
+                gate_chars=gate_chars,
+                tool_chars=tool_chars,
             )
 
     estimated = estimate_request(

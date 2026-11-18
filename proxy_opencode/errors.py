@@ -70,22 +70,53 @@ class ContextOverflow(InvalidRequest):
         input_limit: int,
         context_limit: int,
         compaction_ceiling: int,
+        prompt_chars: int = 0,
+        gate_chars: int = 0,
+        tool_chars: int = 0,
     ) -> None:
         self.model = model
         self.estimated_tokens = estimated_tokens
         self.input_limit = input_limit
         self.context_limit = context_limit
         self.compaction_ceiling = compaction_ceiling
+        # Populated only when the free tier's character gate is what fired.
+        self.prompt_chars = prompt_chars
+        self.gate_chars = gate_chars
+        self.tool_chars = tool_chars
         super().__init__(self.describe())
 
     def describe(self) -> str:
-        """Client-facing sentence naming the limit and the compaction point."""
+        """Client-facing sentence naming the limit and the compaction point.
+
+        The leading sentence is byte-identical to the vendor's own 400 so a
+        client that already parses it needs no new branch. The trailing
+        ``[proxy_opencode]`` clause exists because the vendor's sentence is
+        actively misleading on the free tier: it advertises the *model* window
+        (200000 tokens, "compacts below 170000") while the account can never
+        send more than 32000 prompt tokens. A client that budgets against the
+        advertised ceiling loops forever — 2026-11-18, dsh compacted 16 times
+        and never recovered.
+        """
 
         ceiling = self.compaction_ceiling or self.input_limit
-        return (
+        if self.gate_chars > 0:
+            # The reachable compaction point is the gate, not the window.
+            ceiling = min(ceiling, self.input_limit)
+        base = (
             f"This model's maximum context length is {self.context_limit} tokens "
             f"and at most {self.input_limit} prompt tokens are accepted. This "
             f"request is about {self.estimated_tokens} prompt tokens. Reduce the "
             f"prompt or compact the conversation (the client compacts below "
             f"{ceiling} tokens) and retry."
+        )
+        if self.gate_chars <= 0:
+            return base
+        message_chars = max(0, self.prompt_chars - self.tool_chars)
+        return (
+            f"{base} [proxy_opencode] The free tier enforces a {self.gate_chars}"
+            f"-character prompt cap, not the advertised token window: this "
+            f"request carried {self.prompt_chars} characters ({self.tool_chars} "
+            f"in tool definitions, {message_chars} in messages). Trim at least "
+            f"{max(0, self.prompt_chars - self.gate_chars)} characters — tool "
+            f"definitions count toward the cap."
         )

@@ -304,3 +304,38 @@ def test_context_overflow_answers_with_the_openai_context_code():
     assert error["code"] == "context_length_exceeded"
     assert "136000" in error["message"]
     assert json.dumps(error)  # JSON-serialisable, no exception objects leaked
+
+
+def test_gated_overflow_states_the_character_budget_not_the_window():
+    # 2026-11-18 (dsh): the vendor sentence alone says "compacts below 170000
+    # tokens", which is unreachable on the free tier — the client compacted 16
+    # times and never got under the gate. The local verdict must therefore
+    # carry the reachable ceiling and the exact character debt.
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "d" * 900,
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    body = _body(
+        messages=[{"role": "user", "content": "x" * 120_000}], tools=[tool]
+    )
+    with pytest.raises(ContextOverflow) as excinfo:
+        apply_request_policy(body, profile=DEEPSEEK)
+    err = excinfo.value
+    text = str(err)
+    # upstream prefix preserved verbatim (code/parse parity)
+    assert text.startswith("This model's maximum context length is 200000 tokens ")
+    # but the advertised ceiling is replaced by the reachable one
+    assert "compacts below 20000 tokens" not in text
+    assert "compacts below 32000 tokens" in text
+    assert "170000" not in text
+    # and the real accounting is spelled out
+    assert err.gate_chars == 94_200
+    assert err.prompt_chars > 120_000
+    assert err.tool_chars > 900  # description + schema, not the message text
+    assert f"{err.prompt_chars - err.tool_chars} in messages" in text
+    assert f"Trim at least {err.prompt_chars - err.gate_chars} characters" in text
+    assert "tool definitions count toward the cap" in text

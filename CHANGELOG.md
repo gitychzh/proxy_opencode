@@ -5,6 +5,27 @@
 
 ## [Unreleased]
 
+### Fixed — 本地 400 的文案不再复读不可达的 170000 压缩点（0.8.36，2026-11-18）
+
+用户拿到 `This model's maximum context length is 200000 tokens ... the client
+compacts below 170000 tokens`，问是网关拼的还是上游发的。**是网关发的**：文案
+逐字复刻上游（opencode 靠 `code=context_length_exceeded` 起 overflow 压缩），但
+"compacts below 170000" 对免费层是**不可达的建议**——真实门只有 32000 prompt
+tokens，客户端照着 170000 设阈值就永远压不下来。
+
+- 判别手段（写进 `AGENTS.md` 硬约束 1）：本地 2–4 ms、日志带
+  `error: context_length_exceeded: ...`；上游 4xx 走 `_raw_relay_body` 原样
+  透传，秒级且 `error` 为空。
+- `ContextOverflow` 增 `prompt_chars` / `gate_chars` / `tool_chars`；字符门命中时
+  `compaction_ceiling` 渲染成 `min(ceiling, input_limit)`（32000，可达），并在原
+  句后追加 `[proxy_opencode]` 段：总字符、tools 字符、messages 字符、至少该删
+  多少字符，并明确"工具定义也计入额度"。
+- 原句前缀一字未改，`code` 仍是 `context_length_exceeded`。
+
+实测约束（2026-11-18 会话取证）：DSH 46 个工具占 38,913 chars，单个 tool 结果
+最大 49,933 chars，单步最大新增 51,509 chars —— 免费层 94,200 chars 的门扣掉
+工具只剩 55,287 chars，一次大文件读取就能打穿。这类负载只能走 hy4（1.28M chars）。
+
 ### Fixed — 流式作答补齐 usage；免费层的字符门在本地就拦（0.8.35，2026-11-18）
 
 用户报两件事：「DSH 里 token 数一直是 0」「deepseek 一用就触发上下文压缩，然后
