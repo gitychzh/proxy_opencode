@@ -5,6 +5,24 @@
 
 ## [Unreleased]
 
+### Changed — `ZEN_TOOLS_MODE=minimal` 注入空 schema 的全量 builtin 名（0.8.37，2026-11-18）
+
+DSH 会话中途工具定义膨胀（实测 21K→59K chars）叠加 40–64K chars 的会话上下文，
+加上网关注入的 captured 工具 21–25K chars，单请求 99.4–107.3K chars 撞 94.2K
+字符门。DSH 的 400-overflow 压缩在跑（capture 实证：50K 撞门→压到 38K→200），
+但压缩幅度常常不足（52K→48.9K 仍超；一次压缩后反而 55.7K），重试耗尽即整轮失败。
+
+- `minimal` 模式重新定义：注入全部 12 个 builtin **名字** + 空 schema（每项
+  ~110 chars）。形状门只数名字（严格子集 429，2026-10-29 实测），schema 内容
+  从不校验（AGENTS.md §1「4 真名 + 空 schema 亦 200」）。
+- 效果：注入部分 25,332 → ~1,350 chars，**省 ~24K prompt chars**。DSH 场景
+  tools 42,737 → ~18.7K，messages 预算 51.5K → ~75.5K chars——实测会话
+  （38–62K messages）不再撞门。
+- `full`（默认）与 `captured2` 不变；ECS 生产切 `minimal`。
+- 防御：注入名的 distinct 数 < min(len(builtins), 4) 时回退 captured 子集。
+- rename_collisions 语义不变：client 重名工具仍先改名让位，minimal 在其后
+  补全全部 builtin 名（防止子集 429）。
+
 ### Fixed — 本地 400 的文案不再复读不可达的 170000 压缩点（0.8.36，2026-11-18）
 
 用户拿到 `This model's maximum context length is 200000 tokens ... the client

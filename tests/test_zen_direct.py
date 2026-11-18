@@ -23,6 +23,7 @@ from proxy_opencode.egress.pool import (
 from proxy_opencode.upstreams import zen as zen_direct
 from proxy_opencode.upstreams.openai_http import StreamRelay
 from proxy_opencode.upstreams.zen import ZenDirectAdapter
+from proxy_opencode.upstreams.zen.tools import builtin_tools
 from proxy_opencode.upstreams.zen_bun_transport import BunTransportError
 
 
@@ -455,6 +456,45 @@ async def test_body_client_tool_with_builtin_name_is_renamed() -> None:
     assert builtin["function"]["description"] != "client-side bash"
     renamed = next(t for t in body["tools"] if t["function"]["name"] == "client_bash")
     assert renamed["function"]["description"] == "client-side bash"
+    await adapter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_body_minimal_mode_all_names_empty_schemas() -> None:
+    """ZEN_TOOLS_MODE=minimal: every builtin name, ~110-char schemas.
+
+    The gate counts names (a strict subset 429s) but never validates schema
+    content (AGENTS.md §1), so empty-schema injection reclaims ~24K prompt
+    chars for clients whose own tool definitions are large (DSH, 2026-11-18).
+    """
+
+    adapter = ZenDirectAdapter(make_settings(zen_tools_mode="minimal"))
+    custom = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            },
+        }
+    ]
+    body = adapter._build_body(
+        {"model": "big-pickle", "messages": [{"role": "user", "content": "x"}], "tools": custom},
+        "big-pickle",
+    )
+    captured_names = {t["function"]["name"] for t in builtin_tools()}
+    injected = body["tools"][:-1]  # client tool is appended last
+    assert {t["function"]["name"] for t in injected} == captured_names
+    assert body["tools"][-1]["function"]["name"] == "get_weather"
+    # every injected schema is a stub: description empty, no parameter bulk
+    for t in injected:
+        fn = t["function"]
+        assert fn["description"] == ""
+        assert fn["parameters"] == {"type": "object", "properties": {}}
+        assert len(json.dumps(t)) < 200
+    injected_chars = sum(len(json.dumps(t)) for t in injected)
+    assert injected_chars < 2000  # captured asset is ~25K
     await adapter.aclose()
 
 

@@ -17,8 +17,12 @@ Consequence (the 2026-10-29 02:00 outage): the shipped asset was a 1.19.4
 capture whose builtin list had shrunk to four names — under the subset rule
 every request came back as a fake quota 429 on all four egress IPs, which
 looked exactly like an exhausted account. ``ZEN_TOOLS_MODE`` therefore
-defaults to ``full``; ``minimal``/``captured2`` stay only as diagnosed
-fallbacks.
+defaults to ``full``. ``minimal`` was re-purposed on 2026-11-18: all twelve
+builtin **names** with empty schemas — the gate counts names and never
+validates schema content (AGENTS.md §1), so this passes the gate while
+reclaiming ~24K prompt chars for clients with heavy tool definitions
+(measured: DSH 59K tool chars + 40K messages = 99.4K chars > the 94.2K
+character gate). ``captured2`` stays only as a diagnosed fallback.
 
 Authority: AGENTS.md 硬约束 1 (形状门).
 """
@@ -106,16 +110,24 @@ def merge_tools(
             and not (tool_names([t]) & client_names)
         ]
     else:  # minimal
-        injected = []
-        for name in INJECT_NAME_POOL:
-            if name in client_names:
-                continue
-            injected.append(minimal_schema(name))
-            if len(injected) >= MIN_INJECTED_TOOLS:
-                break
-        if len(injected) < MIN_INJECTED_TOOLS:
-            # The client claims every pool name (pathological). Fall back to
-            # the captured subset so the gate still sees the names.
+        # All builtin names, zero schema bulk. The gate counts *names* (a
+        # strict subset 429s — 2026-10-29 re-measure), while AGENTS.md §1
+        # says schema/description content is not validated ("4 real names +
+        # empty schema also 200"). rename_collisions has already run, so the
+        # client list holds no builtin names and every slot must be filled.
+        # Each empty schema is ~110 chars against ~0.6-6K for the captured
+        # ones: reclaims ~24K prompt chars for clients whose own tool
+        # definitions are large (DSH measured 59K tool chars + 40K messages
+        # = 99.4K chars > the 94.2K gate, 2026-11-18).
+        injected = [
+            minimal_schema(next(iter(tool_names([b])), ""))
+            for b in builtins
+            if tool_names([b])
+        ]
+        distinct = {next(iter(tool_names([t]))) for t in injected if tool_names([t])}
+        if len(distinct) < min(len(builtins), MIN_INJECTED_TOOLS):
+            # Pathological asset (unnamed/duplicate builtin entries): fall
+            # back to the captured subset so the gate still sees the names.
             injected = [
                 t for t in builtins if tool_names([t]) & set(MINIMAL_TOOL_NAMES)
             ]
