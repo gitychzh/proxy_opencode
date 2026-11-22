@@ -182,7 +182,7 @@ rollback 镜像；③上传包用完即删，部署树里不许出现 `__pycache
 |---|---|---|---|
 | `owin10-mobile` | `100.109.109.108:10001`（有线 `bind_source 192.168.1.222`） | `36.149.55.x` 移动 | ONT V173-50 `kind=huawei`，入 `ZEN_EGRESS_ROTATION=30`，实弹成功 |
 | `owin10-telecom` | `100.109.109.108:10002`（WiFi `bind_source 192.168.2.235`） | `180.117.x` / `121.234.x` 电信 | ONT HG8020C `kind=huawei_ct`，实弹成功；前缀含 `180.117.0.0/16` |
-| `cc9` | `100.87.219.115:10001` | `116.147.x` / `122.195.x` 联通 | chroot agent + Magisk 看门狗；ONT HG6142A-C `kind=fenghuo` |
+| `cc9` | `100.99.99.95:10001` | `116.147.x` / `122.195.x` 联通 | chroot agent + Magisk 看门狗；ONT HG6142A-C `kind=fenghuo` |
 | `esp32-bucket` | ECS 本机适配器 `172.18.0.1:10005`（systemd `esp32-bucket-adapter.service`，HELLO 鉴权协议 v4） | MiFi 移动（`egress_ip` 由控制通道源地址实测，`egress_ip_source=control-peer`） | ESP32 反向隧道；**隧道空闲上限曾 20s（<网关 60s 首字节期限）导致慢请求全灭，0.7.9 修固件为 180s，需重烧**；3 连败自动 cordon；换 IP 用 `tools/reboot_mifi.py` |
 | ~~`win107`~~ | — | — | **2026-11-11 移出池，用户明令永不复用**（agent+sshd 开机自启失效、无人值守不可靠）。历史：2026-10-29 新增（宿迁电信独享公网 IP，无 ONT 驱动、靠 429 反应式）；echo_url 须无 AAAA 域名的教训保留在 `egress-agent/deploy/windows/README.md`；历史事件见 `egress_events.jsonl`（不删证据） |
 | ~~`win10`~~ | — | — | 2026-10-25 移出池：与 owin10-mobile 同 CGNAT 出口、无独立换 IP 能力 |
@@ -267,6 +267,33 @@ IP 域 cordon 并接受轮换结果，前缀不符只记 `prefix_mismatch` 事�
 
 验证：`hermes config get model_catalog.excluded_providers` 回 list、
 `hermes auth list` 无 pooled 条目。
+
+### 2.3 现役部署形态（2026-11-22 起，`proxy_uni` 一体化后）
+
+接入 `proxy_uni` 的 P73 迁移后，本栈**不再由 `zen-gw` compose 管理**：
+
+| 项 | 现值 |
+|---|---|
+| 容器 | `proxy_uni_next_oc`（`uvicorn proxy_opencode.app:create_app_from_env --port 10002`） |
+| 宿主端口 | **`:3113`**（`3113 -> 10002`）；**`:10002` 已不再监听** |
+| 数据目录（宿主） | `/opt/proxy_uni_next/oc/data` → 容器 `/data` |
+| 部署入口 | `uni/deploy_next.sh`（本仓库 `deploy/ecs/compose.yml` 路径是历史的） |
+
+因此下面 §3、§1 里所有 `zen-gw` / `/opt/zen-gw/src` / `115.29.231.25:10002`
+的命令**都是历史形态**，实际执行时按上表换算。
+
+> **`/opt/proxy_uni_next/oc/data` 必须 `chown 10002:10002`**（2026-11-22
+> 在迁移后**真的踩了**）：容器以 `USER gw`(uid 10002) 运行，目录是 root 建的，
+> 结果 `egress-events-next.jsonl` 在容器启动第一秒就 `PermissionError`，
+> `EventLog` 按设计**永久禁用**该 sink（只留一行
+> `egress event log disabled after write failure`），`egress-counts-next.json`
+> 每次快照写也失败。症状：**池子在动、健康检查全绿、但账本和配额计数一片空白**，
+> 换 IP / cordon 的归因链完全断掉。
+>
+> 修法：`chown -R 10002:10002 /opt/proxy_uni_next/oc/data`，然后
+> **重启容器**（EventLog 的禁用标志只在进程内，目录权限修好也不会自愈）：
+> `docker restart proxy_uni_next_oc`。验收：
+> `docker exec -u 10002 proxy_uni_next_oc sh -c 'echo x >> /data/probe.txt && rm /data/probe.txt'`。
 
 ## 3. 常用操作
 
