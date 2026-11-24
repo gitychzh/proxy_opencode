@@ -40,6 +40,56 @@ from .upstreams import build_adapter
 logger = logging.getLogger("proxy_opencode")
 
 
+def _warn_about_unrecoverable_pool(
+    settings: Settings, rotator: EgressRotator | None
+) -> None:
+    """Surface the settings combinations that leave the pool unable to heal.
+
+    Each of these was part of the 2026-11-24 outage, and each fails
+    silently: the gateway keeps serving, the ledger looks plausible, and
+    the pool simply never gets better. Warnings (not errors) because a
+    deployment without device-side rotation is legitimate — it just has to
+    know that a quota verdict is then permanent until the window resets.
+    """
+
+    if rotator is None:
+        logger.warning(
+            "no egress rotation is configured (ZEN_EGRESS_ROTATION / "
+            "ZEN_EGRESS_TOKEN_ROTATION empty): a per-IP quota verdict on "
+            "every bucket leaves the gateway with no way back until the "
+            "08:00 window reset"
+        )
+        return
+    if not settings.zen_rotate_on_hard_429:
+        logger.warning(
+            "ZEN_ROTATE_ON_HARD_429 is off: a hard 429 will NOT re-dial the "
+            "device by itself. Pool-wide exhaustion still escalates "
+            "(rotation on the last usable bucket), but a single burned "
+            "bucket only returns after ZEN_EGRESS_ROTATE_MIN_INTERVAL_S "
+            "passes and a threshold fires"
+        )
+    for name, budget in settings.zen_egress_token_rotation.items():
+        threshold = settings.zen_egress_rotation.get(name, 0)
+        if budget > 5_000_000 or (threshold and threshold > 200):
+            logger.warning(
+                "rotation threshold for %s looks unreachable "
+                "(requests=%s tokens=%s): the upstream burned a whole day's "
+                "allowance in ~1.8M estimated tokens on 2026-10-29, so a "
+                "multi-million budget never fires before the hard 429 does",
+                name,
+                threshold,
+                budget,
+            )
+    if settings.zen_egress_last_resort:
+        logger.warning(
+            "ZEN_EGRESS_LAST_RESORT=%s: these buckets only receive traffic "
+            "when nothing else can serve. Make sure the device is on its "
+            "expected network — a wrong-network leg reports ready=true and "
+            "resets every tunnel",
+            ",".join(sorted(settings.zen_egress_last_resort)),
+        )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or load_settings()
     # Structured egress event sink (JSONL on the ECS host): everything the
@@ -106,6 +156,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "egress pool (only zen-direct does); the pool will idle",
             settings.upstream_mode,
         )
+    if egress_pool is not None:
+        _warn_about_unrecoverable_pool(settings, egress_rotator)
 
     logger.info(
         "gateway starting",

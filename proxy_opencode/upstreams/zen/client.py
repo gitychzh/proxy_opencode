@@ -213,7 +213,7 @@ class ZenDirectAdapter:
 
         try:
             lease = await _acquire()
-        except PoolExhausted:
+        except PoolExhausted as exc:
             # 0.8.22: every bucket was already cordoned/benched before this
             # request even started. Touching a cordoned IP would keep its
             # 429 alive (the gateway's own bombardment IS the throttle —
@@ -221,6 +221,21 @@ class ZenDirectAdapter:
             # request to the backup chain as a request-scoped 429 relay.
             # No blackout hint: a single verdict must never become a
             # chain-wide deadline (same rule as the walk handoff below).
+            #
+            # A pool-wide exhaustion is different: the primary is down for
+            # every client, and answering it from the PAID backup is what
+            # drained the daily budget on 2026-11-24. Ask the device side
+            # for new IPs and surface the condition instead (see
+            # PoolExhausted.exhausted).
+            if exc.exhausted:
+                logger.error(
+                    "every egress bucket is unusable; asking the device side "
+                    "for fresh IPs and answering without burning the backup "
+                    "budget",
+                    extra={"session": session_key},
+                )
+                self._pool.request_recovery()
+                raise _pool_down_error(exc) from exc
             logger.warning(
                 "every egress bucket is cordoned; handing this request to "
                 "the backup chain without touching upstream",
@@ -270,7 +285,13 @@ class ZenDirectAdapter:
                     lease = await _acquire(
                         sticky=False, exclude=frozenset(tried)
                     )
-                except PoolExhausted:
+                except PoolExhausted as pexc:
+                    if pexc.exhausted:
+                        # The walk ran the pool dry: no bucket is selectable
+                        # for anybody. Ask the device side for fresh IPs and
+                        # keep the paid backup out of it.
+                        self._pool.request_recovery()
+                        raise _pool_down_error(pexc) from exc
                     raise _transport_error(exc) from exc
                 continue
             except BaseException:
@@ -807,6 +828,24 @@ def _transport_error(exc: BaseException) -> ConnectionError:
     if message.startswith("zen request failed"):
         return ConnectionError(message)
     return ConnectionError(f"zen request failed: {message}")
+
+
+class PoolDownError(ConnectionError):
+    """Every egress bucket is unusable and a re-dial has been requested.
+
+    Deliberately a distinct type: the failover wrapper answers a plain
+    transport failure from the PAID backup, and doing that for a pool-wide
+    outage is what exhausted the 150/day budget on 2026-11-24. The wrapper
+    relays this one to the client as a retryable 503 instead, keeping the
+    backup allowance for genuine single-request failures.
+    """
+
+
+def _pool_down_error(exc: BaseException) -> PoolDownError:
+    return PoolDownError(
+        "all egress buckets are unusable; the gateway requested fresh egress "
+        f"IPs and stayed silent meanwhile ({exc})"
+    )
 
 
 __all__ = [

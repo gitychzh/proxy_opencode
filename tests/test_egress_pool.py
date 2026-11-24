@@ -2008,3 +2008,154 @@ def test_burst_verdict_is_liftable_by_a_completed_request() -> None:
 
     assert state.cordoned(now) is False
     assert state.cordon_reason == ""
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-24 outage regressions
+# ---------------------------------------------------------------------------
+
+
+class _RecordingObserver:
+    """Minimal ReleaseObserver that records the escalation calls."""
+
+    def __init__(self) -> None:
+        self.deadlocks: list[tuple[tuple[str, ...], str]] = []
+
+    def on_release(
+        self,
+        name: str,
+        *,
+        ok: bool,
+        kind: str,
+        retry_after_s: float | None,
+        tokens: int = 0,
+    ) -> None:
+        return None
+
+    def on_deadlock(self, names: tuple[str, ...], *, reason: str) -> None:
+        self.deadlocks.append((names, reason))
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_wrong_network_leg_is_never_healthy() -> None:
+    """A wrong-network agent must not be selected as a healthy bucket.
+
+    The esp32 adapter answers ``ready=true`` / ``egress_probe_ok=true``
+    while its MiFi is associated to an unexpected SSID; only
+    ``wrong_network`` carries the verdict. Ignoring it made the pool treat
+    a leg that reset every tunnel as its healthiest candidate (2026-11-24:
+    288 transport failures against 16 successes).
+    """
+
+    pool = EgressPool([EgressSpec("esp", "http://esp:10005")])
+    respx.get("http://esp:10005/healthz").respond(
+        json={
+            "ready": True,
+            "egress_probe_ok": True,
+            "wrong_network": True,
+            "egress_ip": "",
+        }
+    )
+    await pool._probe_one(pool._states[0])  # noqa: SLF001
+    assert pool._states[0].healthy is False  # noqa: SLF001
+    assert pool._states[0].last_probe_ok is False  # noqa: SLF001
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_wrong_network_probe_reason_is_distinguishable(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """``wrong_network`` must be its own probe reason, not "ready=false".
+
+    The two have different remedies (re-associate the device vs. fix the
+    agent), and the nightly report groups by this string.
+    """
+
+    pool = EgressPool([EgressSpec("esp", "http://esp:10005")])
+    read, cleanup = _capture_events(tmp_path)
+    try:
+        respx.get("http://esp:10005/healthz").respond(
+            json={
+                "ready": True,
+                "egress_probe_ok": True,
+                "wrong_network": True,
+                "egress_ip": "",
+            }
+        )
+        await pool._probe_one(pool._states[0])  # noqa: SLF001
+        reasons = [e["reason"] for e in read() if e["event"] == "probe_failed"]
+        assert reasons == ["wrong_network=true (1/1)"]
+    finally:
+        cleanup()
+
+
+@pytest.mark.asyncio
+async def test_last_quota_verdict_escalates_instead_of_benching_silently() -> None:
+    """The 429 that empties the pool must request a re-dial.
+
+    Measured 2026-11-24: three carrier buckets 429'd, each was cordoned for
+    the capped window, and the only response was to retry the same burned
+    IPs when the cordons expired. A per-IP allowance needs a fresh address.
+    """
+
+    pool = make_pool("a", "b")
+    mark_healthy(pool)
+    observer = _RecordingObserver()
+    pool.attach_release_observer(observer)
+
+    first = await pool.acquire()
+    await pool.release(first, ok=False, kind="http_429", retry_after_s=60000.0)
+    # A healthy sibling still exists: stay silent, that is the whole point.
+    assert observer.deadlocks == []
+
+    second = await pool.acquire()
+    assert second.name != first.name
+    await pool.release(second, ok=False, kind="http_429", retry_after_s=60000.0)
+
+    assert len(observer.deadlocks) == 1
+    names, reason = observer.deadlocks[0]
+    # EVERY per-IP benched bucket is renewed, not just the last one: the
+    # other one still holds a burned address and would re-burn the pool.
+    assert set(names) == {"a", "b"}
+    assert reason == "free_quota_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_pool_exhaustion_on_acquire_asks_for_recovery() -> None:
+    """A pool that went dark between requests must still trigger a re-dial.
+
+    Nothing is released on this path (no upstream was touched), so the
+    deadlock hook that rides the release path cannot see it.
+    """
+
+    pool = make_pool("a")
+    mark_healthy(pool)
+    observer = _RecordingObserver()
+    pool.attach_release_observer(observer)
+    now = time.monotonic()
+    pool._states[0].cordoned_until = now + 600.0  # noqa: SLF001
+    pool._states[0].cordon_reason = (  # noqa: SLF001
+        "free_quota_exhausted (per-IP daily quota)"
+    )
+
+    with pytest.raises(PoolExhausted) as excinfo:
+        await pool.acquire()
+    assert excinfo.value.exhausted is True
+
+    pool.request_recovery()
+    assert observer.deadlocks == [(("a",), "acquire_pool_exhausted")]
+
+
+@pytest.mark.asyncio
+async def test_burned_retry_walk_is_not_a_pool_wide_exhaustion() -> None:
+    """A walk that used up its own buckets is not "the pool is down".
+
+    ``exhausted`` must stay False there: the pool may still be healthy for
+    the next request, and the backup chain is the right answer (charged).
+    """
+
+    pool = make_pool("a", "b")
+    mark_healthy(pool)
+    with pytest.raises(PoolExhausted) as excinfo:
+        await pool.acquire(exclude=frozenset({"a", "b"}))
+    assert excinfo.value.exhausted is False

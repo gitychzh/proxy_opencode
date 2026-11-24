@@ -7,10 +7,15 @@
 > [`AGENTS.md`](../AGENTS.md) 硬约束 1；模型参数看
 > [`MODEL_PROFILE.md`](MODEL_PROFILE.md)；凭据去向看 [`ACCESS.md`](ACCESS.md)。
 >
-> ⚠️ 版本分层：§2/§6 中标注 0.8.6~0.8.9 的策略（如 `ZEN_ROTATE_ON_HARD_429=true`
-> 自动轮换、单桶故障规则）是**当时实现，原文保留作变更史**；0.8.19 起生产已关闭
-> 429 自动轮换，0.8.22 起 cordon 桶零可达、全 cordon 直接交备用链。冲突时以
-> `CHANGELOG.md` 最新版本条目与 `.workbuddy/memory/MEMORY.md` 为准。
+> ⚠️ 版本分层：§2/§6 中标注 0.8.6~0.8.9 的策略（如单桶故障规则）是**当时实现，
+> 原文保留作变更史**；0.8.22 起 cordon 桶零可达、全 cordon 直接交备用链。
+>
+> **`ZEN_ROTATE_ON_HARD_429` 的现值（2026-11-24 更正）**：本段此前写「0.8.19 起
+> 生产已关闭 429 自动轮换」，该结论**已作废**——配额按出口 IP 计量，关掉它就等于
+> 让烧穿的桶只能干等窗口重置。生产必须为 `true`（`deploy/ecs/env.example` 已标定）；
+> 2026-11-24 正是因为生产误设为 `false`，三桶硬 429 后循环重试同一批 IP 一个多小时。
+> 0.8.41 起池子全灭另有 `on_deadlock` 兜底（不受该开关约束），但单桶烧穿仍依赖它为
+> `true`。冲突时以 `CHANGELOG.md` 最新版本条目为准。
 
 ## 1. 现状（0.8.x 双容器）
 
@@ -425,6 +430,23 @@ docker logs zen-gw 2>&1 | grep -E "bun upstream attempt|answering 503|FALLBACK"
 - 全部桶 `healthy=true` 但客户端报错：查 §4.1 的门，而不是桶健康。
 - `answering 503` / 客户端收到 `egress_unavailable`：全池耗尽，等自动轮换或手动
   rotate。
+- `wrong_network=true`（esp32 桶）：agent 在线、自身探测也通，但 MiFi 挂在非预期
+  SSID。**这类腿会被判 unhealthy**（0.8.41 起；此前它一直显示 `healthy=true` 并
+  吞掉全部请求），处置是让设备回到预期网络，不是修 agent。
+
+### 4.2.1 全池无可用桶（`egress_pool_down` / `pool_exhausted`）
+
+配额按**出口 IP** 计量，桶全灭时唯一的恢复手段是换 IP。0.8.41 起：
+
+| 日志 / 响应 | 含义 | 处置 |
+|---|---|---|
+| `pool_exhausted` 事件 + `pool exhausted: renewing the egress IP of every benched bucket` | 某次配额判决让池子没有可用桶，已向**所有**被 bench 的桶请求重拨 | 等 30–90s；`rotation_succeeded` 后 `cordon_lifted` 自动恢复 |
+| HTTP 503 `code=egress_pool_down` | 同上，且**没有**计费到付费兜底 | 客户端可重试；不要查 proxy_ms 余额 |
+| `rotation_requested` 但没有 `rotation_succeeded` | 设备侧没能换到新 IP（ISP 重发同地址 / agent 不可达） | 查该桶 agent `/healthz`；`ZEN_EGRESS_ROTATE_MIN_INTERVAL_S` 内不会重试 |
+
+排查顺序：**先看 `cordon_reason` 与 `rotation_*` 事件，再看 429 次数**。若
+`ZEN_ROTATE_ON_HARD_429=false`，单桶烧穿后不会自己换 IP——启动日志会明确告警
+（`_warn_about_unrecoverable_pool`），生产必须为 `true`（见 `deploy/ecs/env.example`）。
 
 ### 4.3 流问题
 

@@ -5,6 +5,120 @@
 
 ## [Unreleased]
 
+### Fixed — 出口池无法自愈：429 死锁、死腿判健康、兜底预算被烧光（0.8.41，2026-11-24）
+
+线上症状：`zen request failed: TypeError: ECONNRESET` → HTTP 502。排查后是四条
+独立缺陷叠成一次长时间停机，单看每一条都不像「超大 BUG」。
+
+**现场（ECS `proxy_uni_next_oc`，2026-11-24）**：三个运营商桶
+`owin10-telecom` / `cc9` / `owin10-mobile` 在 07:27 的 3 秒内先后硬 429
+（`Retry-After`≈60000s）；07:27:26 同一份 header/body 经 `esp32-bucket` 拿到 200，
+说明 body/session/形状门都通过，429 是**按出口 IP 计的真配额**。此后：
+
+- 三桶被 `free_quota_exhausted` cordon 600s，**不换 IP**；到期重试、又 429、
+  再 600s，等间隔循环一个多小时（06:16/06:27/06:37/06:47/06:57/07:09/07:27）。
+- `esp32-bucket` 成为唯一候选，而它的 agent 上报 `wrong_network: true`
+  （MiFi 挂在非预期 SSID），却因为 `ready`/`egress_probe_ok` 均为 true 被判**健康**。
+  当天它累计 288 次 transport 失败、16 次成功。
+- 每次失败都转付费兜底 `proxy_ms`，06:04–07:34 烧到 `150/150`；此后全部请求 502。
+
+**根因与修复**
+
+1. **429 永不触发换 IP（死锁）**。`ZEN_ROTATE_ON_HARD_429` 生产为 `false`
+   （仓库 `deploy/ecs/env.example` 已标定为 `true`），429 只 cordon、不换 IP。
+   新增 `ReleaseObserver.on_deadlock`：当一个配额判决让池子**没有可用桶**时，
+   由池主动请求设备侧重拨 IP。该路径**不受** `ZEN_ROTATE_ON_HARD_429` 约束——
+   那个开关回答的是「是否每个硬 429 都要重启光猫」，而池子全灭是另一个问题。
+   重拨对象是**所有被 per-IP 判决 bench 的桶**（只换最后一个，其余桶会在自己的
+   cordon 到期后带着旧 IP 回来，把池子再烧一遍）。acquire 路径新增
+   `EgressPool.request_recovery()`，覆盖「请求之间池子变黑、没有 release 事件」的窗口。
+2. **死腿被判健康**。`egress/pool._probe_one` 现在把 `wrong_network: true` 当硬失败
+   （与 agent 不可达同级），并给出独立探针原因 `wrong_network=true`——它和
+   `ready=false` 的处置完全不同（设备重新联网 vs. 修 agent），报表要能分开归组。
+3. **兜底预算被池子全灭烧光**。`PoolExhausted.exhausted` 区分「本请求把 walk 用完」
+   与「整个池子没有可用桶」；后者在 `zen.client` 转成 `PoolDownError`，由
+   `FailoverAdapter` 直接回**可重试 503**（`code=egress_pool_down`），**不计费**。
+   付费兜底的额度留给真正的单请求失败。
+4. **配置漂移**。生产 `env.list` 与 `deploy/ecs/env.example` 四处不一致：
+   `ZEN_ROTATE_ON_HARD_429` false/true、`ZEN_EGRESS_TOKEN_ROTATION` 9.5M/1.2M、
+   `ZEN_EGRESS_ROTATION` 500/30、`ZEN_EGRESS_LAST_RESORT` 设/未设。
+   阈值 8 倍意味着阈值触发器**永远先被硬 429 抢先**，等于不存在。
+   `app._warn_about_unrecoverable_pool` 在启动时对这类组合逐条告警
+   （无轮换配置 / 429 不换 IP / 阈值不可达 / last-resort 桶），不再静默降级。
+
+**顺带修掉的测试缺陷**：`test_request_rotation_enforces_the_cap_on_every_trigger`
+缺 `@respx.mock`，mock 从未生效，请求打到真实 DNS（`a`）后在本机挂到超时——
+这条失败被长期记作「1 个既有失败除外」。补上装饰器后 592 passed。
+
+新增回归：`wrong_network` 判健康与探针原因、最后一个配额判决触发 escalation、
+acquire 侧恢复请求、walk 用尽不等于池子全灭、`on_deadlock` 不受开关约束、
+`on_deadlock` 续租全部被 bench 的桶、池子全灭不计费且不触发 hold。
+
+### Changed — 模型参数与上游目录逐项对齐（0.8.40，2026-11-23）
+
+用户要求「必须按它原来的样子反代，不得改变它原有的参数」。据此把网关侧
+`model_profile` 与 agent 侧 `opencode.json` 一起按当天匿名目录（`Bearer public`
+GET `/inference/v1/models`，12 个免费 id）逐项校对：
+
+- **`big-pickle` 两处都写错了**：目录是 context 200,000 / input 160,000，而
+  profile 与 opencode.json 都写着 262,139 / 261,000（来自一次池探测的最大值）。
+  opencode 用目录值算压缩点（`160000 - 24000 = 136000`），网关报更大的数会让
+  客户端以为还有余量却撞上游 400。两处都改为目录值。
+- **免费清单当日变动**：`glm-5.3-flash-free` / `minimax-m3.1-flash-free` /
+  `longcat-2.5-free` / `inkling-2-small-free` 已下架，删除其 profile；
+  新增 `tidepool-alpha-free`(1M/131k)、`qwen4-max-free`(1M/262k)、
+  `jev-1.13-free`(64k，目录未给 output，用 CLI 兜底 32k)。
+- agent 侧 `opencode.json` 的 12 个模型 `limit` 全部按目录重写（含 input
+  字段），并补上新增的三个 id。
+- 测试：`test_big_pickle_limits_match_the_published_catalogue`、
+  `test_the_2026_11_23_catalogue_additions_are_transcribed_verbatim`、
+  `test_delisted_free_ids_have_no_profile`；profile 集合断言改为当日 12 个。
+  581 passed（1 个既有失败除外），ruff / mypy 全绿。
+- 验收：ECS `zen-gw:0.8.40`；网关 `/v1/models` 免费 id 12 个；`deepseek` /
+  `hy4` / `qwen4` 均 `adapter=zen-direct` 200；opencode 桌面端以新参数重启后
+  `big-pickle` / `qwen4-max-free` / `tidepool-alpha-free` 全部 succeeded，
+  300,000 字符单条消息在 `hy4-flash-free` 与 `big-pickle` 上均返回 ok。
+
+### Changed — 思考档位默认原样透传（0.8.39，2026-11-23）
+
+同一批「网关不得改客户端参数」的收尾：`ZEN_REASONING_POLICY` 默认由 `max`
+改为 `client`。
+
+- 旧默认下，模型档案未声明该档位时网关会丢弃客户端送来的 `reasoning_effort`
+  / `thinking` / `reasoning` 等字段。实测上游并不校验档位：`hy4-flash-free`
+  只声明 `none/high`，但 `low`/`medium` 均 200；`big-pickle` 未声明任何档位，
+  `low` 也 200。
+- 改后网关对思考控制不做任何判断，`max`/`off` 仅留作诊断。
+- 同批部署验证（ECS `zen-gw:0.8.38` + env 更新）：241,531 字符 →
+  `deepseek-v4.1-flash-free` 200（56,440 prompt tokens）；1,200,000 字符 →
+  `hy4-flash-free` 200（269,310 prompt tokens）；opencode 桌面端发送
+  270,000/630,000 字符单条消息均 `succeeded`，未触发压缩。
+
+### Changed — 网关不再做任何入站限制：撤掉 94.2K 字符门与输出预算注入（0.8.38，2026-11-23）
+
+用户报告：opencode 自带 `deepseek-v4.1-flash-free` 正常，换成本网关同模型就 400
+「at most 32000 prompt tokens are accepted」。
+
+- **根因**：`policy.py` 对四个免费 id 强制
+  `round(chars * 0.33966) <= 32000`（94,200 字符），并复述一句上游从不存在的
+  「32000 prompt tokens」上限。该常量来自 2026-11-17/18 一次高密度内容的二分，
+  不是厂商限制。
+- **反证**（厂商自带客户端，不经过本网关）：opencode 桌面版内置 `opencode`
+  provider 的会话 `ses_e0d3252b…` 把上下文跑到 **169,767 prompt tokens**（~90 轮
+  全 200），随后在 169,767 → 19,432 之间自动压缩（200K × 85% = 170K，正是
+  opencode `calculateCeiling`）。本网关却拒 241,531 字符的请求。
+- **改法**：`ZEN_CONTEXT_GUARD` 默认 `0`、`ZEN_OUTPUT_BUDGET` 默认 `off`；
+  所有 profile 的 `limits.prompt_chars` 置 0（`GATE_*` 常量保留给探针与旧日志
+  阅读）。限额（最大上下文、压缩点、最大输入、输出预算）全部归 **agent**。
+- 测试：`test_the_character_gate_is_retired_from_every_profile`、
+  `test_a_large_prompt_is_forwarded_by_default`、`test_guard_is_off_by_default`、
+  `test_off_mode_is_the_default`；输出预算相关用例改为显式传
+  `output_budget_mode="mirror"`。28/28 `test_zen_policy.py` 通过，全套
+  581 passed（1 个既有失败 `test_request_rotation_enforces_the_cap_on_every_trigger`
+  与本次改动无关，已用 `git stash` 对照确认）。
+- 文档：`docs/MODEL_PROFILE.md` §4 重写、§11 标注作废；`deploy/ecs/env.example`
+  默认值改为 `ZEN_CONTEXT_GUARD=0` / `ZEN_OUTPUT_BUDGET=off`。
+
 ### Changed — `ZEN_TOOLS_MODE=minimal` 注入空 schema 的全量 builtin 名（0.8.37，2026-11-18）
 
 DSH 会话中途工具定义膨胀（实测 21K→59K chars）叠加 40–64K chars 的会话上下文，

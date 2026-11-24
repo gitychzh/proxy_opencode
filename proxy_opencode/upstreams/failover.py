@@ -68,6 +68,7 @@ from ..config import Settings
 from ..egress.eventlog import EVENTS
 from ..errors import InvalidRequest
 from .openai_http import OpenAIHttpAdapter, StreamRelay
+from .zen.client import PoolDownError
 
 logger = logging.getLogger("proxy_opencode.failover")
 
@@ -366,6 +367,42 @@ class FailoverAdapter:
             # proxy_ms while logging a PRODUCTION INCIDENT. Re-raise so the
             # route answers 400 with its own code (context_length_exceeded).
             raise
+        except PoolDownError as exc:
+            # Every bucket is unusable and the device side has been asked for
+            # fresh IPs. This is not a single request that the primary could
+            # not serve — it is the whole pool, so spending the PAID backup's
+            # daily allowance here is what turned the 2026-11-24 outage into
+            # 150/150 with three recoverable buckets. Answer with a
+            # gateway-owned retryable 503 and keep the budget for real
+            # single-request failures.
+            logger.error(
+                "PRODUCTION INCIDENT - EGRESS POOL DOWN: every bucket is "
+                "unusable (%s); answering 503 without charging the backup "
+                "budget (rotation requested)",
+                _describe(exc)[:120],
+            )
+            EVENTS.emit(
+                "pool_down",
+                severity="incident",
+                primary=self.name,
+                reason=_describe(exc)[:120],
+            )
+            return {
+                "__status__": 503,
+                "content": {
+                    "error": {
+                        "message": (
+                            "all free-tier egress buckets are unusable; the "
+                            "gateway has requested fresh egress IPs and will "
+                            "serve this model again once one re-dials. Retry "
+                            "shortly."
+                        ),
+                        "type": "api_error",
+                        "param": None,
+                        "code": "egress_pool_down",
+                    }
+                },
+            }
         except Exception as exc:  # transport, timeout, adapter fault
             if self._budget_blocked():
                 logger.error(

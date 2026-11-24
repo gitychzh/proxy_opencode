@@ -1254,6 +1254,8 @@ async def test_timer_retry_respects_the_per_window_cap() -> None:
     assert pending is None or pending.done()
     assert counters.counts("a").rotations == 2
 
+
+@respx.mock
 @pytest.mark.asyncio
 async def test_request_rotation_enforces_the_cap_on_every_trigger() -> None:
     """The per-window cap must bind the TRIGGER paths, not only retries.
@@ -1300,3 +1302,85 @@ async def test_request_rotation_enforces_the_cap_on_every_trigger() -> None:
     assert forced is not None
     await asyncio.wait_for(forced, timeout=5.0)
     assert counters.counts("a").rotations == 3
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-24 outage regressions
+# ---------------------------------------------------------------------------
+
+
+async def test_on_deadlock_rotates_even_when_hard_429_rotation_is_off() -> None:
+    """Pool exhaustion is not gated by ZEN_ROTATE_ON_HARD_429.
+
+    That switch answers "should EVERY hard 429 reboot an ONT?" and stays
+    off for deployments without a reachable device agent. A pool with
+    nothing left is a different question, and leaving it behind the switch
+    turned a mis-set flag into a permanent outage on 2026-11-24.
+    """
+
+    pool = make_pool("a")
+    counters = EgressCounters({"a": 1_000_000})
+    rotator = EgressRotator(
+        pool,
+        counters,
+        poll_s=0.01,
+        timeout_s=0.05,
+        rotate_on_hard_429=False,
+    )
+    mark_healthy_with_ip(pool)
+
+    rotator.on_deadlock(("a",), reason="free_quota_exhausted")
+
+    # The trigger path is what must not be gated by the switch. Cancel the
+    # spawned device task: actually driving it would hit the real network
+    # (see the respx flake tracked separately), which is not what this test
+    # is about.
+    task = rotator._tasks["a"]  # noqa: SLF001
+    assert not task.done()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert counters.counts("a").rotations == 1
+
+
+async def test_on_deadlock_renews_every_benched_bucket() -> None:
+    """Renewing only the last bucket leaves the others on burned IPs.
+
+    Each per-IP allowance needs its own fresh address; a bucket that keeps
+    its old one re-enters rotation when its cordon expires and burns the
+    pool again in a staggered loop.
+    """
+
+    pool = make_pool("a", "b", "c")
+    counters = EgressCounters({"a": 1_000_000, "b": 1_000_000, "c": 1_000_000})
+    rotator = EgressRotator(pool, counters, poll_s=0.01, timeout_s=0.05)
+    mark_healthy_with_ip(pool)
+    for name in ("a", "b", "c"):
+        respx.post(f"http://{name}:10001/rotate").respond(
+            json={"ok": True, "results": [{"ok": True, "ont": "x", "detail": ""}]}
+        )
+        respx.get(f"http://{name}:10001/healthz").respond(
+            json={"ready": True, "egress_ip": NEW_IP}
+        )
+
+    rotator.on_deadlock(("a", "b", "c"), reason="free_quota_exhausted")
+    await asyncio.gather(*rotator._tasks.values())  # noqa: SLF001
+
+    assert {n: counters.counts(n).rotations for n in ("a", "b", "c")} == {
+        "a": 1,
+        "b": 1,
+        "c": 1,
+    }
+
+
+async def test_on_deadlock_ignores_buckets_without_ont_config() -> None:
+    """A bucket with no device-side re-dial must not be requested."""
+
+    pool = make_pool("a")
+    counters = EgressCounters({"a": 1_000_000})
+    rotator = EgressRotator(pool, counters, poll_s=0.01, timeout_s=0.05)
+    mark_healthy_with_ip(pool)
+
+    rotator.on_deadlock(("retired",), reason="free_quota_exhausted")
+
+    assert rotator.running("retired") is False
+    assert rotator._tasks == {}  # noqa: SLF001

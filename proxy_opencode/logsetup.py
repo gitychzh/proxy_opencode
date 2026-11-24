@@ -68,6 +68,10 @@ FIELDS = (
     "ip_to",
     "elapsed_s",
     "cordon_reason",
+    # Pool-exhaustion escalation (egress/pool._note_deadlock): names of the
+    # buckets benched by a per-IP verdict, so the line says which devices
+    # the rotation driver was asked to re-dial. Egress names only.
+    "benched",
     # Backup-chain failover provenance (routes/_pipeline.fallback_log_fields):
     # without these the per-request log line loses the only evidence that a
     # turn was served by proxy_ms instead of the primary chain.

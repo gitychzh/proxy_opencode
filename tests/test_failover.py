@@ -855,3 +855,49 @@ async def test_fallback_daily_budget_zero_is_unlimited() -> None:
         assert result == {"id": "ok"}
     assert len(secondary.calls) == 5
     assert adapter.fallback_status()["daily_budget"]["max"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-24 outage regressions
+# ---------------------------------------------------------------------------
+
+
+async def test_pool_down_does_not_charge_the_backup_budget() -> None:
+    """A pool-wide outage must not spend the paid backup's allowance.
+
+    The 2026-11-24 incident: one mis-classified dead leg produced 288
+    transport failures in 90 minutes, every one of them charged a backup
+    request until the 150/day cap was gone — after which the whole gateway
+    answered 502 while three carrier buckets only needed a re-dial.
+    ``PoolDownError`` says "no bucket is usable at all", which is not a
+    single request the primary could not serve.
+    """
+
+    from proxy_opencode.upstreams.zen.client import PoolDownError
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary, zen_fallback_daily_max=5)
+
+    for _ in range(3):
+        primary.outcomes = [PoolDownError("all egress buckets are unusable")]
+        result = await adapter.chat({"model": "big-pickle"})
+        assert result["__status__"] == 503
+        assert result["content"]["error"]["code"] == "egress_pool_down"
+
+    assert secondary.calls == []
+    assert adapter.fallback_status()["daily_budget"]["used"] == 0
+
+
+async def test_pool_down_is_retryable_and_does_not_trip_the_breaker() -> None:
+    """The client must see a retryable 503, not a 4xx it treats as fatal."""
+
+    from proxy_opencode.upstreams.zen.client import PoolDownError
+
+    primary = FakeAdapter()
+    adapter, secondary = make_adapter(primary)
+    primary.outcomes = [PoolDownError("all egress buckets are unusable")]
+    result = await adapter.chat({"model": "big-pickle"})
+    assert result["__status__"] == 503
+    assert result["content"]["error"]["type"] == "api_error"
+    # No hold: the next request goes straight back to the primary pool.
+    assert adapter.fallback_status()["engaged"] is False

@@ -64,7 +64,25 @@ class PoolExhausted(Exception):
     (2026-11-04: the esp32 tunnel measured 38 upstream attempts for 10
     client requests because each retry walk re-picked the same — only —
     non-cordoned bucket four times).
+
+    ``exhausted`` separates the two causes, because they need opposite
+    answers from the backup chain:
+
+    * ``exhausted=False`` — THIS REQUEST burned its walk (every bucket is
+      in ``exclude``) while the pool as a whole may still be fine. Answer
+      from the backup and charge the budget: the primary really could not
+      serve this request.
+    * ``exhausted=True`` — the POOL has nothing selectable at all (every
+      bucket cordoned, benched or probe-dead). The primary is down for
+      everyone, a re-dial is already being requested, and burning the
+      paid backup's daily allowance on it is exactly what turned the
+      2026-11-24 incident into a 150/150 budget exhaustion with three
+      recoverable buckets.
     """
+
+    def __init__(self, message: str = "", *, exhausted: bool = False) -> None:
+        super().__init__(message)
+        self.exhausted = exhausted
 
 
 class ReleaseObserver(Protocol):
@@ -85,6 +103,26 @@ class ReleaseObserver(Protocol):
         retry_after_s: float | None,
         tokens: int = 0,
     ) -> None: ...
+
+    def on_deadlock(self, names: tuple[str, ...], *, reason: str) -> None:
+        """Called when a bucket's verdict left the POOL with nothing usable.
+
+        ``names`` are every bucket this verdict benched for a per-IP reason
+        and that still has a device-side re-dial available — the pool cannot
+        rotate anything itself. A hard 429 that cordons the last serving
+        bucket otherwise means "wait for the cordon to expire, then hit the
+        same burned IP again" — measured 2026-11-24, three carrier buckets
+        cycled 429 → 600s cordon → 429 for over an hour while the device
+        side could have re-dialed in 30 seconds.
+
+        Renewing only the bucket that happened to answer last is not enough:
+        the other benched buckets keep their burned IPs and re-enter
+        rotation when their cordons expire, which re-burns the pool in a
+        staggered loop. Implementations must be non-blocking and must not
+        raise (the release path swallows errors).
+        """
+
+        ...
 
 
 class EgressPool:
@@ -446,7 +484,10 @@ class EgressPool:
             # the next real request re-probes it at CLI-like rate.
             raise PoolExhausted(
                 "every bucket is either excluded by this request's "
-                "retry walk or benched"
+                "retry walk or benched",
+                # No ``exclude`` means this is not a burned walk: nothing in
+                # the pool can serve anybody (see the class docstring).
+                exhausted=not exclude,
             )
 
         # Session affinity: a bound, still-usable bucket wins outright — the
@@ -566,6 +607,33 @@ class EgressPool:
         """Register the release observer (builders wire the rotator late)."""
 
         self._observer = observer
+
+    def request_recovery(self) -> None:
+        """Ask the device side for fresh IPs while the pool serves nothing.
+
+        Called on the acquire path when ``PoolExhausted.exhausted`` is set:
+        the request that discovered it never touched an upstream, so no
+        release event fires and the ``_note_deadlock`` hook (which rides the
+        release path) cannot see it. Without this a pool that went dark
+        between requests — or was drained by a walk that ended on a relay —
+        would stay dark until the cordons expired, which is precisely the
+        retry-the-same-burned-IP loop the rotation exists to break.
+        """
+
+        now = time.monotonic()
+        benched = tuple(
+            s.spec.name
+            for s in self._states
+            if s.cordoned(now)
+            and s.cordon_reason.split(" (", 1)[0]
+            in ("free_quota_exhausted", "free_quota_burst")
+        )
+        if self._observer is None or not benched:
+            return
+        try:
+            self._observer.on_deadlock(benched, reason="acquire_pool_exhausted")
+        except Exception:
+            logger.exception("rotation observer failed on acquire exhaustion")
 
     def find(self, name: str) -> EgressState | None:
         return next((s for s in self._states if s.spec.name == name), None)
@@ -791,6 +859,12 @@ class EgressPool:
                             "capped_from_window_s": round(window_s, 1),
                         },
                     )
+                # A per-IP allowance does not refill on its own within the
+                # cordon's reach: if this verdict took the LAST usable bucket
+                # out of rotation, the pool must ask the device side for a
+                # new IP rather than re-test the same burned address when the
+                # capped cordon expires (2026-11-24 outage).
+                self._note_deadlock(state, now, "free_quota_exhausted")
         elif kind == "free_tier_rejected":
             # The free-tier gate flagged this bucket's egress IP: it cannot
             # serve the free tier until the agent re-dials (measured 2026-10-17:
@@ -1056,6 +1130,74 @@ class EgressPool:
                 "release observer failed", extra={"egress": state.spec.name}
             )
 
+    def _usable_after(self, state: EgressState, now: float) -> int:
+        """Buckets a NEW request could be served from right now.
+
+        ``state`` is excluded: it is the bucket whose verdict is being
+        folded, and the question this answers is "can the pool still serve
+        without it?". Counts only non-cordoned, agent-healthy legs — the
+        same gates ``acquire`` applies before it hands out a lease.
+        """
+
+        return sum(
+            1
+            for s in self._states
+            if s is not state and s.available(now) and s.healthy
+        )
+
+    def _note_deadlock(self, state: EgressState, now: float, reason: str) -> None:
+        """Escalate to the rotation driver when the pool has nothing left.
+
+        A per-IP quota verdict on the LAST usable bucket is not a "wait for
+        the token bucket to refill" situation: the allowance is metered per
+        egress IP and only a fresh IP gets a fresh allowance, which is
+        exactly what the device-side rotation provides. Without this the
+        cordon alone is the only response, and the capped cordon
+        (``ZEN_QUOTA_CORDON_MAX_S``) turns into a retry-against-the-same-
+        burned-IP loop — the 2026-11-24 outage. Silence-with-cordon remains
+        correct while a healthy sibling exists, so the check is
+        deliberately about the pool, not about this bucket.
+        """
+
+        if self._usable_after(state, now) > 0:
+            return
+        # Every bucket benched by a per-IP verdict is equally burned: the
+        # quota is metered per source address, so each one needs its own
+        # fresh IP before the pool is healthy again.
+        benched = tuple(
+            s.spec.name
+            for s in self._states
+            if s.cordoned(now)
+            and s.cordon_reason.split(" (", 1)[0]
+            in ("free_quota_exhausted", "free_quota_burst")
+        )
+        logger.error(
+            "egress pool exhausted: the quota verdict on this bucket left "
+            "no usable sibling; requesting IP rotations instead of "
+            "waiting out the cordon",
+            extra={
+                "egress": state.spec.name,
+                "reason": reason,
+                "benched": ";".join(benched),
+            },
+        )
+        EVENTS.emit(
+            "pool_exhausted",
+            egress=state.spec.name,
+            egress_ip=state.egress_ip,
+            reason=reason,
+            benched=";".join(benched),
+        )
+        if self._observer is None or not benched:
+            return
+        try:
+            self._observer.on_deadlock(benched, reason=reason)
+        except Exception:
+            logger.exception(
+                "rotation observer failed on pool exhaustion",
+                extra={"egress": state.spec.name},
+            )
+
     # --------------------------------------------------------------- probes
 
     async def _probe_loop(self) -> None:
@@ -1231,6 +1373,18 @@ class EgressPool:
         # previous behaviour (default true).
         if payload.get("egress_probe_ok") is False:
             ok = False
+        # ``wrong_network`` (esp32-bucket adapter): the agent is up and its
+        # own outbound probe succeeds, but the MiFi it tunnels through is
+        # associated to an SSID outside the expected carrier network. Its
+        # ``ready``/``egress_probe_ok`` both stay true, so without this the
+        # pool kept treating a leg that ECONNRESETs every tunnel as the
+        # healthiest candidate — 2026-11-24: with the three carrier buckets
+        # under a quota cordon it absorbed every request and produced 288
+        # transport failures against 16 successes. A wrong-network leg is a
+        # HARD verdict, exactly like an unreachable agent: it cannot serve
+        # the free tier until the device re-associates.
+        if payload.get("wrong_network") is True:
+            ok = False
         previous_ok = state.healthy
         state.last_probe_ok = ok
         ip = payload.get("egress_ip") if isinstance(payload, dict) else None
@@ -1339,6 +1493,8 @@ class EgressPool:
 
         if status_code != 200:
             return f"status {status_code}"
+        if payload.get("wrong_network") is True:
+            return "wrong_network=true"
         if payload.get("egress_probe_ok") is False:
             return "egress_probe_ok=false"
         return "ready=false"

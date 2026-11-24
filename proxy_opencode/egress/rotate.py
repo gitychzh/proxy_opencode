@@ -207,6 +207,44 @@ class EgressRotator:
             )
             self.request_rotation(name, trigger="free_tier_rejected")
 
+    def on_deadlock(self, names: tuple[str, ...], *, reason: str) -> None:
+        """The pool has no usable bucket left; renew the benched IPs.
+
+        Deliberately independent of ``ZEN_ROTATE_ON_HARD_429``. That switch
+        answers "should EVERY hard 429 reboot an ONT?", and it stays off for
+        deployments without a reachable device agent. This path answers a
+        different question — "is anything still able to serve?" — and only
+        fires when the answer is no. Leaving it behind the switch is what
+        turned a mis-set flag into a permanent outage on 2026-11-24: three
+        carrier buckets 429'd, every one of them was benched for the capped
+        cordon, and the only response was to retry the same burned IPs.
+
+        All benched buckets are renewed, not just the last one to answer: a
+        per-IP allowance is what ran out, so a bucket left on its old
+        address re-enters rotation when its cordon expires and burns the
+        pool again. The per-window rotation cap, the minimum interval and
+        ``request_rotation``'s one-task-per-bucket guard all still apply, so
+        a device that cannot actually re-dial cannot be rebooted in a loop.
+        """
+
+        rotatable = [name for name in names if self.rotatable(name)]
+        if not rotatable:
+            # Nothing on the device side to re-dial (e.g. the ECS host's own
+            # agent). The cordon stays the only lever.
+            logger.warning(
+                "pool exhausted but no benched bucket has an ONT config; "
+                "the cordon is the only recovery lever",
+                extra={"benched": ";".join(names), "reason": reason},
+            )
+            return
+        logger.warning(
+            "pool exhausted: renewing the egress IP of every benched bucket "
+            "(a fresh IP gets its own per-IP allowance)",
+            extra={"benched": ";".join(rotatable), "reason": reason},
+        )
+        for name in rotatable:
+            self.request_rotation(name, trigger="pool_exhausted")
+
     # ------------------------------------------------------------ triggering
 
     def request_rotation(
